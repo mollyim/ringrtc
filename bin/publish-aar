@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -e
+
+BIN_DIR="$(realpath -e $(dirname $0))"
+. "${BIN_DIR}/env.sh"
+
+cd "${ANDROID_GRADLE_DIR}"
+
+./gradlew                                                   \
+    -PringrtcVersion="${PROJECT_VERSION}"                   \
+    -PbuildDir="${OUTPUT_DIR}/gradle"                       \
+    -PreleaseRingrtcLibDirs="['${BUILD_DIR}/release/libs']" \
+    -PreleaseOutputDir="['${BUILD_DIR}/release']"           \
+    uploadArchives
+

@@ -1,0 +1,44 @@
+name: Android CI
+
+on: [ push, pull_request ]
+
+jobs:
+  Build:
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up JDK 1.8
+      uses: actions/setup-java@v1
+      with:
+        java-version: '8.0.272'
+    - name: Validate Gradle Wrapper
+      uses: gradle/wrapper-validation-action@v1
+    - name: Install depot_tools
+      run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /opt/depot_tools
+          cd /opt/depot_tools
+          git checkout b674f8a27725216bd2201652636649d83064ca4a^{commit}
+          echo "/opt/depot_tools" >> "$GITHUB_PATH"
+    - name: Install Rust targets
+      run: rustup target add arm-linux-androideabi aarch64-linux-android x86_64-linux-android
+    - name: Remove unused packages
+      run: sudo rm -rf "$ANDROID_HOME"/{platforms,build-tools,extras}
+    - name: Prepare workspace for Android
+      run: ./bin/prepare-workspace android
+      env:
+        DEPOT_TOOLS_UPDATE: 0
+    - name: Build library
+      run: ./bin/build-aar --arch arm arm64 x64 --release-build
+      env:
+        ORG_GRADLE_PROJECT_ci: 1
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: ringrtc-aar
+        path: out/gradle/outputs/aar
+    - name: Publish AAR to GitHub Packages
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: ./bin/publish-aar
+      env:
+        ORG_GRADLE_PROJECT_ci: 1
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
