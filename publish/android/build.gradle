@@ -17,20 +17,19 @@ allprojects {
     }
 }
 
+def getCommitTag() {
+    return "git describe --tags --exact-match".execute().text.trim() ?: "untagged"
+}
+
 subprojects {
 
-    ext.version_number       = project.hasProperty("ringrtcVersion") ? ringrtcVersion : "0.0.1-SNAPSHOT"
-    ext.isReleaseVersion     = ext.version_number.indexOf("-") == -1;
+    ext.version_number       = project.hasProperty('ci') ? (getCommitTag() - ~/^v/) : (ringrtcVersion ?: "0.0.1-SNAPSHOT")
     ext.group_info           = "org.signal"
 
     ext.debug_jni_lib_dirs   = project.hasProperty("debugRingrtcLibDirs") ? Eval.me(debugRingrtcLibDirs) : []
     ext.debug_output_dir     = project.hasProperty("debugOutputDir") ? debugOutputDir : "/tmp"
     ext.release_jni_lib_dirs = project.hasProperty("releaseRingrtcLibDirs") ? Eval.me(releaseRingrtcLibDirs) : []
     ext.release_output_dir   = project.hasProperty("releaseOutputDir") ? releaseOutputDir : "/tmp"
-    ext.releaseRepoUrl       = project.hasProperty("sonatypeRepo") ? sonatypeRepo
-        : "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
-    ext.releaseRepoUsername  = project.hasProperty("signalSonatypeUsername") ? signalSonatypeUsername : ""
-    ext.releaseRepoPassword  = project.hasProperty("signalSonatypePassword") ? signalSonatypePassword : ""
 
     ext.proguard_file = rootDir.getAbsolutePath() + '/proguard-rules.pro'
 

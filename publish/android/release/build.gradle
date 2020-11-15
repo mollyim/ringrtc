@@ -1,6 +1,5 @@
 apply plugin: 'com.android.library'
-apply plugin: 'maven'
-apply plugin: 'signing'
+apply plugin: 'maven-publish'
 
 archivesBaseName = "ringrtc-android"
 version          = version_number
@@ -20,9 +19,9 @@ android {
         consumerProguardFiles proguard_file
     }
 
-    android.libraryVariants.all { variant ->
-        variant.outputs.all {
-            outputFileName =  "${archivesBaseName}-${version}.aar"
+    variantFilter { variant ->
+        if (variant.buildType.name.equals('debug')) {
+            variant.setIgnore(true)
         }
     }
 }
@@ -34,61 +33,57 @@ dependencies {
     testImplementation 'junit:junit:4.12'
 }
 
-signing {
-    required { isReleaseVersion && gradle.taskGraph.hasTask("uploadArchives") }
-    sign configurations.archives
-}
-
-uploadArchives {
-    configuration = configurations.archives
-    repositories.mavenDeployer {
-        beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
-
-        repository(url: releaseRepoUrl) {
-            authentication(userName: releaseRepoUsername, password: releaseRepoPassword)
-        }
-
-        pom.project {
-            name 'ringrtc-android'
-            packaging 'aar'
-            description 'RingRTC for Android'
-            url 'https://github.com/signalapp/ringrtc/'
-
-	    scm {
-	      url 'https://github.com/signalapp/ringrtc/'
-	      connection 'scm:git:git@github.com:signalapp/ringrtc.git'
-	      developerConnection 'scm:git:git@github.com:signalapp/ringrtc.git'
-	    }
-
-            licenses {
-                license {
-                    name 'GPL-3.0-only'
-                    url 'https://www.gnu.org/licenses/gpl-3.0.txt'
-                    distribution 'repo'
-                }
-            }
-
-            developers {
-                developer {
-                    name 'Curt Brune'
-                    organizationUrl 'https://www.signal.org/'
-                }
-                developer {
-                    name 'Jim Gustafson'
-                    organizationUrl 'https://www.signal.org/'
-                }
-            }
-        }
-    }
-}
-
-task installArchives(type: Upload) {
-    description "Installs the artifacts to the local Maven repository."
-    configuration = configurations['archives']
+publishing {
     repositories {
-        mavenDeployer {
-            repository url: "file://${System.properties['user.home']}/.m2/repository"
+        mavenLocal()
+        maven {
+            name = 'GitHubPackages'
+            url = uri('https://maven.pkg.github.com/mollyim/ringrtc')
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
+
+    publications {
+        ringrtc(MavenPublication) {
+            groupId = 'im.molly'
+            artifactId = archivesBaseName
+
+            artifact("$buildDir/outputs/aar/${archivesBaseName}-release.aar")
+
+            pom {
+                name = archivesBaseName
+                description = 'RingRTC for Android'
+                url = 'https://github.com/mollyim/ringrtc/'
+
+                scm {
+                    url = 'scm:git@github.com:mollyim/ringrtc.git'
+                    connection = 'scm:git@github.com:mollyim/ringrtc.git'
+                    developerConnection = 'scm:git@github.com:mollyim/ringrtc.git'
+                }
+
+                licenses {
+                    license {
+                        name = 'GPLv3'
+                        url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+                        distribution = 'repo'
+                    }
+                }
+            }
         }
     }
 }
 
+tasks.withType(AbstractPublishToMaven) {
+    dependsOn release:assemble
+}
+
+task installArchives {
+    dependsOn publishRingrtcPublicationToMavenLocal
+}
+
+task uploadArchives {
+    dependsOn publishRingrtcPublicationToGitHubPackagesRepository
+}
