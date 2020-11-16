@@ -211,6 +211,7 @@ public class CallManager {
                       @NonNull VideoSink                      remoteSink,
                       @NonNull CameraControl                  camera,
                       @NonNull List<PeerConnection.IceServer> iceServers,
+                      @Nullable PeerConnection.ProxyInfo      proxyInfo,
                                boolean                        hideIp,
                                boolean                        enableCamera)
     throws CallException
@@ -228,6 +229,7 @@ public class CallManager {
                                               remoteSink,
                                               camera,
                                               iceServers,
+                                              proxyInfo,
                                               hideIp,
                                               certificate);
 
@@ -684,6 +686,7 @@ public class CallManager {
     MediaConstraints                constraints   = new MediaConstraints();
     PeerConnection.RTCConfiguration configuration = new PeerConnection.RTCConfiguration(callContext.iceServers);
 
+    configuration.proxyInfo = callContext.proxyInfo;
     configuration.bundlePolicy  = PeerConnection.BundlePolicy.MAXBUNDLE;
     configuration.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
     configuration.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
@@ -1013,6 +1016,7 @@ public class CallManager {
     @NonNull  public final  CameraControl                  cameraControl;
     /** ICE server list */
     @NonNull  public final  List<PeerConnection.IceServer> iceServers;
+    @Nullable public final  PeerConnection.ProxyInfo       proxyInfo;
     /** If true, use TURN servers */
               public final  boolean                        hideIp;
     @Nullable public final  VideoSource                    videoSource;
@@ -1026,6 +1030,7 @@ public class CallManager {
                        @NonNull VideoSink                      remoteSink,
                        @NonNull CameraControl                  camera,
                        @NonNull List<PeerConnection.IceServer> iceServers,
+                       @Nullable PeerConnection.ProxyInfo      proxyInfo,
                                 boolean                        hideIp,
                        @NonNull RtcCertificatePem              certificate) {
 
@@ -1035,6 +1040,7 @@ public class CallManager {
       this.remoteSink     = remoteSink;
       this.cameraControl  = camera;
       this.iceServers     = iceServers;
+      this.proxyInfo      = proxyInfo;
       this.hideIp         = hideIp;
       this.certificate    = certificate;
 
