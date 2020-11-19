@@ -54,7 +54,7 @@ publishing {
                 scm {
                     url = 'https://github.com/mollyim/ringrtc/'
                     connection = 'scm:git:git://github.com/mollyim/ringrtc.git'
-                    developerConnection = 'scm:git:git@github.com:valldrac/ringrtc.git'
+                    developerConnection = 'scm:git:git@github.com:mollyim/ringrtc.git'
                 }
 
                 licenses {
