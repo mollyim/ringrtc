@@ -10,8 +10,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use jni::objects::{GlobalRef, JObject, JValue};
-use jni::sys::{jint, jlong};
+use jni::objects::{AutoLocal, GlobalRef, JObject, JValue};
+use jni::sys::{jboolean, jint, jlong};
 use jni::{JNIEnv, JavaVM};
 
 use crate::android::error::AndroidError;
@@ -213,7 +213,7 @@ macro_rules! request_update_via_jni {
         let args = [jni_client_id.into()];
         let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
         if result.is_err() {
-            error!("{:?}", result.err());
+            error!("jni_call_method: {:?}", result.err());
         }
     }};
 }
@@ -238,7 +238,7 @@ macro_rules! handle_state_change_via_jni {
         let jni_call_manager = $self.jni_call_manager.as_obj();
         let jni_client_id = $id as jlong;
         let jni_state = match $self.java_enum(&env, $parent, $class, $state as jint) {
-            Ok(v) => v,
+            Ok(v) => AutoLocal::new(&env, v),
             Err(error) => {
                 error!("{:?}", error);
                 return;
@@ -248,10 +248,10 @@ macro_rules! handle_state_change_via_jni {
         const METHOD: &str = $method;
         const SIG: &str = $sig;
 
-        let args = [jni_client_id.into(), jni_state.into()];
+        let args = [jni_client_id.into(), jni_state.as_obj().into()];
         let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
         if result.is_err() {
-            error!("{:?}", result.err());
+            error!("jni_call_method: {:?}", result.err());
         }
     }};
 }
@@ -645,25 +645,34 @@ impl Platform for AndroidPlatform {
     }
 
     fn send_call_message(&self, recipient_uuid: Vec<u8>, message: Vec<u8>) -> Result<()> {
-        info!("send_call_message(): recipient_uuid: {:?}", recipient_uuid,);
+        info!("send_call_message():");
 
         let env = self.java_env()?;
         let jni_call_manager = self.jni_call_manager.as_obj();
 
-        let jni_recipient_uuid = JObject::from(env.byte_array_from_slice(&recipient_uuid)?);
-        let jni_message = JObject::from(env.byte_array_from_slice(&message)?);
+        // Set a frame capacity of min (5) + objects (2).
+        let capacity = (7) as i32;
+        env.with_local_frame(capacity, || {
+            let jni_recipient_uuid = JObject::from(env.byte_array_from_slice(&recipient_uuid)?);
+            let jni_message = JObject::from(env.byte_array_from_slice(&message)?);
 
-        const SEND_CALL_MESSAGE_METHOD: &str = "sendCallMessage";
-        const SEND_CALL_MESSAGE_SIG: &str = "([B[B)V";
+            const SEND_CALL_MESSAGE_METHOD: &str = "sendCallMessage";
+            const SEND_CALL_MESSAGE_SIG: &str = "([B[B)V";
 
-        let args = [jni_recipient_uuid.into(), jni_message.into()];
-        let _ = jni_call_method(
-            &env,
-            jni_call_manager,
-            SEND_CALL_MESSAGE_METHOD,
-            SEND_CALL_MESSAGE_SIG,
-            &args,
-        )?;
+            let args = [jni_recipient_uuid.into(), jni_message.into()];
+            let result = jni_call_method(
+                &env,
+                jni_call_manager,
+                SEND_CALL_MESSAGE_METHOD,
+                SEND_CALL_MESSAGE_SIG,
+                &args,
+            );
+            if result.is_err() {
+                error!("jni_call_method: {:?}", result.err());
+            }
+
+            Ok(JObject::null())
+        })?;
 
         Ok(())
     }
@@ -676,53 +685,77 @@ impl Platform for AndroidPlatform {
         headers: HashMap<String, String>,
         body: Option<Vec<u8>>,
     ) -> Result<()> {
-        info!(
-            "send_http_request(): request_id: {}, url: {}, method: {}",
-            request_id, url, method
-        );
+        info!("send_http_request(): request_id: {}", request_id);
 
         let env = self.java_env()?;
         let jni_call_manager = self.jni_call_manager.as_obj();
 
-        let jni_request_id = request_id as jlong;
-        let jni_url = JObject::from(env.new_string(url)?);
-        let jni_method = self.java_enum(&env, CALL_MANAGER_CLASS, "HttpMethod", method as i32)?;
+        // Set a frame capacity of min (5) + objects (4) + elements (N * 3 objects per element).
+        let capacity = (9 + headers.len() * 3) as i32;
+        env.with_local_frame(capacity, || {
+            let jni_request_id = request_id as jlong;
+            let jni_url = JObject::from(env.new_string(url)?);
+            let jni_method = match self.java_enum(&env, CALL_MANAGER_CLASS, "HttpMethod", method as i32) {
+                Ok(v) => v,
+                Err(error) => {
+                    error!("jni_method: {:?}", error);
+                    return Ok(JObject::null());
+                },
+            };
 
-        // create Java List<HttpHeader>
-        let http_header_class = self.class_cache.get_class(HTTP_HEADER_CLASS)?;
-        let jni_headers = jni_new_linked_list(&env)?;
-        for (name, value) in headers.iter() {
-            const HTTP_HEADER_CTOR_SIG: &str = "(Ljava/lang/String;Ljava/lang/String;)V";
-            let jni_name = JObject::from(env.new_string(name)?);
-            let jni_value = JObject::from(env.new_string(value)?);
-            let args = [jni_name.into(), jni_value.into()];
-            let http_header_obj = env.new_object(http_header_class, HTTP_HEADER_CTOR_SIG, &args)?;
-            jni_headers.add(http_header_obj)?;
-        }
+            // create Java List<HttpHeader>
+            let http_header_class = match self.class_cache.get_class(HTTP_HEADER_CLASS) {
+                Ok(v) => v,
+                Err(error) => {
+                    error!("http_header_class: {:?}", error);
+                    return Ok(JObject::null());
+                },
+            };
+            let jni_headers = match jni_new_linked_list(&env) {
+                Ok(v) => v,
+                Err(error) => {
+                    error!("jni_headers: {:?}", error);
+                    return Ok(JObject::null());
+                },
+            };
+            for (name, value) in headers.iter() {
+                const HTTP_HEADER_CTOR_SIG: &str = "(Ljava/lang/String;Ljava/lang/String;)V";
+                let jni_name = JObject::from(env.new_string(name)?);
+                let jni_value = JObject::from(env.new_string(value)?);
+                let args = [jni_name.into(), jni_value.into()];
+                let http_header_obj = env.new_object(http_header_class, HTTP_HEADER_CTOR_SIG, &args)?;
+                jni_headers.add(http_header_obj)?;
+            }
 
-        let jni_body = match body {
-            None => JObject::null(),
-            Some(body) => JObject::from(env.byte_array_from_slice(&body)?),
-        };
+            let jni_body = match body {
+                None => JObject::null(),
+                Some(body) => JObject::from(env.byte_array_from_slice(&body)?),
+            };
 
-        const SEND_HTTP_REQUEST_METHOD: &str = "sendHttpRequest";
-        const SEND_HTTP_REQUEST_SIG: &str =
-            "(JLjava/lang/String;Lorg/signal/ringrtc/CallManager$HttpMethod;Ljava/util/List;[B)V";
+            const SEND_HTTP_REQUEST_METHOD: &str = "sendHttpRequest";
+            const SEND_HTTP_REQUEST_SIG: &str =
+                "(JLjava/lang/String;Lorg/signal/ringrtc/CallManager$HttpMethod;Ljava/util/List;[B)V";
 
-        let args = [
-            jni_request_id.into(),
-            jni_url.into(),
-            jni_method.into(),
-            JObject::from(jni_headers).into(),
-            jni_body.into(),
-        ];
-        let _ = jni_call_method(
-            &env,
-            jni_call_manager,
-            SEND_HTTP_REQUEST_METHOD,
-            SEND_HTTP_REQUEST_SIG,
-            &args,
-        )?;
+            let args = [
+                jni_request_id.into(),
+                jni_url.into(),
+                jni_method.into(),
+                JObject::from(jni_headers).into(),
+                jni_body.into(),
+            ];
+            let result = jni_call_method(
+                &env,
+                jni_call_manager,
+                SEND_HTTP_REQUEST_METHOD,
+                SEND_HTTP_REQUEST_SIG,
+                &args,
+            );
+            if result.is_err() {
+                error!("jni_call_method: {:?}", result.err());
+            }
+
+            Ok(JObject::null())
+        })?;
 
         Ok(())
     }
@@ -838,11 +871,113 @@ impl Platform for AndroidPlatform {
 
     // Group Calls
 
+    fn handle_peek_response(
+        &self,
+        request_id: u32,
+        joined_members: &[group_call::UserId],
+        creator: Option<group_call::UserId>,
+        era_id: Option<&str>,
+        max_devices: Option<u32>,
+        device_count: u32,
+    ) {
+        info!("handle_peek_response():");
+
+        let env = match self.java_env() {
+            Ok(v) => v,
+            Err(error) => {
+                error!("{:?}", error);
+                return;
+            }
+        };
+        let jni_call_manager = self.jni_call_manager.as_obj();
+
+        // Set a frame capacity of min (5) + objects (5) + elements (N * 1 object per element).
+        let capacity = (10 + joined_members.len()) as i32;
+        let _ = env.with_local_frame(capacity, || {
+            let jni_request_id = request_id as jlong;
+
+            let joined_member_list = match jni_new_linked_list(&env) {
+                Ok(v) => v,
+                Err(error) => {
+                    error!("{:?}", error);
+                    return Ok(JObject::null());
+                }
+            };
+
+            for joined_member in joined_members {
+                let jni_opaque_user_id = match env.byte_array_from_slice(&joined_member) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        continue;
+                    }
+                };
+
+                let result = joined_member_list.add(jni_opaque_user_id);
+                if result.is_err() {
+                    error!("{:?}", result.err());
+                    continue;
+                }
+            }
+
+            let jni_creator = match creator {
+                None => JObject::null(),
+                Some(creator) => match env.byte_array_from_slice(&creator) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        return Ok(JObject::null());
+                    }
+                },
+            };
+
+            let jni_era_id = match era_id {
+                None => JObject::null(),
+                Some(era_id) => match env.new_string(era_id) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        return Ok(JObject::null());
+                    }
+                },
+            };
+
+            let jni_max_devices = match self.get_optional_u32_long_object(&env, max_devices) {
+                Ok(v) => v,
+                Err(error) => {
+                    error!("{:?}", error);
+                    return Ok(JObject::null());
+                }
+            };
+
+            let jni_device_count = device_count as jlong;
+
+            const METHOD: &str = "handlePeekResponse";
+            const SIG: &str = "(JLjava/util/List;[BLjava/lang/String;Ljava/lang/Long;J)V";
+            let args = [
+                jni_request_id.into(),
+                JObject::from(joined_member_list).into(),
+                jni_creator.into(),
+                jni_era_id.into(),
+                jni_max_devices.into(),
+                jni_device_count.into(),
+            ];
+            let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
+            if result.is_err() {
+                error!("jni_call_method: {:?}", result.err());
+            }
+
+            Ok(JObject::null())
+        });
+    }
+
     fn request_membership_proof(&self, client_id: group_call::ClientId) {
+        info!("request_membership_proof():");
         request_update_via_jni!(self, "requestMembershipProof", client_id);
     }
 
     fn request_group_members(&self, client_id: group_call::ClientId) {
+        info!("request_group_members():");
         request_update_via_jni!(self, "requestGroupMembers", client_id);
     }
 
@@ -851,6 +986,7 @@ impl Platform for AndroidPlatform {
         client_id: group_call::ClientId,
         connection_state: group_call::ConnectionState,
     ) {
+        info!("handle_connection_state_changed():");
         handle_state_change_via_jni!(
             self,
             "handleConnectionStateChanged",
@@ -867,10 +1003,12 @@ impl Platform for AndroidPlatform {
         client_id: group_call::ClientId,
         join_state: group_call::JoinState,
     ) {
+        info!("handle_join_state_changed():");
+
         let join_state = match join_state {
             group_call::JoinState::NotJoined => 0,
             group_call::JoinState::Joining => 1,
-            group_call::JoinState::Joined(_) => 2,
+            group_call::JoinState::Joined(_, _) => 2,
         };
 
         handle_state_change_via_jni!(
@@ -889,6 +1027,8 @@ impl Platform for AndroidPlatform {
         client_id: group_call::ClientId,
         remote_device_states: &[group_call::RemoteDeviceState],
     ) {
+        info!("handle_remote_devices_changed():");
+
         let env = match self.java_env() {
             Ok(v) => v,
             Err(error) => {
@@ -897,122 +1037,106 @@ impl Platform for AndroidPlatform {
             }
         };
         let jni_call_manager = self.jni_call_manager.as_obj();
-        let jni_client_id = client_id as jlong;
 
-        // create Java List<GroupCall.RemoteDeviceState>
-        let remote_device_state_class = match self.class_cache.get_class(REMOTE_DEVICE_STATE_CLASS)
-        {
-            Ok(v) => v,
-            Err(error) => {
-                error!("{:?}", error);
-                return;
-            }
-        };
+        // Set a frame capacity of min (5) + objects (2) + elements (N * 2 object per element).
+        let capacity = (7 + remote_device_states.len() * 2) as i32;
+        let _ = env.with_local_frame(capacity, || {
+            let jni_client_id = client_id as jlong;
 
-        let remote_device_state_list = match jni_new_linked_list(&env) {
-            Ok(v) => v,
-            Err(error) => {
-                error!("{:?}", error);
-                return;
-            }
-        };
-
-        for remote_device_state in remote_device_states {
-            const REMOTE_DEVICE_STATE_CTOR_SIG: &str = "(J[BLjava/lang/Boolean;Ljava/lang/Boolean;Ljava/lang/Integer;Ljava/lang/Float;Ljava/lang/Integer;)V";
-
-            let jni_demux_id = remote_device_state.demux_id as jlong;
-
-            let jni_user_id_byte_array =
-                match env.byte_array_from_slice(&remote_device_state.user_id) {
-                    Ok(v) => JObject::from(v),
-                    Err(error) => {
-                        error!("{:?}", error);
-                        continue;
-                    }
-                };
-            let jni_audio_muted =
-                match self.get_optional_boolean_object(&env, remote_device_state.audio_muted) {
+            // create Java List<GroupCall.RemoteDeviceState>
+            let remote_device_state_class =
+                match self.class_cache.get_class(REMOTE_DEVICE_STATE_CLASS) {
                     Ok(v) => v,
                     Err(error) => {
                         error!("{:?}", error);
-                        continue;
+                        return Ok(JObject::null());
                     }
                 };
-            let jni_video_muted =
-                match self.get_optional_boolean_object(&env, remote_device_state.video_muted) {
-                    Ok(v) => v,
-                    Err(error) => {
-                        error!("{:?}", error);
-                        continue;
-                    }
-                };
-            let jni_speaker_index = match self
-                .get_optional_u16_integer_object(&env, remote_device_state.speaker_index)
-            {
+
+            let remote_device_state_list = match jni_new_linked_list(&env) {
                 Ok(v) => v,
                 Err(error) => {
                     error!("{:?}", error);
-                    continue;
+                    return Ok(JObject::null());
                 }
             };
-            let jni_video_aspect_ratio = match self
-                .get_optional_float_object(&env, remote_device_state.video_aspect_ratio)
-            {
-                Ok(v) => v,
-                Err(error) => {
-                    error!("{:?}", error);
-                    continue;
-                }
-            };
-            let jni_audio_level =
-                match self.get_optional_u16_integer_object(&env, remote_device_state.audio_level) {
+
+            for remote_device_state in remote_device_states {
+                const REMOTE_DEVICE_STATE_CTOR_SIG: &str =
+                    "(J[BZLjava/lang/Boolean;Ljava/lang/Boolean;JJ)V";
+
+                let jni_demux_id = remote_device_state.demux_id as jlong;
+                let jni_user_id_byte_array =
+                    match env.byte_array_from_slice(&remote_device_state.user_id) {
+                        Ok(v) => JObject::from(v),
+                        Err(error) => {
+                            error!("jni_user_id_byte_array: {:?}", error);
+                            continue;
+                        }
+                    };
+                let jni_media_keys_received = remote_device_state.media_keys_received as jboolean;
+                let jni_audio_muted =
+                    match self.get_optional_boolean_object(&env, remote_device_state.audio_muted) {
+                        Ok(v) => v,
+                        Err(error) => {
+                            error!("jni_audio_muted: {:?}", error);
+                            continue;
+                        }
+                    };
+                let jni_video_muted =
+                    match self.get_optional_boolean_object(&env, remote_device_state.video_muted) {
+                        Ok(v) => v,
+                        Err(error) => {
+                            error!("jni_video_muted: {:?}", error);
+                            continue;
+                        }
+                    };
+                let jni_added_time = remote_device_state.added_time_as_unix_millis() as jlong;
+                let jni_speaker_time = remote_device_state.speaker_time_as_unix_millis() as jlong;
+
+                let args = [
+                    jni_demux_id.into(),
+                    jni_user_id_byte_array.into(),
+                    jni_media_keys_received.into(),
+                    jni_audio_muted.into(),
+                    jni_video_muted.into(),
+                    jni_added_time.into(),
+                    jni_speaker_time.into(),
+                ];
+
+                let remote_device_state_obj = match env.new_object(
+                    remote_device_state_class,
+                    REMOTE_DEVICE_STATE_CTOR_SIG,
+                    &args,
+                ) {
                     Ok(v) => v,
                     Err(error) => {
-                        error!("{:?}", error);
+                        error!("remote_device_state_obj: {:?}", error);
                         continue;
                     }
                 };
+
+                let result = remote_device_state_list.add(remote_device_state_obj);
+                if result.is_err() {
+                    error!("remote_device_state_list.add: {:?}", result.err());
+                    continue;
+                }
+            }
+
+            const METHOD: &str = "handleRemoteDevicesChanged";
+            const SIG: &str = "(JLjava/util/List;)V";
 
             let args = [
-                jni_demux_id.into(),
-                jni_user_id_byte_array.into(),
-                jni_audio_muted.into(),
-                jni_video_muted.into(),
-                jni_speaker_index.into(),
-                jni_video_aspect_ratio.into(),
-                jni_audio_level.into(),
+                jni_client_id.into(),
+                JObject::from(remote_device_state_list).into(),
             ];
-
-            let remote_device_state_obj = match env.new_object(
-                remote_device_state_class,
-                REMOTE_DEVICE_STATE_CTOR_SIG,
-                &args,
-            ) {
-                Ok(v) => v,
-                Err(error) => {
-                    error!("{:?}", error);
-                    continue;
-                }
-            };
-
-            let result = remote_device_state_list.add(remote_device_state_obj);
+            let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
             if result.is_err() {
-                error!("{:?}", result.err());
-                continue;
+                error!("jni_call_method: {:?}", result.err());
             }
-        }
 
-        const METHOD: &str = "handleRemoteDevicesChanged";
-        const SIG: &str = "(JLjava/util/List;)V";
-
-        let args = [
-            jni_client_id.into(),
-            JObject::from(remote_device_state_list).into(),
-        ];
-        let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
-        if result.is_err() {
-            error!("{:?}", result.err());
-        }
+            Ok(JObject::null())
+        });
     }
 
     fn handle_incoming_video_track(
@@ -1021,6 +1145,8 @@ impl Platform for AndroidPlatform {
         remote_demux_id: group_call::DemuxId,
         incoming_video_track: VideoTrack,
     ) {
+        info!("handle_incoming_video_track():");
+
         let env = match self.java_env() {
             Ok(v) => v,
             Err(error) => {
@@ -1029,6 +1155,7 @@ impl Platform for AndroidPlatform {
             }
         };
         let jni_call_manager = self.jni_call_manager.as_obj();
+
         let jni_client_id = client_id as jlong;
         let jni_remote_demux_id = remote_demux_id as jlong;
         let jni_native_video_track = incoming_video_track.rffi() as jlong;
@@ -1043,15 +1170,21 @@ impl Platform for AndroidPlatform {
         ];
         let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
         if result.is_err() {
-            error!("{:?}", result.err());
+            error!("jni_call_method: {:?}", result.err());
         }
     }
 
-    fn handle_joined_members_changed(
+    fn handle_peek_changed(
         &self,
         client_id: group_call::ClientId,
         joined_members: &[group_call::UserId],
+        creator: Option<group_call::UserId>,
+        era_id: Option<&str>,
+        max_devices: Option<u32>,
+        device_count: u32,
     ) {
+        info!("handle_peek_changed():");
+
         let env = match self.java_env() {
             Ok(v) => v,
             Err(error) => {
@@ -1060,46 +1193,90 @@ impl Platform for AndroidPlatform {
             }
         };
         let jni_call_manager = self.jni_call_manager.as_obj();
-        let jni_client_id = client_id as jlong;
 
-        let joined_member_list = match jni_new_linked_list(&env) {
-            Ok(v) => v,
-            Err(error) => {
-                error!("{:?}", error);
-                return;
-            }
-        };
+        // Set a frame capacity of min (5) + objects (5) + elements (N * 1 object per element).
+        let capacity = (10 + joined_members.len()) as i32;
+        let _ = env.with_local_frame(capacity, || {
+            let jni_client_id = client_id as jlong;
 
-        for joined_member in joined_members {
-            let jni_opaque_user_id = match env.byte_array_from_slice(&joined_member) {
-                Ok(v) => JObject::from(v),
+            let joined_member_list = match jni_new_linked_list(&env) {
+                Ok(v) => v,
                 Err(error) => {
                     error!("{:?}", error);
-                    continue;
+                    return Ok(JObject::null());
                 }
             };
 
-            let result = joined_member_list.add(jni_opaque_user_id);
-            if result.is_err() {
-                error!("{:?}", result.err());
-                continue;
+            for joined_member in joined_members {
+                let jni_opaque_user_id = match env.byte_array_from_slice(&joined_member) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        continue;
+                    }
+                };
+
+                let result = joined_member_list.add(jni_opaque_user_id);
+                if result.is_err() {
+                    error!("{:?}", result.err());
+                    continue;
+                }
             }
-        }
 
-        const METHOD: &str = "handleJoinedMembersChanged";
-        const SIG: &str = "(JLjava/util/List;)V";
+            let jni_creator = match creator {
+                None => JObject::null(),
+                Some(creator) => match env.byte_array_from_slice(&creator) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        return Ok(JObject::null());
+                    }
+                },
+            };
 
-        let args = [
-            jni_client_id.into(),
-            JObject::from(joined_member_list).into(),
-        ];
-        let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
-        if result.is_err() {
-            error!("{:?}", result.err());
-        }
+            let jni_era_id = match era_id {
+                None => JObject::null(),
+                Some(era_id) => match env.new_string(era_id) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        return Ok(JObject::null());
+                    }
+                },
+            };
+
+            let jni_max_devices = match self.get_optional_u32_long_object(&env, max_devices) {
+                Ok(v) => v,
+                Err(error) => {
+                    error!("{:?}", error);
+                    return Ok(JObject::null());
+                }
+            };
+
+            let jni_device_count = device_count as jlong;
+
+            const METHOD: &str = "handlePeekChanged";
+            const SIG: &str = "(JLjava/util/List;[BLjava/lang/String;Ljava/lang/Long;J)V";
+            let args = [
+                jni_client_id.into(),
+                JObject::from(joined_member_list).into(),
+                jni_creator.into(),
+                jni_era_id.into(),
+                jni_max_devices.into(),
+                jni_device_count.into(),
+            ];
+            let result = jni_call_method(&env, jni_call_manager, METHOD, SIG, &args);
+            if result.is_err() {
+                error!("jni_call_method: {:?}", result.err());
+            }
+
+            Ok(JObject::null())
+        });
     }
 
     fn handle_ended(&self, client_id: group_call::ClientId, reason: group_call::EndReason) {
+        info!("handle_ended():");
+
         // We can treat ended as a state, since it is just an i32 value.
         handle_state_change_via_jni!(
             self,
@@ -1129,8 +1306,9 @@ impl AndroidPlatform {
             HTTP_HEADER_CLASS,
             REMOTE_DEVICE_STATE_CLASS,
             "java/lang/Boolean",
-            "java/lang/Integer",
             "java/lang/Float",
+            "java/lang/Integer",
+            "java/lang/Long",
         ] {
             class_cache.add_class(env, class)?;
         }
@@ -1224,54 +1402,20 @@ impl AndroidPlatform {
         }
     }
 
-    // To convert optional u16 to Java Integer.
-    fn get_optional_u16_integer_object<'a>(
+    // Converts Option<u32> to a Java Long.
+    fn get_optional_u32_long_object<'a>(
         &'a self,
         env: &'a JNIEnv,
-        value: Option<u16>,
+        value: Option<u32>,
     ) -> Result<JObject<'a>> {
         match value {
             None => Ok(JObject::null()),
             Some(value) => {
-                let class = match self.class_cache.get_class("java/lang/Integer") {
+                let class = match self.class_cache.get_class("java/lang/Long") {
                     Ok(v) => v,
                     Err(_) => {
                         return Err(AndroidError::JniGetLangClassNotFound(
-                            "java/lang/Integer".to_string(),
-                        )
-                        .into());
-                    }
-                };
-
-                let jni_object =
-                    match env.new_object(class, "(I)V", &[JValue::Int(value as jni::sys::jint)]) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            return Err(AndroidError::JniNewLangObjectFailed(
-                                "java/lang/Integer".to_string(),
-                            )
-                            .into());
-                        }
-                    };
-
-                Ok(jni_object)
-            }
-        }
-    }
-
-    fn get_optional_float_object<'a>(
-        &'a self,
-        env: &'a JNIEnv,
-        value: Option<f32>,
-    ) -> Result<JObject<'a>> {
-        match value {
-            None => Ok(JObject::null()),
-            Some(value) => {
-                let class = match self.class_cache.get_class("java/lang/Float") {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return Err(AndroidError::JniGetLangClassNotFound(
-                            "java/lang/Float".to_string(),
+                            "java/lang/Long".to_string(),
                         )
                         .into());
                     }
@@ -1279,13 +1423,13 @@ impl AndroidPlatform {
 
                 let jni_object = match env.new_object(
                     class,
-                    "(F)V",
-                    &[JValue::Float(value as jni::sys::jfloat)],
+                    "(J)V",
+                    &[JValue::Long(value as jni::sys::jlong)],
                 ) {
                     Ok(v) => v,
                     Err(_) => {
                         return Err(AndroidError::JniNewLangObjectFailed(
-                            "java/lang/Float".to_string(),
+                            "java/lang/Long".to_string(),
                         )
                         .into());
                     }

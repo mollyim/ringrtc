@@ -35,6 +35,8 @@ import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 import org.webrtc.VideoSink;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.List;
@@ -49,9 +51,11 @@ public class CallManager {
 
   @NonNull
   private static final String                     TAG = CallManager.class.getSimpleName();
+
   private static       boolean                    isInitialized;
 
   private              long                       nativeCallManager;
+
   @NonNull
   private              Observer                   observer;
 
@@ -59,6 +63,12 @@ public class CallManager {
   // and will fit in to the long type.
   @NonNull
   private              LongSparseArray<GroupCall> groupCallByClientId;
+
+  @NonNull
+  private              Requests<PeekInfo>         peekInfoRequests;
+
+  @Nullable
+  private              PeerConnectionFactory      groupFactory;
 
   static {
     if (Build.VERSION.SDK_INT < 21) {
@@ -115,6 +125,65 @@ public class CallManager {
     }
   }
 
+  class PeerConnectionFactoryOptions extends PeerConnectionFactory.Options {
+    public PeerConnectionFactoryOptions() {
+      // Give the (native default) behavior of filtering out loopback addresses.
+      // See https://source.chromium.org/chromium/chromium/src/+/master:third_party/webrtc/rtc_base/network.h;l=47?q=.networkIgnoreMask&ss=chromium
+      this.networkIgnoreMask = 1 << 4;
+    }
+  }
+
+  private PeerConnectionFactory createPeerConnectionFactory(@NonNull EglBase eglBase) {
+    Set<String> HARDWARE_ENCODING_BLACKLIST = new HashSet<String>() {{
+      // Samsung S6 with Exynos 7420 SoC
+      add("SM-G920F");
+      add("SM-G920FD");
+      add("SM-G920FQ");
+      add("SM-G920I");
+      add("SM-G920A");
+      add("SM-G920T");
+
+      // Samsung S7 with Exynos 8890 SoC
+      add("SM-G930F");
+      add("SM-G930FD");
+      add("SM-G930W8");
+      add("SM-G930S");
+      add("SM-G930K");
+      add("SM-G930L");
+
+      // Samsung S7 Edge with Exynos 8890 SoC
+      add("SM-G935F");
+      add("SM-G935FD");
+      add("SM-G935W8");
+      add("SM-G935S");
+      add("SM-G935K");
+      add("SM-G935L");
+
+      // Samsung A3 with Exynos 7870 SoC
+      add("SM-A320F");
+      add("SM-A320FL");
+      add("SM-A320F/DS");
+      add("SM-A320Y/DS");
+      add("SM-A320Y");
+    }};
+
+    VideoEncoderFactory encoderFactory;
+
+    if (HARDWARE_ENCODING_BLACKLIST.contains(Build.MODEL)) {
+      encoderFactory = new SoftwareVideoEncoderFactory();
+    } else {
+      encoderFactory = new DefaultVideoEncoderFactory(eglBase.getEglBaseContext(), true, true);
+    }
+
+    VideoDecoderFactory decoderFactory = new DefaultVideoDecoderFactory(eglBase.getEglBaseContext());
+
+    return PeerConnectionFactory.builder()
+            .setOptions(new PeerConnectionFactoryOptions())
+            .setVideoEncoderFactory(encoderFactory)
+            .setVideoDecoderFactory(decoderFactory)
+            .createPeerConnectionFactory();
+  }
+
   private void checkCallManagerExists() {
     if (nativeCallManager == 0) {
       throw new IllegalStateException("CallManager has been disposed");
@@ -127,6 +196,7 @@ public class CallManager {
     this.observer            = observer;
     this.nativeCallManager   = 0;
     this.groupCallByClientId = new LongSparseArray<>();
+    this.peekInfoRequests    = new Requests();
   }
 
   @Nullable
@@ -146,7 +216,6 @@ public class CallManager {
       Log.w(TAG, "Unable to create Call Manager");
       return null;
     }
-
   }
 
   /**
@@ -160,6 +229,16 @@ public class CallManager {
     checkCallManagerExists();
 
     Log.i(TAG, "close():");
+
+    if (this.groupCallByClientId != null &&
+        this.groupCallByClientId.size() > 0) {
+      Log.w(TAG, "Closing CallManager but groupCallByClientId still has objects");
+    }
+
+    if (this.groupFactory != null) {
+      this.groupFactory.dispose();
+    }
+
     ringrtcClose(nativeCallManager);
     nativeCallManager = 0;
   }
@@ -170,7 +249,7 @@ public class CallManager {
    *
    * @param remote         remote side fo the call
    * @param callMediaType  used to specify origination as an audio or video call
-   * @param localDevice    the local deviceId of the client
+   * @param localDeviceId  the local deviceId of the client
    *
    * @throws CallException for native code failures
    *
@@ -220,11 +299,14 @@ public class CallManager {
 
     Log.i(TAG, "proceed(): callId: " + callId + ", hideIp: " + hideIp);
 
+    PeerConnectionFactory factory = this.createPeerConnectionFactory(eglBase);
+
     // Defaults to ECDSA, which should be fast.
     RtcCertificatePem certificate = RtcCertificatePem.generateCertificate();
+
     CallContext callContext = new CallContext(callId,
                                               context,
-                                              eglBase,
+                                              factory,
                                               localSink,
                                               remoteSink,
                                               camera,
@@ -533,23 +615,6 @@ public class CallManager {
 
   /**
    *
-   */
-  public GroupCall createGroupCall(@NonNull byte[]             groupId,
-                                   @NonNull EglBase            eglBase,
-                                   @NonNull GroupCall.Observer observer)
-  {
-    checkCallManagerExists();
-
-    GroupCall groupCall = new GroupCall(nativeCallManager, groupId, eglBase, observer);
-
-    // Add the groupCall to the map.
-    this.groupCallByClientId.append(groupCall.clientId, groupCall);
-
-    return groupCall;
-  }
-
-  /**
-   *
    * Indication from application to accept the active call.
    *
    * @param callId  callId for the call
@@ -659,6 +724,95 @@ public class CallManager {
     ringrtcHangup(nativeCallManager);
   }
 
+  // Group Calls
+
+  public interface ResponseHandler<T> {
+    void handleResponse(T response);
+  }
+
+  static class Requests<T> {
+    private long nextId = 1;
+    @NonNull private LongSparseArray<ResponseHandler<T>> handlerById = new LongSparseArray();
+  
+    long add(ResponseHandler<T> handler) {
+      long id = this.nextId++;
+      this.handlerById.put(id, handler);
+      return id;
+    }
+
+    boolean resolve(long id, T response) {
+      ResponseHandler<T> handler = this.handlerById.get(id);
+      if (handler == null) {
+        return false;
+      }
+      handler.handleResponse(response);
+      this.handlerById.delete(id);
+      return true;
+    }
+  }
+
+  /**
+   *
+   */
+  public void peekGroupCall(@NonNull String                                sfuUrl,
+                            @NonNull byte[]                                membershipProof,
+                            @NonNull Collection<GroupCall.GroupMemberInfo> groupMembers,
+                            @NonNull ResponseHandler<PeekInfo>             handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+
+    Log.i(TAG, "peekGroupCall():");
+
+    // Convert each userId UUID to a userIdByteArray.
+    for (GroupCall.GroupMemberInfo member : groupMembers) {
+      member.userIdByteArray = Util.getBytesFromUuid(member.userId);
+    }
+
+    long requestId = this.peekInfoRequests.add(handler);
+    ringrtcPeekGroupCall(nativeCallManager, requestId, sfuUrl, membershipProof, new ArrayList<>(groupMembers));
+  }
+
+  /**
+   * Creates and returns a GroupCall object.
+   *
+   * If there is any error when allocating resources for the object,
+   * null is returned.
+   */
+  public GroupCall createGroupCall(@NonNull byte[]             groupId,
+                                   @NonNull String             sfuUrl,
+                                   @NonNull EglBase            eglBase,
+                                   @NonNull GroupCall.Observer observer)
+  {
+    checkCallManagerExists();
+
+    if (this.groupFactory == null) {
+      // The first GroupCall object will create a factory that will be re-used.
+      this.groupFactory = this.createPeerConnectionFactory(eglBase);
+      if (this.groupFactory == null) {
+        Log.e(TAG, "createPeerConnectionFactory failed");
+        return null;
+      }
+    }
+
+    GroupCall groupCall = new GroupCall(nativeCallManager, groupId, sfuUrl, this.groupFactory, observer);
+
+    if (groupCall.clientId != 0) {
+      // Add the groupCall to the map.
+      this.groupCallByClientId.append(groupCall.clientId, groupCall);
+
+      return groupCall;
+    } else {
+      try {
+        groupCall.dispose();
+      } catch (CallException e) {
+        Log.e(TAG, "Unable to properly dispose of GroupCall", e);
+      }
+
+      return null;
+    }
+  }
+
   /****************************************************************************
    *
    * Below are only called by the native CM
@@ -703,7 +857,7 @@ public class CallManager {
       constraints.optional.add(new MediaConstraints.KeyValuePair("DtlsSrtpKeyAgreement", "true"));
     }
 
-    PeerConnectionFactory factory       = callContext.peerConnectionFactory;
+    PeerConnectionFactory factory       = callContext.factory;
     CameraControl         cameraControl = callContext.cameraControl;
     try {
       long nativePeerConnection = ringrtcCreatePeerConnection(factory.getNativeOwnedFactoryAndThreads(),
@@ -895,6 +1049,27 @@ public class CallManager {
   // Group Calls
 
   @CalledByNative
+  private void handlePeekResponse(long requestId, List<byte[]> joinedMembers, @Nullable byte[] creator, @Nullable String eraId, @Nullable Long maxDevices, long deviceCount) {
+    if (joinedMembers != null) {
+      Log.i(TAG, "handlePeekResponse(): joinedMembers.size = " + joinedMembers.size());
+    } else {
+      Log.i(TAG, "handlePeekResponse(): joinedMembers is null");
+    }
+
+    // Create the collection, converting each provided byte[] to a UUID.
+    Collection<UUID> joinedGroupMembers = new ArrayList<UUID>();
+    for (byte[] joinedMember : joinedMembers) {
+        joinedGroupMembers.add(Util.getUuidFromBytes(joinedMember));
+    }
+
+    PeekInfo info = new PeekInfo(joinedGroupMembers, creator == null ? null : Util.getUuidFromBytes(creator), eraId, maxDevices, deviceCount);
+
+    if (!this.peekInfoRequests.resolve(requestId, info)) {
+      Log.w(TAG, "Invalid requestId for handlePeekResponse: " + requestId);
+    }
+  }
+
+  @CalledByNative
   private void requestMembershipProof(long clientId) {
     Log.i(TAG, "requestMembershipProof():");
 
@@ -948,7 +1123,11 @@ public class CallManager {
 
   @CalledByNative
   private void handleRemoteDevicesChanged(long clientId, List<GroupCall.RemoteDeviceState> remoteDeviceStates) {
-    Log.i(TAG, "handleRemoteDevicesChanged():");
+    if (remoteDeviceStates != null) {
+      Log.i(TAG, "handleRemoteDevicesChanged(): remoteDeviceStates.size = " + remoteDeviceStates.size());
+    } else {
+      Log.i(TAG, "handleRemoteDevicesChanged(): remoteDeviceStates is null!");
+    }
 
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
     if (groupCall == null) {
@@ -973,8 +1152,12 @@ public class CallManager {
   }
 
   @CalledByNative
-  private void handleJoinedMembersChanged(long clientId, List<byte[]> members) {
-    Log.i(TAG, "handleJoinedMembersChanged():");
+  private void handlePeekChanged(long clientId, List<byte[]> joinedMembers, @Nullable byte[] creator, @Nullable String eraId, @Nullable Long maxDevices, long deviceCount) {
+    if (joinedMembers != null) {
+      Log.i(TAG, "handlePeekChanged(): joinedMembers.size = " + joinedMembers.size());
+    } else {
+      Log.i(TAG, "handlePeekChanged(): joinedMembers is null");
+    }
 
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
     if (groupCall == null) {
@@ -982,7 +1165,15 @@ public class CallManager {
       return;
     }
 
-    groupCall.handleJoinedMembersChanged(members);
+    // Create the collection, converting each provided byte[] to a UUID.
+    Collection<UUID> joinedGroupMembers = new ArrayList<UUID>();
+    for (byte[] joinedMember : joinedMembers) {
+        joinedGroupMembers.add(Util.getUuidFromBytes(joinedMember));
+    }
+
+    PeekInfo info = new PeekInfo(joinedGroupMembers, creator == null ? null : Util.getUuidFromBytes(creator), eraId, maxDevices, deviceCount);
+
+    groupCall.handlePeekChanged(info);
   }
 
   @CalledByNative
@@ -996,6 +1187,7 @@ public class CallManager {
     }
 
     this.groupCallByClientId.delete(clientId);
+
     groupCall.handleEnded(reason);
   }
 
@@ -1009,7 +1201,7 @@ public class CallManager {
     /** CallId */
     @NonNull  public final  CallId                         callId;
     /** Connection factory */
-    @NonNull  public final  PeerConnectionFactory          peerConnectionFactory;
+    @NonNull  public final  PeerConnectionFactory          factory;
     /** Remote camera surface renderer */
     @NonNull  public final  VideoSink                      remoteSink;
     /** Camera controller */
@@ -1025,7 +1217,7 @@ public class CallManager {
 
     public CallContext(@NonNull CallId                         callId,
                        @NonNull Context                        context,
-                       @NonNull EglBase                        eglBase,
+                       @NonNull PeerConnectionFactory          factory,
                        @NonNull VideoSink                      localSink,
                        @NonNull VideoSink                      remoteSink,
                        @NonNull CameraControl                  camera,
@@ -1036,62 +1228,21 @@ public class CallManager {
 
       Log.i(TAG, "ctor(): " + callId);
 
-      this.callId         = callId;
-      this.remoteSink     = remoteSink;
-      this.cameraControl  = camera;
-      this.iceServers     = iceServers;
+      this.callId        = callId;
+      this.factory       = factory;
+      this.remoteSink    = remoteSink;
+      this.cameraControl = camera;
+      this.iceServers    = iceServers;
       this.proxyInfo      = proxyInfo;
-      this.hideIp         = hideIp;
-      this.certificate    = certificate;
-
-      Set<String> HARDWARE_ENCODING_BLACKLIST = new HashSet<String>() {{
-         // Samsung S6 with Exynos 7420 SoC
-         add("SM-G920F");
-         add("SM-G920FD");
-         add("SM-G920FQ");
-         add("SM-G920I");
-         add("SM-G920A");
-         add("SM-G920T");
-
-         // Samsung S7 with Exynos 8890 SoC
-         add("SM-G930F");
-         add("SM-G930FD");
-         add("SM-G930W8");
-         add("SM-G930S");
-         add("SM-G930K");
-         add("SM-G930L");
-
-         // Samsung S7 Edge with Exynos 8890 SoC
-         add("SM-G935F");
-         add("SM-G935FD");
-         add("SM-G935W8");
-         add("SM-G935S");
-         add("SM-G935K");
-         add("SM-G935L");
-      }};
-
-      VideoEncoderFactory encoderFactory;
-
-      if (HARDWARE_ENCODING_BLACKLIST.contains(Build.MODEL)) {
-        encoderFactory = new SoftwareVideoEncoderFactory();
-      } else {
-        encoderFactory = new DefaultVideoEncoderFactory(eglBase.getEglBaseContext(), true, true);
-      }
-
-      VideoDecoderFactory decoderFactory = new DefaultVideoDecoderFactory(eglBase.getEglBaseContext());
-
-      this.peerConnectionFactory = PeerConnectionFactory.builder()
-        .setOptions(new PeerConnectionFactoryOptions())
-        .setVideoEncoderFactory(encoderFactory)
-        .setVideoDecoderFactory(decoderFactory)
-        .createPeerConnectionFactory();
+      this.hideIp        = hideIp;
+      this.certificate   = certificate;
 
       // Create a video track that will be shared across all
       // connection objects.  It must be disposed manually.
       if (cameraControl.hasCapturer()) {
-        this.videoSource = peerConnectionFactory.createVideoSource(false);
+        this.videoSource = factory.createVideoSource(false);
         // Note: This must stay "video1" to stay in sync with V4 signaling.
-        this.videoTrack  = peerConnectionFactory.createVideoTrack("video1", videoSource);
+        this.videoTrack  = factory.createVideoTrack("video1", videoSource);
         videoTrack.setEnabled(false);
 
         // Connect camera as the local video source.
@@ -1127,15 +1278,8 @@ public class CallManager {
         videoTrack.dispose();
       }
 
-      peerConnectionFactory.dispose();
+      factory.dispose();
     }
-
-    class PeerConnectionFactoryOptions extends PeerConnectionFactory.Options {
-      public PeerConnectionFactoryOptions() {
-        this.networkIgnoreMask = 1 << 4;
-      }
-    }
-
   }
 
   /**
@@ -1290,7 +1434,10 @@ public class CallManager {
     PUT,
 
     /**  */
-    POST;
+    POST,
+
+    /**  */
+    DELETE;
 
     @CalledByNative
     static HttpMethod fromNativeIndex(int nativeIndex) {
@@ -1419,11 +1566,11 @@ public class CallManager {
      *
      * A HTTP request should be sent to the given url.
      *
-     * @param requestId  
-     * @param url        
-     * @param method     
-     * @param headers    
-     * @param body       
+     * @param requestId
+     * @param url
+     * @param method
+     * @param headers
+     * @param body
      *
      */
     void onSendHttpRequest(long requestId, @NonNull String url, @NonNull HttpMethod method, @Nullable List<HttpHeader> headers, @Nullable byte[] body);
@@ -1585,5 +1732,13 @@ public class CallManager {
 
   private native
     void ringrtcClose(long nativeCallManager)
+    throws CallException;
+
+  private native
+    void ringrtcPeekGroupCall(         long                            nativeCallManager,
+                                       long                            requestId,
+                              @NonNull String                          sfuUrl,
+                              @NonNull byte[]                          membershipProof,
+                              @NonNull List<GroupCall.GroupMemberInfo> groupMembers)
     throws CallException;
 }

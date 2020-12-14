@@ -25,6 +25,11 @@ android {
             variant.setIgnore(true)
         }
     }
+
+    packagingOptions {
+        // Libraries are already stripped if necessary when linked.
+        doNotStrip "**/*.so"
+    }
 }
 
 dependencies {

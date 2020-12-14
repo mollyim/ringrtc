@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.8.7
+
+- Group Calling: Fix issue with video resolution requests
+
+## v2.8.6
+
+- Update Group Calling feature
+
+- Reference signalapp/webrtc@4183h
+
+## v2.8.5
+
+- Android: Improve stability for Group Calling
+
+## v2.8.4
+
+- Update Group Calling feature
+
+## v2.8.3
+
+- Update Group Calling feature
+
+## v2.8.2
+
+- Update Group Calling feature
+
+- Android: Add more devices to hardware encoder blacklist
+
+- Reference signalapp/webrtc@4183g
+
 ## v2.8.1
 
 - Electron: Fix video track setting

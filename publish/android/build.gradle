@@ -1,5 +1,8 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
+// Disable the stripping task itself because it can't distinguish between debug/release.
+project.gradle.startParameter.excludedTaskNames.add("stripDebugDebugSymbols")
+
 buildscript {
     repositories {
         jcenter()
@@ -28,9 +31,9 @@ subprojects {
     ext.group_info           = "org.signal"
 
     ext.debug_jni_lib_dirs   = project.hasProperty("debugRingrtcLibDirs") ? Eval.me(debugRingrtcLibDirs) : []
-    ext.debug_output_dir     = project.hasProperty("debugOutputDir") ? debugOutputDir : "/tmp"
+    ext.debug_output_dir     = project.hasProperty("debugOutputDir") ? debugOutputDir : "/tmp/debug"
     ext.release_jni_lib_dirs = project.hasProperty("releaseRingrtcLibDirs") ? Eval.me(releaseRingrtcLibDirs) : []
-    ext.release_output_dir   = project.hasProperty("releaseOutputDir") ? releaseOutputDir : "/tmp"
+    ext.release_output_dir   = project.hasProperty("releaseOutputDir") ? releaseOutputDir : "/tmp/release"
 
     ext.proguard_file = rootDir.getAbsolutePath() + '/proguard-rules.pro'
 
