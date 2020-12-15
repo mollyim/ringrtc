@@ -100,21 +100,9 @@ def ParseArgs():
                         help='Install to local maven repo')
     parser.add_argument('--install-dir',
                         help='Install to local directory')
-    parser.add_argument('--upload-sonatype-repo',
-                        help='Upload to remote sonatype repo')
-    parser.add_argument('--upload-sonatype-user',
-                        help='Upload to remote sonatype repo as user')
-    parser.add_argument('--upload-sonatype-password',
-                        help='Upload to remote sonatype repo using password')
-    parser.add_argument('--signing-keyid',
-                        help='''GPG keyId for signing key (8 character short form).
-                                See https://docs.gradle.org/current/userguide/signing_plugin.html''')
-    parser.add_argument('--signing-password',
-                        help='''GPG passphrase for signing key.
-                                See https://docs.gradle.org/current/userguide/signing_plugin.html''')
-    parser.add_argument('--signing-secret-keyring',
-                        help='''Absolute path to the secret key ring file containing signing key.
-                                See https://docs.gradle.org/current/userguide/signing_plugin.html''')
+    parser.add_argument('--publish',
+                        action='store_true',
+                        help='Publish to remote maven repo')
     parser.add_argument('--dry-run',
                         action='store_true',
                         help='Dry Run: print what would happen, but do not actually do anything')
@@ -250,8 +238,7 @@ def RunGradle(dry_run, args):
         subprocess.check_call(cmd)
 
 def CreateAar(dry_run, extra_gradle_args, version, gradle_dir,
-              sonatype_repo, sonatype_user, sonatype_password,
-              signing_keyid, signing_password, signing_secret_keyring,
+              publish,
               compile_only,
               install_local, install_dir, build_dir, archs,
               output, debug_build, release_build, unstripped,
@@ -273,26 +260,6 @@ def CreateAar(dry_run, extra_gradle_args, version, gradle_dir,
         '-PringrtcVersion={}'.format(version),
         '-PbuildDir={}'.format(gradle_build_dir),
     ]
-
-    if sonatype_repo is not None:
-        sonatype_args = [
-            '-PsonatypeRepo={}'.format(sonatype_repo),
-            '-PsignalSonatypeUsername={}'.format(sonatype_user),
-            '-PsignalSonatypePassword={}'.format(sonatype_password),
-        ]
-        gradle_args.extend(sonatype_args)
-
-    if signing_keyid is not None:
-        gradle_args.append(
-            '-Psigning.keyId={}'.format(signing_keyid))
-
-    if signing_password is not None:
-        gradle_args.append(
-            '-Psigning.password={}'.format(signing_password))
-
-    if signing_secret_keyring is not None:
-        gradle_args.append(
-            '-Psigning.secretKeyRingFile={}'.format(signing_secret_keyring))
 
     for build_type in build_types:
         if build_type == 'debug':
@@ -323,7 +290,7 @@ def CreateAar(dry_run, extra_gradle_args, version, gradle_dir,
     if install_local is True:
         gradle_args.append('installArchives')
 
-    if sonatype_repo is not None:
+    if publish is True:
         gradle_args.append('uploadArchives')
 
     gradle_args.extend(extra_gradle_args)
@@ -391,25 +358,13 @@ def main():
 
     os.chdir(os.path.abspath(args.webrtc_src_dir))
 
-    if args.upload_sonatype_repo is not None:
-        if args.debug_build is True or args.release_build is True:
-            print('ERROR: When uploading, must upload complete release and debug builds')
-            print('ERROR: You cannot specifiy either --release or --debug while uploading')
-            return 1
-
-        if args.upload_sonatype_user is None or args.upload_sonatype_password is None:
-            print('ERROR: If --upload-sonatype-repo argument set, then both --upload-sonatype-user and --upload-sonatype-password must also be set.')
-            return 1
-
-        if args.signing_keyid is None or \
-           args.signing_password is None or \
-           args.signing_secret_keyring is None:
-            print('ERROR: If --upload-sonatype-repo argument set, then all of --signing-keyid, --signing-password, and --signing-secret-keyring must also be set.')
+    if args.publish is True:
+        if args.release_build is False:
+            print('ERROR: When publishing, must complete the release build')
             return 1
 
     CreateAar(args.dry_run, args.extra_gradle_args, args.publish_version, args.gradle_dir,
-              args.upload_sonatype_repo, args.upload_sonatype_user, args.upload_sonatype_password,
-              args.signing_keyid, args.signing_password, args.signing_secret_keyring,
+              args.publish,
               args.compile_only,
               args.install_local, args.install_dir,
               build_dir, args.arch, args.output,

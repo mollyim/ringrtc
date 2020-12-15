@@ -22,7 +22,7 @@ jobs:
           echo "/opt/depot_tools" >> "$GITHUB_PATH"
     - name: Install Rust targets
       run: rustup target add arm-linux-androideabi aarch64-linux-android x86_64-linux-android
-    - name: Remove unused packages
+    - name: Free up disk space
       run: sudo rm -rf "$ANDROID_HOME"/{platforms,build-tools,extras}
     - name: Prepare workspace for Android
       run: ./bin/prepare-workspace android
@@ -39,7 +39,7 @@ jobs:
         path: out/gradle/outputs/aar
     - name: Publish package
       if: startsWith(github.ref, 'refs/tags/v')
-      run: ./bin/publish-aar
+      run: ./bin/build-aar --arch arm arm64 x64 --release-build --publish
       env:
         ORG_GRADLE_PROJECT_ci: 1
         BINTRAY_USER: ${{ secrets.BINTRAY_USER }}
