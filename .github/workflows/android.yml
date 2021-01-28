@@ -18,12 +18,12 @@ jobs:
       run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /opt/depot_tools
           cd /opt/depot_tools
-          git checkout b674f8a27725216bd2201652636649d83064ca4a^{commit}
+          git checkout ea89b0d66a4c18363296667a9f37afe75f1f53f2^{commit}
           echo "/opt/depot_tools" >> "$GITHUB_PATH"
     - name: Install Rust targets
       run: rustup target add arm-linux-androideabi aarch64-linux-android x86_64-linux-android
     - name: Free up disk space
-      run: sudo rm -rf "$ANDROID_HOME"/{platforms,build-tools,extras}
+      run: sudo rm -rf "$ANDROID_HOME"/{platforms,build-tools,extras,ndk}
     - name: Prepare workspace for Android
       run: ./bin/prepare-workspace android
       env:
