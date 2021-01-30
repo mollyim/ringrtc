@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! WebRTC Create Session Description
@@ -48,9 +46,9 @@ impl StatsObserver {
     fn new() -> Self {
         info!(
             "ringrtc_stats!,\
+                timestamp_us,\
                 audio,\
                 send,\
-                timestamp_us,\
                 ssrc,\
                 packets_sent,\
                 bytes_sent,\
@@ -62,9 +60,9 @@ impl StatsObserver {
         );
         info!(
             "ringrtc_stats!,\
+                timestamp_us,\
                 video,\
                 send,\
-                timestamp_us,\
                 ssrc,\
                 packets_sent,\
                 bytes_sent,\
@@ -87,9 +85,9 @@ impl StatsObserver {
         );
         info!(
             "ringrtc_stats!,\
+                timestamp_us,\
                 audio,\
                 recv,\
-                timestamp_us,\
                 ssrc,\
                 packets_received,\
                 packets_lost,\
@@ -102,9 +100,9 @@ impl StatsObserver {
         );
         info!(
             "ringrtc_stats!,\
+                timestamp_us,\
                 video,\
                 recv,\
-                timestamp_us,\
                 ssrc,\
                 packets_received,\
                 packets_lost,\

@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019, 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! iOS Call Manager Interface
@@ -16,7 +14,8 @@ use crate::ios::call_manager;
 use crate::ios::call_manager::IOSCallManager;
 use crate::ios::logging::IOSLogger;
 
-use crate::common::{BandwidthMode, CallMediaType, DeviceId, FeatureLevel, HttpResponse};
+use crate::common::{CallMediaType, DeviceId, FeatureLevel, HttpResponse};
+use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::group_call;
 use crate::core::signaling;
 
@@ -106,21 +105,12 @@ pub struct AppOptionalBool {
     pub valid: bool,
 }
 
-/// Structure for passing Ice Candidates to/from Swift.
-#[repr(C)]
-#[derive(Debug)]
-#[allow(non_snake_case)]
-pub struct AppIceCandidate {
-    pub opaque: AppByteSlice,
-    pub sdp:    AppByteSlice,
-}
-
 /// Structure for passing multiple Ice Candidates to/from Swift.
 #[repr(C)]
 #[derive(Debug)]
 #[allow(non_snake_case)]
 pub struct AppIceCandidateArray {
-    pub candidates: *const AppIceCandidate,
+    pub candidates: *const AppByteSlice,
     pub count:      size_t,
 }
 
@@ -326,7 +316,6 @@ pub struct AppInterface {
         destinationDeviceId: u32,
         broadcast: bool,
         opaque: AppByteSlice,
-        sdp: AppByteSlice,
         callMediaType: i32,
     ),
     ///
@@ -337,7 +326,6 @@ pub struct AppInterface {
         destinationDeviceId: u32,
         broadcast: bool,
         opaque: AppByteSlice,
-        sdp: AppByteSlice,
     ),
     ///
     pub onSendIceCandidates: extern "C" fn(
@@ -539,8 +527,14 @@ pub extern "C" fn ringrtcProceed(
     callManager: *mut c_void,
     callId: u64,
     appCallContext: AppCallContext,
+    bandwidthMode: i32,
 ) -> *mut c_void {
-    match call_manager::proceed(callManager as *mut IOSCallManager, callId, appCallContext) {
+    match call_manager::proceed(
+        callManager as *mut IOSCallManager,
+        callId,
+        appCallContext,
+        BandwidthMode::from_i32(bandwidthMode),
+    ) {
         Ok(_v) => {
             // Return the object reference back as indication of success.
             callManager
@@ -592,7 +586,6 @@ pub extern "C" fn ringrtcReceivedAnswer(
     callId: u64,
     senderDeviceId: u32,
     opaque: AppByteSlice,
-    sdp: AppByteSlice,
     senderSupportsMultiRing: bool,
     senderIdentityKey: AppByteSlice,
     receiverIdentityKey: AppByteSlice,
@@ -608,7 +601,6 @@ pub extern "C" fn ringrtcReceivedAnswer(
         callId,
         senderDeviceId as DeviceId,
         byte_vec_from_app_slice(&opaque),
-        string_from_app_slice(&sdp),
         sender_device_feature_level,
         byte_vec_from_app_slice(&senderIdentityKey),
         byte_vec_from_app_slice(&receiverIdentityKey),
@@ -632,7 +624,6 @@ pub extern "C" fn ringrtcReceivedOffer(
     remotePeer: *const c_void,
     senderDeviceId: u32,
     opaque: AppByteSlice,
-    sdp: AppByteSlice,
     messageAgeSec: u64,
     callMediaType: i32,
     receiverDeviceId: u32,
@@ -653,7 +644,6 @@ pub extern "C" fn ringrtcReceivedOffer(
         remotePeer,
         senderDeviceId as DeviceId,
         byte_vec_from_app_slice(&opaque),
-        string_from_app_slice(&sdp),
         messageAgeSec,
         CallMediaType::from_i32(callMediaType),
         receiverDeviceId as DeviceId,
@@ -681,6 +671,8 @@ pub extern "C" fn ringrtcReceivedIceCandidates(
     senderDeviceId: u32,
     appIceCandidateArray: *const AppIceCandidateArray,
 ) -> *mut c_void {
+    info!("ringrtcReceivedIceCandidates():");
+
     let count = unsafe { (*appIceCandidateArray).count };
     let candidates = unsafe { (*appIceCandidateArray).candidates };
 
@@ -688,10 +680,15 @@ pub extern "C" fn ringrtcReceivedIceCandidates(
     let mut ice_candidates = Vec::new();
 
     for app_ice_candidate in app_ice_candidates {
-        ice_candidates.push(signaling::IceCandidate::from_opaque_or_sdp(
-            byte_vec_from_app_slice(&app_ice_candidate.opaque),
-            string_from_app_slice(&app_ice_candidate.sdp),
-        ));
+        let opaque = byte_vec_from_app_slice(&app_ice_candidate);
+        match opaque {
+            Some(v) => {
+                ice_candidates.push(signaling::IceCandidate::new(v));
+            }
+            None => {
+                warn!("Skipping empty opaque value");
+            }
+        }
     }
 
     match call_manager::received_ice(
@@ -880,21 +877,13 @@ pub extern "C" fn ringrtcSetVideoEnable(callManager: *mut c_void, enable: bool) 
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "C" fn ringrtcSetLowBandwidthMode(
-    callManager: *mut c_void,
-    enabled: bool,
-) -> *mut c_void {
-    let mode = if enabled {
-        BandwidthMode::Low
-    } else {
-        BandwidthMode::Normal
-    };
-    match call_manager::set_direct_bandwidth_mode(callManager as *mut IOSCallManager, mode) {
-        Ok(_v) => {
-            // Return the object reference back as indication of success.
-            callManager
-        }
-        Err(_e) => ptr::null_mut(),
+pub extern "C" fn ringrtcUpdateBandwidthMode(callManager: *mut c_void, bandwidthMode: i32) {
+    let result = call_manager::update_bandwidth_mode(
+        callManager as *mut IOSCallManager,
+        BandwidthMode::from_i32(bandwidthMode),
+    );
+    if result.is_err() {
+        error!("ringrtcUpdateBandwidthMode(): {:?}", result.err());
     }
 }
 
@@ -1141,20 +1130,10 @@ pub extern "C" fn ringrtcSetBandwidthMode(
 ) {
     info!("ringrtcSetBandwidthMode():");
 
-    // Translate from the app's mode to the internal bitrate version.
-    let bandwidth_mode = if bandwidthMode == 0 {
-        BandwidthMode::Low
-    } else if bandwidthMode == 1 {
-        BandwidthMode::Normal
-    } else {
-        warn!("Invalid bandwidthMode: {}", bandwidthMode);
-        return;
-    };
-
     let result = call_manager::set_bandwidth_mode(
         callManager as *mut IOSCallManager,
         clientId,
-        bandwidth_mode,
+        BandwidthMode::from_i32(bandwidthMode),
     );
     if result.is_err() {
         error!("{:?}", result.err());

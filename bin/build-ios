@@ -1,10 +1,8 @@
 #!/bin/sh
 
 #
-# Copyright (C) 2020 Signal Messenger, LLC.
-# All rights reserved.
-#
-# SPDX-License-Identifier: GPL-3.0-only
+# Copyright 2019-2021 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 
 # Be sure of the following pre-requisites in your environment (MacOS & Xcode):
@@ -98,7 +96,7 @@ if [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "webrtc" ]
 then
   echo "Building the WebRTC.framework in ${OUTPUT_DIR}/${BUILD_TYPE}..."
 
-  (cd ${WEBRTC_SRC_DIR} && ./tools_webrtc/ios/build_ios_libs.py -o ${OUTPUT_DIR}/${BUILD_TYPE} --build_config ${BUILD_TYPE} --arch {arm64,x64})
+  (cd ${WEBRTC_SRC_DIR} && ./tools_webrtc/ios/build_ios_libs.py -o ${OUTPUT_DIR}/${BUILD_TYPE} --build_config ${BUILD_TYPE} --arch {arm64,x64} --extra-gn-args rtc_enable_sctp=false)
 
   echo "Copying to ${OUTPUT_DIR}"
 

@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! Simulation CallPlatform Interface.
@@ -21,6 +19,7 @@ use crate::common::{
     HttpMethod,
     Result,
 };
+use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call::Call;
 use crate::core::call_manager::CallManager;
 use crate::core::connection::{Connection, ConnectionType};
@@ -116,6 +115,7 @@ impl Platform for SimPlatform {
         remote_device_id: DeviceId,
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
+        bandwidth_mode: BandwidthMode,
     ) -> Result<Connection<Self>> {
         info!(
             "create_connection(): call_id: {} remote_device_id: {}, signaling_version: {:?}",
@@ -126,7 +126,13 @@ impl Platform for SimPlatform {
 
         let fake_pc = RffiPeerConnection::new();
 
-        let connection = Connection::new(call.clone(), remote_device_id, connection_type).unwrap();
+        let connection = Connection::new(
+            call.clone(),
+            remote_device_id,
+            connection_type,
+            bandwidth_mode,
+        )
+        .unwrap();
         connection.set_app_connection(fake_pc).unwrap();
 
         let peer_connection =
@@ -177,7 +183,9 @@ impl Platform for SimPlatform {
     ) -> Result<()> {
         info!(
             "on_send_offer(): remote_peer: {}, call_id: {}, offer: {}",
-            remote_peer, call_id, offer
+            remote_peer,
+            call_id,
+            offer.to_info_string()
         );
 
         if self.force_internal_fault.load(Ordering::Acquire) {
@@ -201,7 +209,10 @@ impl Platform for SimPlatform {
     ) -> Result<()> {
         info!(
             "on_send_answer(): remote_peer: {}, call_id: {}, receiver_device_id: {}, answer: {}",
-            remote_peer, call_id, send.receiver_device_id, send.answer
+            remote_peer,
+            call_id,
+            send.receiver_device_id,
+            send.answer.to_info_string()
         );
 
         if self.force_internal_fault.load(Ordering::Acquire) {
@@ -225,7 +236,7 @@ impl Platform for SimPlatform {
     ) -> Result<()> {
         let (_broadcast, receiver_device_id) = match send.receiver_device_id {
             // The DeviceId doesn't matter if we're broadcasting
-            None => (true, 0 as DeviceId),
+            None => (true, 0),
             Some(receiver_device_id) => (false, receiver_device_id),
         };
 

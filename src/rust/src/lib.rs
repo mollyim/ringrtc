@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! # RingRTC -- A Rust WebRTC Interface
@@ -35,6 +33,7 @@ mod error;
 
 /// Core, platform independent functionality.
 pub mod core {
+    pub mod bandwidth_mode;
     pub mod call;
     pub mod call_fsm;
     pub mod call_manager;

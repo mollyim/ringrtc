@@ -1,10 +1,6 @@
 /*
- *
- *  Copyright (C) 2019 Signal Messenger, LLC.
- *  All rights reserved.
- *
- *  SPDX-License-Identifier: GPL-3.0-only
- *
+ * Copyright 2019-2021 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 #include "api/data_channel_interface.h"
@@ -85,42 +81,6 @@ Rust_answerFromSdp(const char* sdp) {
 RUSTEXPORT SessionDescriptionInterface*
 Rust_offerFromSdp(const char* sdp) {
   return createSessionDescriptionInterface(SdpType::kOffer, sdp);
-}
-
-RUSTEXPORT webrtc::SessionDescriptionInterface* 
-Rust_replaceRtpDataChannelsWithSctp(const webrtc::SessionDescriptionInterface* session_description) {
-  if (!session_description) {
-    return nullptr;
-  }
-
-  auto clone = CloneSessionDescription(session_description);
-
-  std::string rtp_data_mid;
-  cricket::SessionDescription* session = clone->description();
-  for (const cricket::ContentInfo& content : session->contents()) {
-    if (content.type == cricket::MediaProtocolType::kRtp && 
-        content.media_description() && content.media_description()->type() == cricket::MEDIA_TYPE_DATA) {
-      rtp_data_mid = content.mid();
-      break;
-    }
-  }
-  if (rtp_data_mid.empty()) {
-    // Couldn't find any RTP data channel, so nothing to change.
-    return clone.release();
-  }
-
-  session->RemoveContentByName(rtp_data_mid);
-
-  // Mirror MediaSessionDescriptionFactory::AddSctpDataContentForOffer
-  auto sctp = std::make_unique<cricket::SctpDataContentDescription>();
-  sctp->set_protocol(cricket::kMediaProtocolUdpDtlsSctp);
-  sctp->set_use_sctpmap(false);
-  sctp->set_max_message_size(256 * 1024);
-  // This shouldn't really be necessary, but just in case...
-  sctp->set_rtcp_mux(true);
-  session->AddContent(rtp_data_mid, cricket::MediaProtocolType::kSctp, std::move(sctp));
-
-  return clone.release();
 }
 
 RUSTEXPORT bool
@@ -896,6 +856,12 @@ Rust_sendRtp(webrtc::PeerConnectionInterface* peer_connection,
 RUSTEXPORT bool
 Rust_receiveRtp(webrtc::PeerConnectionInterface* peer_connection, uint8_t pt) {
   return peer_connection->ReceiveRtp(pt);
+}
+
+RUSTEXPORT void
+Rust_configureAudioEncoders(webrtc::PeerConnectionInterface* peer_connection, const webrtc::AudioEncoder::Config* config) {
+  RTC_LOG(LS_INFO) << "Rust_configureAudioEncoders(...)";
+  peer_connection->ConfigureAudioEncoders(*config);
 }
 
 RUSTEXPORT void

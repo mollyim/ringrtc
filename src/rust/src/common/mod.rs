@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019, 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! Common types used throughout the library.
@@ -71,7 +69,7 @@ pub type DeviceId = u32;
 /// Tracks the state of a call.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CallState {
-    /// The call has been created, but not yet stated.
+    /// The call has been created, but not yet started.
     NotYetStarted,
 
     /// The call has been started (via start_call() or handle_received_offer())
@@ -352,35 +350,6 @@ impl fmt::Display for HttpMethod {
 pub struct HttpResponse {
     pub status_code: u16,
     pub body:        Vec<u8>,
-}
-
-/// Standard bitrates used in RingRTC.
-#[repr(u64)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum BandwidthMode {
-    /// Minimal possible value for the maximum bitrate.
-    Min    = 30_000,
-
-    /// Maximum bitrate used for sending if in the low bandwidth mode.
-    Low    = 300_000,
-
-    /// Normal maximum bitrate used for calls.
-    Normal = 2_000_000,
-
-    /// Maximum possible maximum bitrate
-    Max    = 2_000_001,
-}
-
-impl fmt::Display for BandwidthMode {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl BandwidthMode {
-    pub fn max_bitrate(self) -> units::DataRate {
-        units::DataRate::from_bps(self as u64)
-    }
 }
 
 // Benchmarking component list.

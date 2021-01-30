@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! WebRTC Simulation Data Channel Interface.
@@ -20,10 +18,4 @@ pub unsafe fn Rust_dataChannelSend(
 ) -> bool {
     info!("Rust_dataChannelSend(): ");
     true
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_dataChannelIsReliable(_data_channel: *const RffiDataChannel) -> bool {
-    info!("Rust_dataChannelIsReliable(): ");
-    false
 }

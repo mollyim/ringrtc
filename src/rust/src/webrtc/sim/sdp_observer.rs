@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! WebRTC Simulation Create/Set SessionDescription
@@ -90,14 +88,6 @@ pub unsafe fn Rust_offerFromSdp(_sdp: *const c_char) -> *mut RffiSessionDescript
 pub unsafe fn Rust_answerFromSdp(_sdp: *const c_char) -> *mut RffiSessionDescription {
     info!("Rust_answerFromSdp(): ");
     &mut FAKE_SDP_OFFER
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_replaceRtpDataChannelsWithSctp(
-    _session_description: *const RffiSessionDescription,
-) -> *mut RffiSessionDescription {
-    info!("Rust_replaceRtpDataChannelsWithSctp(): ");
-    &mut FAKE_SDP
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]

@@ -1,13 +1,11 @@
 //
-// Copyright (C) 2019, 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! A peer-to-peer connection interface.
 
-use std::cmp::min;
+use std::cmp;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
@@ -29,7 +27,6 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::common::{
     units::DataRate,
-    BandwidthMode,
     CallDirection,
     CallId,
     CallMediaType,
@@ -39,12 +36,13 @@ use crate::common::{
     Result,
     RingBench,
 };
+use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call::Call;
 use crate::core::call_mutex::CallMutex;
 use crate::core::connection_fsm::{ConnectionEvent, ConnectionStateMachine};
 use crate::core::platform::Platform;
 use crate::core::signaling;
-use crate::core::util::{ptr_as_box, TaskQueueRuntime};
+use crate::core::util::{ptr_as_box, redact_string, TaskQueueRuntime};
 use crate::error::RingRtcError;
 use crate::protobuf;
 
@@ -116,21 +114,17 @@ where
     T: Platform,
 {
     /// PeerConnection object
-    peer_connection:    Option<PeerConnection>,
+    peer_connection: Option<PeerConnection>,
     /// DataChannel object
-    data_channel:       Option<DataChannel>,
+    data_channel:    Option<DataChannel>,
     /// Raw pointer to Connection object for PeerConnectionObserver
-    connection_ptr:     Option<*mut Connection<T>>,
+    connection_ptr:  Option<*mut Connection<T>>,
     /// Application-specific incoming media
-    incoming_media:     Option<<T as Platform>::AppIncomingMedia>,
+    incoming_media:  Option<<T as Platform>::AppIncomingMedia>,
     /// Application specific peer connection
-    app_connection:     Option<<T as Platform>::AppConnection>,
+    app_connection:  Option<<T as Platform>::AppConnection>,
     /// Boxed copy of the stats collector object shared for callbacks.
-    stats_observer:     Option<Box<StatsObserver>>,
-    /// The current maximum bitrate setting for the local endpoint.
-    local_max_bitrate:  DataRate,
-    /// The current maximum bitrate setting for the remote endpoint.
-    remote_max_bitrate: DataRate,
+    stats_observer:  Option<Box<StatsObserver>>,
 }
 
 // Send and Sync needed to share *const pointer types across threads.
@@ -143,12 +137,11 @@ where
     T: Platform,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "peer_connection: {:?}, data_channel: {:?}, connection_ptr: {:?}, local_max_bitrate: {:?}, remote_max_bitrate: {:?}",
-               self.peer_connection,
-               self.data_channel,
-               self.connection_ptr,
-               self.local_max_bitrate,
-               self.remote_max_bitrate)
+        write!(
+            f,
+            "peer_connection: {:?}, data_channel: {:?}, connection_ptr: {:?}",
+            self.peer_connection, self.data_channel, self.connection_ptr,
+        )
     }
 }
 
@@ -268,6 +261,52 @@ impl TickContext {
     }
 }
 
+/// Collection of bandwidth mode settings for the connection.
+struct BandwidthModes {
+    /// The current bandwidth mode being used for the local endpoint.
+    local_bandwidth_mode:  BandwidthMode,
+    /// The current bandwidth mode being used for the remote endpoint, only if known.
+    remote_bandwidth_mode: Option<BandwidthMode>,
+}
+
+impl fmt::Display for BandwidthModes {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.remote_bandwidth_mode {
+            None => write!(
+                f,
+                "bandwidth_modes: local: {} remote: null",
+                self.local_bandwidth_mode
+            ),
+            Some(remote_bandwidth_mode) => write!(
+                f,
+                "bandwidth_modes: local: {} remote: {}",
+                self.local_bandwidth_mode, remote_bandwidth_mode
+            ),
+        }
+    }
+}
+
+impl BandwidthModes {
+    fn set_remote_from_bitrate(&mut self, remote_max_bitrate_bps: Option<u64>) {
+        if let Some(remote_max_bitrate_bps) = remote_max_bitrate_bps {
+            let remote_bandwidth_mode = BandwidthMode::from_bitrate(remote_max_bitrate_bps);
+            self.remote_bandwidth_mode = Some(remote_bandwidth_mode);
+        }
+    }
+
+    fn min(&self) -> BandwidthMode {
+        match self.remote_bandwidth_mode {
+            None => {
+                // There is no bitrate from the remote. Use the local mode.
+                self.local_bandwidth_mode
+            }
+            Some(remote_bandwidth_mode) => {
+                cmp::min(self.local_bandwidth_mode, remote_bandwidth_mode)
+            }
+        }
+    }
+}
+
 /// Represents the connection between a local client and one remote
 /// peer.
 ///
@@ -277,38 +316,38 @@ where
     T: Platform,
 {
     /// The parent Call object of this connection.
-    call:                           Arc<CallMutex<Call<T>>>,
+    call:                          Arc<CallMutex<Call<T>>>,
     /// Injects events into the [ConnectionStateMachine](../call_fsm/struct.CallStateMachine.html).
-    fsm_sender:                     Sender<(Connection<T>, ConnectionEvent)>,
+    fsm_sender:                    Sender<(Connection<T>, ConnectionEvent)>,
     /// Kept around between new() and start() so we can delay the starting of the FSM
     /// but queue events that happen while starting.
-    fsm_receiver:                   Option<Receiver<(Connection<T>, ConnectionEvent)>>,
+    fsm_receiver:                  Option<Receiver<(Connection<T>, ConnectionEvent)>>,
     /// Unique 64-bit number identifying the call.
-    call_id:                        CallId,
+    call_id:                       CallId,
     /// Device ID of the remote device.
-    remote_feature_level:           Arc<CallMutex<FeatureLevel>>,
+    remote_feature_level:          Arc<CallMutex<FeatureLevel>>,
     /// Connection ID, identifying the call and remote_device.
-    connection_id:                  ConnectionId,
+    connection_id:                 ConnectionId,
     /// The call direction, inbound or outbound.
-    direction:                      CallDirection,
+    direction:                     CallDirection,
     /// The current state of the call connection
-    state:                          Arc<CallMutex<ConnectionState>>,
+    state:                         Arc<CallMutex<ConnectionState>>,
     /// Execution context for the call connection FSM
-    context:                        Arc<CallMutex<Context>>,
+    context:                       Arc<CallMutex<Context>>,
     /// Ancillary WebRTC data.
-    webrtc:                         Arc<CallMutex<WebRtcData<T>>>,
+    webrtc:                        Arc<CallMutex<WebRtcData<T>>>,
+    /// The bandwidth modes that have been set for the connection.
+    bandwidth_modes:               Arc<CallMutex<BandwidthModes>>,
     /// Local ICE candidates waiting to be sent over signaling.
-    buffered_local_ice_candidates:  Arc<CallMutex<Vec<signaling::IceCandidate>>>,
-    /// Remote ICE candidates waiting to be added to the PeerConnection.
-    buffered_remote_ice_candidates: Arc<CallMutex<Vec<signaling::IceCandidate>>>,
+    buffered_local_ice_candidates: Arc<CallMutex<Vec<signaling::IceCandidate>>>,
     /// Condition variable used at termination to quiesce and synchronize the FSM.
-    terminate_condvar:              Arc<(Mutex<bool>, Condvar)>,
+    terminate_condvar:             Arc<(Mutex<bool>, Condvar)>,
     /// This is write-once configuration and will not change.
-    connection_type:                ConnectionType,
+    connection_type:               ConnectionType,
     /// Execution context for the connection periodic timer tick
-    tick_context:                   Arc<CallMutex<TickContext>>,
+    tick_context:                  Arc<CallMutex<TickContext>>,
     /// The accumulated state of sending messages over the data channel
-    accumulated_dcm_state:          Arc<CallMutex<protobuf::data_channel::Data>>,
+    accumulated_dcm_state:         Arc<CallMutex<protobuf::data_channel::Data>>,
 }
 
 impl<T> fmt::Display for Connection<T>
@@ -371,25 +410,25 @@ where
 {
     fn clone(&self) -> Self {
         Connection {
-            call:                           Arc::clone(&self.call),
-            fsm_sender:                     self.fsm_sender.clone(),
+            call:                          Arc::clone(&self.call),
+            fsm_sender:                    self.fsm_sender.clone(),
             // Clones shouldn't need the Receiver because it's only used
             // for the one reference that is used by the creator between
             // creation and starting.
-            fsm_receiver:                   None,
-            call_id:                        self.call_id,
-            remote_feature_level:           Arc::clone(&self.remote_feature_level),
-            connection_id:                  self.connection_id,
-            direction:                      self.direction,
-            state:                          Arc::clone(&self.state),
-            context:                        Arc::clone(&self.context),
-            webrtc:                         Arc::clone(&self.webrtc),
-            buffered_local_ice_candidates:  Arc::clone(&self.buffered_local_ice_candidates),
-            buffered_remote_ice_candidates: Arc::clone(&self.buffered_remote_ice_candidates),
-            terminate_condvar:              Arc::clone(&self.terminate_condvar),
-            connection_type:                self.connection_type,
-            tick_context:                   Arc::clone(&self.tick_context),
-            accumulated_dcm_state:          Arc::clone(&self.accumulated_dcm_state),
+            fsm_receiver:                  None,
+            call_id:                       self.call_id,
+            remote_feature_level:          Arc::clone(&self.remote_feature_level),
+            connection_id:                 self.connection_id,
+            direction:                     self.direction,
+            state:                         Arc::clone(&self.state),
+            context:                       Arc::clone(&self.context),
+            webrtc:                        Arc::clone(&self.webrtc),
+            bandwidth_modes:               Arc::clone(&self.bandwidth_modes),
+            buffered_local_ice_candidates: Arc::clone(&self.buffered_local_ice_candidates),
+            terminate_condvar:             Arc::clone(&self.terminate_condvar),
+            connection_type:               self.connection_type,
+            tick_context:                  Arc::clone(&self.tick_context),
+            accumulated_dcm_state:         Arc::clone(&self.accumulated_dcm_state),
         }
     }
 }
@@ -404,6 +443,7 @@ where
         call: Call<T>,
         remote_device: DeviceId,
         connection_type: ConnectionType,
+        bandwidth_mode: BandwidthMode,
     ) -> Result<Self> {
         // Create a FSM runtime for this connection.
         let context = Context::new()?;
@@ -413,14 +453,12 @@ where
         let direction = call.direction();
 
         let webrtc = WebRtcData {
-            peer_connection:    None,
-            data_channel:       None,
-            connection_ptr:     None,
-            incoming_media:     None,
-            app_connection:     None,
-            stats_observer:     None,
-            local_max_bitrate:  BandwidthMode::Normal.max_bitrate(),
-            remote_max_bitrate: BandwidthMode::Normal.max_bitrate(),
+            peer_connection: None,
+            data_channel:    None,
+            connection_ptr:  None,
+            incoming_media:  None,
+            app_connection:  None,
+            stats_observer:  None,
         };
 
         let connection = Self {
@@ -438,13 +476,16 @@ where
             state: Arc::new(CallMutex::new(ConnectionState::NotYetStarted, "state")),
             context: Arc::new(CallMutex::new(context, "context")),
             webrtc: Arc::new(CallMutex::new(webrtc, "webrtc")),
+            bandwidth_modes: Arc::new(CallMutex::new(
+                BandwidthModes {
+                    local_bandwidth_mode:  bandwidth_mode,
+                    remote_bandwidth_mode: None,
+                },
+                "webrtc",
+            )),
             buffered_local_ice_candidates: Arc::new(CallMutex::new(
                 Vec::new(),
                 "buffered_local_ice_candidates",
-            )),
-            buffered_remote_ice_candidates: Arc::new(CallMutex::new(
-                Vec::new(),
-                "buffered_remote_ice_candidates",
             )),
             terminate_condvar: Arc::new((Mutex::new(false), Condvar::new())),
             connection_type,
@@ -484,6 +525,7 @@ where
     pub fn start_outgoing_parent(
         &mut self,
         call_media_type: CallMediaType,
+        bandwidth_mode: BandwidthMode,
     ) -> Result<(StaticSecret, IceGatherer, signaling::Offer)> {
         let result = (|| {
             self.set_state(ConnectionState::Starting)?;
@@ -507,33 +549,47 @@ where
 
             // We have to do this before we pass ownership of offer_sdi into set_local_description.
             let (local_secret, local_public_key) = generate_local_secret_and_public_key()?;
-            let v4_offer = offer.to_v4(local_public_key.as_bytes().to_vec())?;
-            let v2_offer_sdp = offer.to_sdp()?;
-            let v1_offer_sdp = offer.replace_rtp_data_channels_with_sctp()?.to_sdp()?;
-            info!(
-                "Using V4 signaling for outgoing connection offer: {:?} SDP: {} original SDP: {}",
-                v4_offer,
-                v4_to_sdp_without_srtp_keys(&v4_offer)?,
-                v2_offer_sdp
-            );
+            let v4_offer = offer.to_v4(local_public_key.as_bytes().to_vec(), bandwidth_mode)?;
 
-            // The only purpose of this is to start gathering ICE candidates.
-            // But we need to call set_local_description before we munge it.
-            // Otherwise there will be a data channel type mismatch.
-            let observer = create_ssd_observer();
-            peer_connection.set_local_description(observer.as_ref(), offer);
-            observer.get_result()?;
+            if bandwidth_mode.use_v4_only() {
+                info!("Using V4 signaling for outgoing offer: {:?}", v4_offer);
 
-            let offer = signaling::Offer::from_v4_and_v3_and_v2_and_v1(
-                call_media_type,
-                local_public_key.as_bytes().to_vec(),
-                Some(v4_offer),
-                v2_offer_sdp,
-                v1_offer_sdp,
-            )?;
+                // The only purpose of this is to start gathering ICE candidates.
+                // But we need to call set_local_description before we munge it.
+                // Otherwise there will be a data channel type mismatch.
+                let observer = create_ssd_observer();
+                peer_connection.set_local_description(observer.as_ref(), offer);
+                observer.get_result()?;
 
-            self.set_state(ConnectionState::IceGathering)?;
-            Ok((local_secret, ice_gatherer, offer))
+                let offer = signaling::Offer::from_v4(call_media_type, v4_offer)?;
+
+                self.set_state(ConnectionState::IceGathering)?;
+                Ok((local_secret, ice_gatherer, offer))
+            } else {
+                let v2_offer_sdp = offer.to_sdp()?;
+
+                info!(
+                    "Using V4/3/2 signaling for outgoing offer: {:?} SDP: {}",
+                    v4_offer, v2_offer_sdp
+                );
+
+                // The only purpose of this is to start gathering ICE candidates.
+                // But we need to call set_local_description before we munge it.
+                // Otherwise there will be a data channel type mismatch.
+                let observer = create_ssd_observer();
+                peer_connection.set_local_description(observer.as_ref(), offer);
+                observer.get_result()?;
+
+                let offer = signaling::Offer::from_v4_and_v3_and_v2(
+                    call_media_type,
+                    local_public_key.as_bytes().to_vec(),
+                    Some(v4_offer),
+                    v2_offer_sdp,
+                )?;
+
+                self.set_state(ConnectionState::IceGathering)?;
+                Ok((local_secret, ice_gatherer, offer))
+            }
         })();
 
         // Always start the FSM no matter what happened above because
@@ -572,28 +628,48 @@ where
             // Both sides will observe it.
             let data_channel = peer_connection.create_signaling_data_channel()?;
 
-            let (mut offer, mut answer, remote_public_key) =
+            let mut bandwidth_modes = self.bandwidth_modes.lock()?;
+
+            let (mut offer, mut answer, remote_public_key, bandwidth_mode) =
                 if let (Some(v4_offer), Some(v4_answer)) = (offer.to_v4(), received.answer.to_v4())
                 {
+                    // Set the remote mode based on the bitrate in the answer.
+                    bandwidth_modes.set_remote_from_bitrate(v4_answer.max_bitrate_bps);
+                    // Get the lowest bandwidth mode and use it for constraints.
+                    let bandwidth_mode = bandwidth_modes.min();
+
                     let offer = SessionDescription::offer_from_v4(&v4_offer)?;
                     let answer = SessionDescription::answer_from_v4(&v4_answer)?;
+
                     info!(
-                        "Using V4 signaling for outgoing connection answer: {:?} SDP: {}",
-                        v4_answer,
-                        v4_to_sdp_without_srtp_keys(&v4_answer)?
+                        "Using V4 signaling for incoming answer: {:?} {}",
+                        v4_answer, bandwidth_modes
                     );
-                    (offer, answer, v4_answer.public_key)
+
+                    (offer, answer, v4_answer.public_key, bandwidth_mode)
                 } else {
-                    let (answer_is_v3_or_v2, answer_sdp, remote_public_key) =
-                        received.answer.to_v3_or_v2_or_v1_sdp()?;
-                    let offer_sdp = if answer_is_v3_or_v2 {
-                        offer.to_v3_or_v2_sdp()?
+                    let (answer_sdp, remote_public_key) = received.answer.to_v3_or_v2_params()?;
+                    let offer_sdp = offer.to_v3_or_v2_sdp()?;
+
+                    // For V2/3 we'll just use the desired local mode on this end and ignore the remote.
+                    let bandwidth_mode = bandwidth_modes.local_bandwidth_mode;
+
+                    if remote_public_key.is_some() {
+                        info!(
+                            "Using V3 signaling for incoming answer: {} bandwidth_mode: {}",
+                            offer_sdp, bandwidth_mode
+                        );
                     } else {
-                        offer.to_v1_sdp()?
-                    };
+                        info!(
+                            "Using V2 signaling for incoming answer: {} bandwidth_mode: {}",
+                            offer_sdp, bandwidth_mode
+                        );
+                    }
+
                     let offer = SessionDescription::offer_from_sdp(offer_sdp)?;
                     let answer = SessionDescription::answer_from_sdp(answer_sdp)?;
-                    (offer, answer, remote_public_key)
+
+                    (offer, answer, remote_public_key, bandwidth_mode)
                 };
 
             if let Some(remote_public_key) = remote_public_key {
@@ -619,15 +695,17 @@ where
             let observer = create_ssd_observer();
             peer_connection.set_remote_description(observer.as_ref(), answer);
             // on_data_channel and on_add_stream and on_ice_connected can all happen while
-            // SetRemoteDescription is happening.  But none of those will be processed
+            // SetRemoteDescription is happening. But none of those will be processed
             // until start_fsm() is called below.
             observer.get_result()?;
 
             // Don't enable until the call is accepted.
             peer_connection.set_outgoing_media_enabled(false);
-            // But do start incoming RTP right away so we can receive the
+            // But do start incoming RTP right away so that we can receive the
             // "accepted" message.
             peer_connection.set_incoming_media_enabled(true);
+
+            self.apply_bandwidth_mode(&peer_connection, &bandwidth_mode)?;
 
             // We have to do this once we're done with peer_connection because
             // it holds a ref to peer_connection as well.
@@ -665,22 +743,45 @@ where
 
             let peer_connection = webrtc.peer_connection()?;
 
+            let mut bandwidth_modes = self.bandwidth_modes.lock()?;
+
             let v4_offer = received.offer.to_v4();
-            let (mut offer, offer_is_v3_or_v2, remote_public_key) =
+            let (mut offer, remote_public_key, bandwidth_mode) =
                 if let Some(v4_offer) = v4_offer.as_ref() {
+                    // Set the remote mode based on the bitrate in the offer.
+                    bandwidth_modes.set_remote_from_bitrate(v4_offer.max_bitrate_bps);
+                    // Get the lowest bandwidth mode and use it for constraints.
+                    let bandwidth_mode = bandwidth_modes.min();
+
                     info!(
-                        "Using V4 signaling for incoming connection offer: {:?} SDP: {}",
-                        v4_offer,
-                        v4_to_sdp_without_srtp_keys(&v4_offer)?
+                        "Using V4 signaling for incoming offer: {:?} {}",
+                        v4_offer, bandwidth_modes
                     );
-                    let offer_is_v3_or_v2 = false;
+
                     let offer = SessionDescription::offer_from_v4(&v4_offer)?;
-                    (offer, offer_is_v3_or_v2, v4_offer.public_key.clone())
+
+                    (offer, v4_offer.public_key.clone(), bandwidth_mode)
                 } else {
-                    let (offer_is_v3_or_v2, offer_sdp, remote_public_key) =
-                        received.offer.to_v3_or_v2_or_v1_sdp()?;
+                    let (offer_sdp, remote_public_key) = received.offer.to_v3_or_v2_params()?;
+
+                    // For V2/3 we'll just use the desired local mode on this end and ignore the remote.
+                    let bandwidth_mode = bandwidth_modes.local_bandwidth_mode;
+
+                    if remote_public_key.is_some() {
+                        info!(
+                            "Using V3 signaling for incoming offer: {} bandwidth_mode: {}",
+                            offer_sdp, bandwidth_mode
+                        );
+                    } else {
+                        info!(
+                            "Using V2 signaling for incoming offer: {} bandwidth_mode: {}",
+                            offer_sdp, bandwidth_mode
+                        );
+                    }
+
                     let offer = SessionDescription::offer_from_sdp(offer_sdp)?;
-                    (offer, offer_is_v3_or_v2, remote_public_key)
+
+                    (offer, remote_public_key, bandwidth_mode)
                 };
 
             let (local_secret, local_public_key) = generate_local_secret_and_public_key()?;
@@ -718,12 +819,12 @@ where
             }
 
             let answer_to_send = if v4_offer.is_some() {
-                let v4_answer = answer.to_v4(local_public_key.as_bytes().to_vec())?;
-                info!(
-                    "Using V4 signaling for incoming connection answer: {:?} SDP: {}",
-                    v4_answer,
-                    v4_to_sdp_without_srtp_keys(&v4_answer)?
-                );
+                let v4_answer = answer.to_v4(
+                    local_public_key.as_bytes().to_vec(),
+                    bandwidth_modes.local_bandwidth_mode,
+                )?;
+
+                info!("Using V4 signaling for outgoing answer: {:?}", v4_answer);
 
                 // We have to change the local answer to match what we send back
                 answer = SessionDescription::answer_from_v4(&v4_answer)?;
@@ -732,15 +833,15 @@ where
                     answer.disable_dtls_and_set_srtp_key(answer_key)?;
                 }
                 signaling::Answer::from_v4(v4_answer)?
-            } else if offer_is_v3_or_v2 {
+            } else {
                 let answer_sdp = answer.to_sdp()?;
+
+                info!("Using V3/2 signaling for outgoing answer: {}", answer_sdp);
+
                 signaling::Answer::from_v3_and_v2_sdp(
                     local_public_key.as_bytes().to_vec(),
                     answer_sdp,
                 )?
-            } else {
-                let answer_sdp = answer.to_sdp()?;
-                signaling::Answer::from_v1_sdp(answer_sdp)?
             };
 
             // Don't enable incoming RTP until accepted.
@@ -750,12 +851,15 @@ where
 
             let observer = create_ssd_observer();
             peer_connection.set_local_description(observer.as_ref(), answer);
+
             // on_ice_connected can happen while SetLocalDescription is happening.
             // But it won't be processed until start_fsm() is called below.
             observer.get_result()?;
 
             // Don't enable until call is accepted.
             peer_connection.set_outgoing_media_enabled(false);
+
+            self.apply_bandwidth_mode(&peer_connection, &bandwidth_mode)?;
 
             ringbench!(
                 RingBench::Conn,
@@ -852,6 +956,12 @@ where
         }
     }
 
+    /// Return the current local bandwidth mode used for this connection.
+    pub fn local_bandwidth_mode(&self) -> Result<BandwidthMode> {
+        let bandwidth_modes = self.bandwidth_modes.lock()?;
+        Ok(bandwidth_modes.local_bandwidth_mode)
+    }
+
     /// Update the DataChannel for sending signaling
     pub fn set_signaling_data_channel(&self, dc: DataChannel) -> Result<()> {
         let mut webrtc = self.webrtc.lock()?;
@@ -859,6 +969,7 @@ where
         webrtc.data_channel = Some(dc);
         Ok(())
     }
+
     /// Set the incoming media.
     pub fn set_incoming_media(
         &self,
@@ -952,79 +1063,63 @@ where
         Arc::strong_count(&self.webrtc)
     }
 
-    /// Sets the maximum send bitrate only for the local
-    /// peer_connection. Called when a connection is first started to
-    /// ensure the BandwidthMode::Normal.max_bitrate() is set in WebRTC.
-    /// Does not send the remote side any message.
-    pub fn set_local_max_send_bitrate(&self, local_max: DataRate) -> Result<()> {
-        info!("set_local_max_send_bitrate(): local_max: {:?}", local_max);
+    /// The remote user is updating the max_bitrate via the data channel. They are
+    /// making the request so only update locally (if changed).
+    pub fn set_remote_max_bitrate(&self, remote_max_bitrate: DataRate) -> Result<()> {
+        let mut bandwidth_modes = self.bandwidth_modes.lock()?;
 
-        let mut webrtc = self.webrtc.lock()?;
-        webrtc.local_max_bitrate = local_max;
-        webrtc.peer_connection()?.set_max_send_bitrate(local_max)
-    }
+        let remote_bandwidth_mode = BandwidthMode::from_bitrate(remote_max_bitrate.as_bps());
 
-    /// Sets the maximum bitrate for all media combined.
-    /// This includes sending and receiving.
-    /// Sending by changing the PeerConnection.
-    /// Receiving by sending a message to the remote side to send less
-    /// The app can set this via the `set_bandwidth_mode` API.
-    pub fn set_local_max_bitrate(&self, local_max: DataRate) -> Result<()> {
-        let mut webrtc = self.webrtc.lock()?;
-
-        if local_max == webrtc.local_max_bitrate {
-            // The local bitrate has not changed, so there is nothing to do.
-            return Ok(());
+        if let Some(mode) = bandwidth_modes.remote_bandwidth_mode {
+            if mode == remote_bandwidth_mode {
+                // The remote bandwidth mode has not changed, so there is nothing to do.
+                return Ok(());
+            }
         }
-        webrtc.local_max_bitrate = local_max;
 
-        // Use the smallest bitrate for the session.
-        let combined_max = min(local_max, webrtc.remote_max_bitrate);
+        bandwidth_modes.remote_bandwidth_mode = Some(remote_bandwidth_mode);
         info!(
-            "set_local_max_bitrate(): local: {:?} remote: {:?} combined: {:?}",
-            local_max, webrtc.remote_max_bitrate, combined_max
+            "set_remote_max_bitrate(): {} {}",
+            remote_max_bitrate.as_bps(),
+            bandwidth_modes
         );
 
-        webrtc
-            .peer_connection()?
-            .set_max_send_bitrate(combined_max)?;
+        // Use the minimum of the local and remote modes.
+        let bandwidth_mode = bandwidth_modes.min();
 
-        let mut receiver_status = protobuf::data_channel::ReceiverStatus::default();
+        let webrtc = self.webrtc.lock()?;
+        self.apply_bandwidth_mode(webrtc.peer_connection()?, &bandwidth_mode)
+    }
+
+    /// The local user is updating the bandwidth mode via the API. Update locally and
+    /// send an updated bitrate to the remote.
+    pub fn update_bandwidth_mode(&self, bandwidth_mode: BandwidthMode) -> Result<()> {
+        let mut bandwidth_modes = self.bandwidth_modes.lock()?;
+
+        if bandwidth_mode == bandwidth_modes.local_bandwidth_mode {
+            // The local bandwidth mode has not changed, so there is nothing to do.
+            return Ok(());
+        }
+
+        bandwidth_modes.local_bandwidth_mode = bandwidth_mode;
+        info!("update_bandwidth_mode(): {}", bandwidth_modes);
+
+        // Use the minimum of the local and remote modes.
+        let bandwidth_mode = bandwidth_modes.min();
+
+        let webrtc = self.webrtc.lock()?;
+        self.apply_bandwidth_mode(webrtc.peer_connection()?, &bandwidth_mode)?;
+
+        let mut receiver_status = protobuf::data_channel::ReceiverStatus {
+            id:              Some(u64::from(self.call_id)),
+            max_bitrate_bps: Some(bandwidth_modes.local_bandwidth_mode.max_bitrate().as_bps()),
+        };
         receiver_status.id = Some(u64::from(self.call_id));
-        receiver_status.max_bitrate_bps = Some(local_max.as_bps());
 
         let data_channel = webrtc.data_channel().ok();
         self.update_and_send_dcm_state_via_data_channel(data_channel, move |data| {
             data.receiver_status = Some(receiver_status)
         })
-    }
-
-    /// Sets the maximum sending bitrate for all media combined.
-    /// Unlike set_local_max_bitrate, it does not send a message to the remote
-    /// side to affect receiving.  Rather, it comes from the remote side
-    /// and thus must affect local sending.
-    pub fn set_remote_max_bitrate(&self, remote_max: DataRate) -> Result<()> {
-        let mut webrtc = self.webrtc.lock()?;
-
-        let remote_max = clamp(
-            remote_max,
-            BandwidthMode::Min.max_bitrate(),
-            BandwidthMode::Max.max_bitrate(),
-        );
-        if remote_max == webrtc.remote_max_bitrate {
-            // The remote bitrate has not changed, so there is nothing to do.
-            return Ok(());
-        }
-        webrtc.remote_max_bitrate = remote_max;
-
-        // Use the smallest bitrate for the session.
-        let combined_max = min(webrtc.local_max_bitrate, remote_max);
-        info!(
-            "set_remote_max_bitrate(): local: {:?} remote: {:?} combined: {:?}",
-            webrtc.local_max_bitrate, remote_max, combined_max
-        );
-
-        webrtc.peer_connection()?.set_max_send_bitrate(combined_max)
     }
 
     /// Creates a runtime for statistics to run a timer for the given interval
@@ -1102,12 +1197,6 @@ where
 
     /// Buffer local ICE candidates, and maybe send them immediately
     pub fn buffer_local_ice_candidate(&self, candidate: signaling::IceCandidate) -> Result<()> {
-        info!(
-            "Local ICE candidate: {}; {}",
-            candidate.to_info_string(),
-            candidate.to_redacted_string()
-        );
-
         let num_ice_candidates = {
             let mut buffered_local_ice_candidates = self.buffered_local_ice_candidates.lock()?;
             buffered_local_ice_candidates.push(candidate);
@@ -1126,23 +1215,6 @@ where
         Ok(())
     }
 
-    /// Buffer remote ICE candidates.
-    pub fn buffer_remote_ice_candidates(
-        &self,
-        ice_candidates: Vec<signaling::IceCandidate>,
-    ) -> Result<()> {
-        let mut pending_ice_candidates = self.buffered_remote_ice_candidates.lock()?;
-        for ice_candidate in ice_candidates {
-            info!(
-                "Remote ICE candidate: {}; {}",
-                ice_candidate.to_info_string(),
-                ice_candidate.to_redacted_string()
-            );
-            pending_ice_candidates.push(ice_candidate);
-        }
-        Ok(())
-    }
-
     /// Get the current local ICE candidates to send to the remote peer.
     pub fn take_buffered_local_ice_candidates(&self) -> Result<Vec<signaling::IceCandidate>> {
         info!("take_buffered_local_ice_candidates():");
@@ -1151,11 +1223,6 @@ where
 
         let copy_candidates = ice_candidates.clone();
         ice_candidates.clear();
-
-        info!(
-            "take_buffered_local_ice_candidates(): Local ICE candidates length: {}",
-            copy_candidates.len()
-        );
 
         Ok(copy_candidates)
     }
@@ -1190,10 +1257,11 @@ where
 
         let (hangup_type, hangup_device_id) = hangup.to_type_and_device_id();
 
-        let mut hangup = protobuf::data_channel::Hangup::default();
-        hangup.id = Some(u64::from(self.call_id));
-        hangup.r#type = Some(hangup_type as i32);
-        hangup.device_id = hangup_device_id;
+        let hangup = protobuf::data_channel::Hangup {
+            id:        Some(u64::from(self.call_id)),
+            r#type:    Some(hangup_type as i32),
+            device_id: hangup_device_id,
+        };
 
         let webrtc = self.webrtc.lock()?;
         let data_channel = webrtc.data_channel().ok();
@@ -1211,14 +1279,27 @@ where
             format!("dc(accepted)\t{}", self.connection_id)
         );
 
-        let mut accepted = protobuf::data_channel::Accepted::default();
-        accepted.id = Some(u64::from(self.call_id));
+        let accepted = protobuf::data_channel::Accepted {
+            id: Some(u64::from(self.call_id)),
+        };
 
         let webrtc = self.webrtc.lock()?;
         let data_channel = webrtc.data_channel().ok();
         self.update_and_send_dcm_state_via_data_channel(data_channel, move |data| {
             data.accepted = Some(accepted)
         })
+    }
+
+    /// Based on the given bandwidth mode, configure the media encoders.
+    fn apply_bandwidth_mode(
+        &self,
+        peer_connection: &PeerConnection,
+        bandwidth_mode: &BandwidthMode,
+    ) -> Result<()> {
+        info!("apply_bandwidth_mode(): mode: {}", bandwidth_mode);
+        peer_connection.set_max_send_bitrate(bandwidth_mode.max_bitrate())?;
+        peer_connection.configure_audio_encoders(&bandwidth_mode.audio_encoder_config());
+        Ok(())
     }
 
     /// Send the remote peer the current sender status via the
@@ -1229,9 +1310,10 @@ where
     /// * `video_enabled` - `true` when the local side is streaming video,
     /// otherwise `false`.
     pub fn send_sender_status_via_data_channel(&self, video_enabled: bool) -> Result<()> {
-        let mut sender_status = protobuf::data_channel::SenderStatus::default();
-        sender_status.id = Some(u64::from(self.call_id));
-        sender_status.video_enabled = Some(video_enabled);
+        let sender_status = protobuf::data_channel::SenderStatus {
+            id:            Some(u64::from(self.call_id)),
+            video_enabled: Some(video_enabled),
+        };
 
         let webrtc = self.webrtc.lock()?;
         let data_channel = webrtc.data_channel().ok();
@@ -1250,12 +1332,7 @@ where
         F: FnOnce(&mut protobuf::data_channel::Data),
     {
         if let Some(data_channel) = data_channel {
-            let message = if data_channel.reliable() {
-                // Just send this one message by itself
-                let mut single = protobuf::data_channel::Data::default();
-                populate(&mut single);
-                single
-            } else {
+            let message = {
                 // Merge this message into accumulated_state and send out the latest version.
                 let mut state = self.accumulated_dcm_state.lock()?;
                 populate(&mut state);
@@ -1275,17 +1352,12 @@ where
         data_channel: Option<&DataChannel>,
     ) -> Result<()> {
         if let Some(data_channel) = data_channel {
-            if data_channel.reliable() {
-                // Reliable data channels handle retransmissions internally.
-                Ok(())
+            let data = self.accumulated_dcm_state.lock()?;
+            if *data != protobuf::data_channel::Data::default() {
+                self.send_via_data_channel(data_channel, &data)
             } else {
-                let data = self.accumulated_dcm_state.lock()?;
-                if *data != protobuf::data_channel::Data::default() {
-                    self.send_via_data_channel(data_channel, &data)
-                } else {
-                    // Don't send empty messages
-                    Ok(())
-                }
+                // Don't send empty messages
+                Ok(())
             }
         } else {
             Ok(())
@@ -1487,10 +1559,18 @@ where
         &mut self,
         candidate: signaling::IceCandidate,
         force_send: bool,
+        sdp_for_logging: &str,
     ) -> Result<()> {
         if !force_send && self.connection_type == ConnectionType::OutgoingChild {
             return Ok(());
         }
+
+        info!(
+            "Local ICE candidate: {}; {}",
+            candidate.to_info_string(),
+            redact_string(sdp_for_logging)
+        );
+
         self.inject_event(ConnectionEvent::LocalIceCandidate(candidate))?;
         Ok(())
     }
@@ -1696,13 +1776,13 @@ where
         ))
     }
 
-    /// Inject a `SetBandwidthMode` event into the FSM.
+    /// Inject a `UpdateBandwidthMode` event into the FSM.
     ///
     /// `Called By:` Local application.
     ///
     /// * `mode` - The bandwidth mode that should be used
-    pub fn set_bandwidth_mode(&mut self, mode: BandwidthMode) -> Result<()> {
-        self.inject_event(ConnectionEvent::SetBandwidthMode(mode))
+    pub fn inject_update_bandwidth_mode(&mut self, bandwidth_mode: BandwidthMode) -> Result<()> {
+        self.inject_event(ConnectionEvent::UpdateBandwidthMode(bandwidth_mode))
     }
 
     /// Inject a `ReceivedIce` event into the FSM.
@@ -1813,9 +1893,10 @@ where
     fn handle_ice_candidate_gathered(
         &mut self,
         ice_candidate: signaling::IceCandidate,
+        sdp_for_logging: &str,
     ) -> Result<()> {
         let force_send = false;
-        self.inject_local_ice_candidate(ice_candidate, force_send)
+        self.inject_local_ice_candidate(ice_candidate, force_send, sdp_for_logging)
     }
 
     fn handle_ice_connection_state_changed(&mut self, new_state: IceConnectionState) -> Result<()> {
@@ -1903,27 +1984,4 @@ fn negotiate_srtp_keys(
             salt:  answer_salt.to_vec(),
         },
     })
-}
-
-pub fn clamp<T: PartialOrd>(val: T, min: T, max: T) -> T {
-    if val < min {
-        return min;
-    }
-    if val > max {
-        return max;
-    }
-    val
-}
-
-fn v4_to_sdp_without_srtp_keys(v4: &protobuf::signaling::ConnectionParametersV4) -> Result<String> {
-    let mut session_description = SessionDescription::offer_from_v4(&v4)?;
-    // Clearing the keys isn't necessary because offer_from_v4 doesn't set them anyway.
-    // So we're being really overly careful here clearing something that shouldn't be there.
-    let key = SrtpKey {
-        suite: SrtpCryptoSuite::AeadAes256Gcm,
-        key:   Vec::new(),
-        salt:  Vec::new(),
-    };
-    session_description.disable_dtls_and_set_srtp_key(&key)?;
-    Ok(session_description.to_sdp()?)
 }

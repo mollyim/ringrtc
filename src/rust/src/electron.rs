@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 use lazy_static::lazy_static;
@@ -12,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::{
-    BandwidthMode,
     CallId,
     CallMediaType,
     DeviceId,
@@ -21,6 +18,7 @@ use crate::common::{
     HttpResponse,
     Result,
 };
+use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call_manager::CallManager;
 use crate::core::group_call;
 use crate::core::group_call::UserId;
@@ -121,13 +119,13 @@ pub enum Event {
 impl SignalingSender for Sender<Event> {
     fn send_signaling(
         &self,
-        recipient_id: &PeerId,
+        recipient_id: &str,
         call_id: CallId,
         receiver_device_id: Option<DeviceId>,
         msg: signaling::Message,
     ) -> Result<()> {
         self.send(Event::SendSignaling(
-            recipient_id.clone(),
+            recipient_id.to_string(),
             receiver_device_id,
             call_id,
             msg,
@@ -142,13 +140,13 @@ impl SignalingSender for Sender<Event> {
 }
 
 impl CallStateHandler for Sender<Event> {
-    fn handle_call_state(&self, remote_peer_id: &PeerId, call_state: CallState) -> Result<()> {
-        self.send(Event::CallState(remote_peer_id.clone(), call_state))?;
+    fn handle_call_state(&self, remote_peer_id: &str, call_state: CallState) -> Result<()> {
+        self.send(Event::CallState(remote_peer_id.to_string(), call_state))?;
         Ok(())
     }
 
-    fn handle_remote_video_state(&self, remote_peer_id: &PeerId, enabled: bool) -> Result<()> {
-        self.send(Event::RemoteVideoState(remote_peer_id.clone(), enabled))?;
+    fn handle_remote_video_state(&self, remote_peer_id: &str, enabled: bool) -> Result<()> {
+        self.send(Event::RemoteVideoState(remote_peer_id.to_string(), enabled))?;
         Ok(())
     }
 }
@@ -401,6 +399,7 @@ declare_types! {
             let ice_server_password = cx.argument::<JsString>(2)?.value();
             let js_ice_server_urls = cx.argument::<JsArray>(3)?;
             let hide_ip = cx.argument::<JsBoolean>(4)?.value();
+            let bandwidth_mode = cx.argument::<JsNumber>(5)?.value() as i32;
 
             let mut ice_server_urls = Vec::with_capacity(js_ice_server_urls.len() as usize);
             for i in 0..js_ice_server_urls.len() {
@@ -423,7 +422,7 @@ declare_types! {
                     ice_server,
                     cm.outgoing_audio_track.clone(),
                     cm.outgoing_video_track.clone());
-                cm.call_manager.proceed(call_id, call_context)?;
+                cm.call_manager.proceed(call_id, call_context, BandwidthMode::from_i32(bandwidth_mode))?;
                 Ok(())
             }).or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
             Ok(cx.undefined().upcast())
@@ -488,20 +487,14 @@ declare_types! {
             Ok(cx.undefined().upcast())
         }
 
-        method setLowBandwidthMode(mut cx) {
-            debug!("JsCallManager.setLowBandwidthMode()");
-            let enabled = cx.argument::<JsBoolean>(0)?.value();
-
-            let mode = if enabled {
-                BandwidthMode::Low
-            } else {
-                BandwidthMode::Normal
-            };
+        method updateBandwidthMode(mut cx) {
+            debug!("JsCallManager.updateBandwidthMode()");
+            let bandwidth_mode = cx.argument::<JsNumber>(0)?.value() as i32;
 
             let mut this = cx.this();
             cx.borrow_mut(&mut this, |cm| {
-                let mut active_connection = cm.call_manager.active_connection()?;
-                active_connection.set_bandwidth_mode(mode)?;
+                let active_connection = cm.call_manager.active_connection()?;
+                active_connection.update_bandwidth_mode(BandwidthMode::from_i32(bandwidth_mode))?;
                 Ok(())
             }).or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
             Ok(cx.undefined().upcast())
@@ -515,19 +508,11 @@ declare_types! {
             let call_id = CallId::new(get_id_arg(&mut cx, 4));
             let offer_type = cx.argument::<JsNumber>(5)?.value() as i32;
             let sender_supports_multi_ring = cx.argument::<JsBoolean>(6)?.value();
-            let opaque = cx.argument::<JsValue>(7)?.as_value(&mut cx);
-            let sdp = cx.argument::<JsValue>(8)?.as_value(&mut cx);
-            let sender_identity_key = cx.argument::<JsArrayBuffer>(9)?;
-            let receiver_identity_key = cx.argument::<JsArrayBuffer>(10)?;
+            let opaque = cx.argument::<JsArrayBuffer>(7)?;
+            let sender_identity_key = cx.argument::<JsArrayBuffer>(8)?;
+            let receiver_identity_key = cx.argument::<JsArrayBuffer>(9)?;
 
-            let opaque = match opaque.downcast::<JsArrayBuffer>() {
-                Ok(handle) => Some(cx.borrow(&handle, |handle| { handle.as_slice().to_vec() })),
-                Err(_) => None,
-            };
-            let sdp = match sdp.downcast::<JsString>() {
-                Ok(handle) => Some(handle.value()),
-                Err(_) => None,
-            };
+            let opaque = cx.borrow(&opaque, |handle| handle.as_slice().to_vec());
             let sender_identity_key = cx.borrow(&sender_identity_key, |handle| handle.as_slice().to_vec());
             let receiver_identity_key = cx.borrow(&receiver_identity_key, |handle| handle.as_slice().to_vec());
 
@@ -543,7 +528,7 @@ declare_types! {
 
             let mut this = cx.this();
             cx.borrow_mut(&mut this, |mut cm| {
-                let offer = signaling::Offer::from_opaque_or_sdp(call_media_type, opaque, sdp)?;
+                let offer = signaling::Offer::new(call_media_type, opaque)?;
 
                 cm.call_manager.received_offer(peer_id, call_id, signaling::ReceivedOffer {
                     offer,
@@ -566,19 +551,11 @@ declare_types! {
             let sender_device_id = cx.argument::<JsNumber>(1)?.value() as DeviceId;
             let call_id = CallId::new(get_id_arg(&mut cx, 2));
             let sender_supports_multi_ring = cx.argument::<JsBoolean>(3)?.value();
-            let opaque = cx.argument::<JsValue>(4)?.as_value(&mut cx);
-            let sdp = cx.argument::<JsValue>(5)?.as_value(&mut cx);
-            let sender_identity_key = cx.argument::<JsArrayBuffer>(6)?;
-            let receiver_identity_key = cx.argument::<JsArrayBuffer>(7)?;
+            let opaque = cx.argument::<JsArrayBuffer>(4)?;
+            let sender_identity_key = cx.argument::<JsArrayBuffer>(5)?;
+            let receiver_identity_key = cx.argument::<JsArrayBuffer>(6)?;
 
-            let opaque = match opaque.downcast::<JsArrayBuffer>() {
-                Ok(handle) => Some(cx.borrow(&handle, |handle| { handle.as_slice().to_vec() })),
-                Err(_) => None,
-            };
-            let sdp = match sdp.downcast::<JsString>() {
-                Ok(handle) => Some(handle.value()),
-                Err(_) => None,
-            };
+            let opaque = cx.borrow(&opaque, |handle| handle.as_slice().to_vec());
             let sender_identity_key = cx.borrow(&sender_identity_key, |handle| handle.as_slice().to_vec());
             let receiver_identity_key = cx.borrow(&receiver_identity_key, |handle| handle.as_slice().to_vec());
 
@@ -590,7 +567,7 @@ declare_types! {
 
             let mut this = cx.this();
             cx.borrow_mut(&mut this, |mut cm| {
-                let answer = signaling::Answer::from_opaque_or_sdp(opaque, sdp)?;
+                let answer = signaling::Answer::new(opaque)?;
                 cm.call_manager.received_answer(call_id, signaling::ReceivedAnswer {
                     answer,
                     sender_device_id,
@@ -611,16 +588,9 @@ declare_types! {
 
             let mut candidates = Vec::with_capacity(js_candidates.len() as usize);
             for i in 0..js_candidates.len() {
-                let js_candidate = js_candidates.get(&mut cx, i as u32)?.downcast::<JsObject>().expect("ICE candidates");
-                let opaque = match js_candidate.get(&mut cx, "opaque")?.downcast::<JsArrayBuffer>() {
-                    Ok(handle) => Some(cx.borrow(&handle, |handle| { handle.as_slice().to_vec() })),
-                    Err(_) => None,
-                };
-                let sdp = match js_candidate.get(&mut cx, "sdp")?.downcast::<JsString>() {
-                    Ok(handle) => Some(handle.value()),
-                    Err(_) => None,
-                };
-                candidates.push(signaling::IceCandidate::from_opaque_or_sdp(opaque, sdp));
+                let js_candidate = js_candidates.get(&mut cx, i as u32)?.downcast::<JsArrayBuffer>().expect("ICE candidates");
+                let opaque = cx.borrow(&js_candidate, |handle| handle.as_slice().to_vec());
+                candidates.push(signaling::IceCandidate::new(opaque));
             }
             debug!("JsCallManager.receivedIceCandidates({}, {}, {}, {})", peer_id, sender_device_id, call_id, candidates.len());
 
@@ -650,7 +620,7 @@ declare_types! {
                 // This is kind of ugly, but the Android and iOS apps do the same
                 // and so from_type_and_device_id assumes it.
                 // See signaling.rs for more details.
-                0 as DeviceId
+                0
             } else {
                 hangup_device_id.downcast::<JsNumber>().unwrap().value() as DeviceId
             };
@@ -963,21 +933,11 @@ declare_types! {
 
         method setBandwidthMode(mut cx) {
             let client_id = cx.argument::<JsNumber>(0)?.value() as group_call::ClientId;
-            let js_bandwidth_mode = cx.argument::<JsNumber>(1)?.value() as i32;
-
-            // Translate from the app's mode to the internal bitrate version.
-            let bandwidth_mode = if js_bandwidth_mode == 0 {
-                BandwidthMode::Low
-            } else if js_bandwidth_mode == 1 {
-                BandwidthMode::Normal
-            } else {
-                warn!("Invalid bandwidthMode: {}", js_bandwidth_mode);
-                return Ok(cx.undefined().upcast());
-            };
+            let bandwidth_mode = cx.argument::<JsNumber>(1)?.value() as i32;
 
             let mut this = cx.this();
             cx.borrow_mut(&mut this, |mut cm| {
-                cm.call_manager.set_bandwidth_mode(client_id, bandwidth_mode);
+                cm.call_manager.set_bandwidth_mode(client_id, BandwidthMode::from_i32(bandwidth_mode));
                 Ok(())
             }).or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
             Ok(cx.undefined().upcast())
@@ -1215,62 +1175,31 @@ declare_types! {
                     Event::SendSignaling(peer_id, maybe_device_id, call_id, signal) => {
                         let (method_name, data1, data2, data3) : (&str, Handle<JsValue>, Handle<JsValue>, Handle<JsValue>) = match signal {
                             signaling::Message::Offer(offer) => {
-                                let opaque = match offer.opaque {
-                                    None => cx.undefined().upcast(),
-                                    Some(opaque) => {
-                                        let mut js_opaque = cx.array_buffer(opaque.len() as u32)?;
-                                        cx.borrow_mut(&mut js_opaque, |handle| {
-                                            handle.as_mut_slice().copy_from_slice(&opaque);
-                                        });
-                                        js_opaque.upcast()
-                                    }
-                                };
-                                let sdp = match offer.sdp {
-                                    None => cx.undefined().upcast(),
-                                    Some(sdp) => cx.string(sdp).upcast(),
-                                };
-                                ("onSendOffer", cx.number(offer.call_media_type as i32).upcast(), opaque, sdp)
+                                let mut js_opaque = cx.array_buffer(offer.opaque.len() as u32)?;
+                                cx.borrow_mut(&mut js_opaque, |handle| {
+                                    handle.as_mut_slice().copy_from_slice(&offer.opaque);
+                                });
+                                ("onSendOffer", cx.number(offer.call_media_type as i32).upcast(), js_opaque.upcast(), cx.undefined().upcast())
                             },
                             signaling::Message::Answer(answer) => {
-                                let opaque = match answer.opaque {
-                                    None => cx.undefined().upcast(),
-                                    Some(opaque) => {
-                                        let mut js_opaque = cx.array_buffer(opaque.len() as u32)?;
-                                        cx.borrow_mut(&mut js_opaque, |handle| {
-                                            handle.as_mut_slice().copy_from_slice(&opaque);
-                                        });
-                                        js_opaque.upcast()
-                                    }
-                                };
-                                let sdp = match answer.sdp {
-                                    None => cx.undefined().upcast(),
-                                    Some(sdp) => cx.string(sdp).upcast(),
-                                };
-
-                                ("onSendAnswer", opaque, sdp, cx.undefined().upcast())
+                                let mut js_opaque = cx.array_buffer(answer.opaque.len() as u32)?;
+                                cx.borrow_mut(&mut js_opaque, |handle| {
+                                    handle.as_mut_slice().copy_from_slice(&answer.opaque);
+                                });
+                                ("onSendAnswer", js_opaque.upcast(), cx.undefined().upcast(), cx.undefined().upcast())
                             },
                             signaling::Message::Ice(ice) => {
                                 let js_candidates = JsArray::new(&mut cx, ice.candidates_added.len() as u32);
                                 for (i, candidate) in ice.candidates_added.iter().enumerate() {
-                                    let opaque: neon::handle::Handle<JsValue> = match &candidate.opaque {
-                                        None => cx.undefined().upcast(),
-                                        Some(opaque) => {
-                                            let mut js_opaque = cx.array_buffer(opaque.len() as u32)?;
-                                            cx.borrow_mut(&mut js_opaque, |handle| {
-                                                handle.as_mut_slice().copy_from_slice(opaque);
-                                            });
-                                            js_opaque.upcast()
-                                        },
-                                    };
-                                    let sdp: neon::handle::Handle<JsValue> = match &candidate.sdp {
-                                        None => cx.undefined().upcast(),
-                                        Some(sdp) => cx.string(sdp).upcast(),
+                                    let opaque: neon::handle::Handle<JsValue> = {
+                                        let mut js_opaque = cx.array_buffer(candidate.opaque.len() as u32)?;
+                                        cx.borrow_mut(&mut js_opaque, |handle| {
+                                            handle.as_mut_slice().copy_from_slice(candidate.opaque.as_ref());
+                                        });
+                                        js_opaque.upcast()
                                     };
 
-                                    let js_candidate = cx.empty_object();
-                                    js_candidate.set(&mut cx, "opaque", opaque)?;
-                                    js_candidate.set(&mut cx, "sdp", sdp)?;
-                                    js_candidates.set(&mut cx, i as u32, js_candidate)?;
+                                    js_candidates.set(&mut cx, i as u32, opaque)?;
                                 }
                                 ("onSendIceCandidates", js_candidates.upcast(), cx.undefined().upcast(), cx.undefined().upcast())
                             }
@@ -1300,7 +1229,7 @@ declare_types! {
                         let method = *observer.get(&mut cx, method_name)?.downcast::<JsFunction>().expect(&error_message);
                         let args = vec![
                             cx.string(peer_id).upcast(),
-                            cx.number(maybe_device_id.unwrap_or(0 as DeviceId) as f64).upcast(),
+                            cx.number(maybe_device_id.unwrap_or(0) as f64).upcast(),
                             create_id_arg(&mut cx, call_id.as_u64()),
                             cx.boolean(maybe_device_id.is_none()).upcast(),
                             data1,

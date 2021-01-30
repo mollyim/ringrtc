@@ -1,10 +1,6 @@
 /*
- *
- *  Copyright (C) 2019, 2020 Signal Messenger, LLC.
- *  All rights reserved.
- *
- *  SPDX-License-Identifier: GPL-3.0-only
- *
+ * Copyright 2019-2021 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 package org.signal.ringrtc;
@@ -278,6 +274,7 @@ public class CallManager {
    * @param camera        camera control to use for this Call
    * @param iceServers    list of ICE servers to use for this Call
    * @param hideIp        if true hide caller's IP by using a TURN server
+   * @param bandwidthMode desired bandwidth mode to start the session with
    * @param enableCamera  if true, enable the local camera video track when created
    *
    * @throws CallException for native code failures
@@ -292,6 +289,7 @@ public class CallManager {
                       @NonNull List<PeerConnection.IceServer> iceServers,
                       @Nullable PeerConnection.ProxyInfo      proxyInfo,
                                boolean                        hideIp,
+                               BandwidthMode                  bandwidthMode,
                                boolean                        enableCamera)
     throws CallException
   {
@@ -318,7 +316,8 @@ public class CallManager {
     callContext.setVideoEnabled(enableCamera);
     ringrtcProceed(nativeCallManager,
                    callId.longValue(),
-                   callContext);
+                   callContext,
+                   bandwidthMode.ordinal());
   }
 
   /**
@@ -396,7 +395,7 @@ public class CallManager {
 
   /**
    *
-   * Notification from application of a received SDP Offer
+   * Notification from application of a received Offer
    *
    * This is the beginning of an incoming call.
    *
@@ -404,7 +403,6 @@ public class CallManager {
    * @param remote                   remote side fo the call
    * @param remoteDeviceId           deviceId of remote peer
    * @param opaque                   the opaque offer
-   * @param sdp                      the SDP offer (depreacated/legacy)
    * @param messageAgeSec            approximate age of the offer message, in seconds
    * @param callMediaType            the origination type for the call, audio or video
    * @param localDeviceId            the local deviceId of the client
@@ -416,18 +414,17 @@ public class CallManager {
    * @throws CallException for native code failures
    *
    */
-  public void receivedOffer(CallId           callId,
-                            Remote           remote,
-                            Integer          remoteDeviceId,
-                            @Nullable byte[] opaque,
-                            @Nullable String sdp,
-                            Long             messageAgeSec,
-                            CallMediaType    callMediaType,
-                            Integer          localDeviceId,
-                            boolean          remoteSupportsMultiRing,
-                            boolean          isLocalDevicePrimary,
-                            @NonNull byte[]  senderIdentityKey,
-                            @NonNull byte[]  receiverIdentityKey)
+  public void receivedOffer(         CallId        callId,
+                                     Remote        remote,
+                                     Integer       remoteDeviceId,
+                            @NonNull byte[]        opaque,
+                                     Long          messageAgeSec,
+                                     CallMediaType callMediaType,
+                                     Integer       localDeviceId,
+                                     boolean       remoteSupportsMultiRing,
+                                     boolean       isLocalDevicePrimary,
+                            @NonNull byte[]        senderIdentityKey,
+                            @NonNull byte[]        receiverIdentityKey)
     throws CallException
   {
     checkCallManagerExists();
@@ -439,7 +436,6 @@ public class CallManager {
                          remote,
                          remoteDeviceId.intValue(),
                          opaque,
-                         sdp,
                          messageAgeSec.longValue(),
                          callMediaType.ordinal(),
                          localDeviceId.intValue(),
@@ -451,12 +447,11 @@ public class CallManager {
 
   /**
    *
-   * Notification from application of a received SDP Answer
+   * Notification from application of a received Answer
    *
    * @param callId                   callId for the call
    * @param remoteDeviceId           deviceId of remote peer
    * @param opaque                   the opaque answer
-   * @param sdp                      the SDP answer (depreacated/legacy)
    * @param remoteSupportsMultiRing  if true, the remote device supports the multi-ring feature
    * @param senderIdentityKey        the identity key of the remote client
    * @param receiverIdentityKey      the identity key of the local client
@@ -464,11 +459,10 @@ public class CallManager {
    * @throws CallException for native code failures
    *
    */
-  public void receivedAnswer(CallId           callId,
-                             Integer          remoteDeviceId,
-                             @Nullable byte[] opaque,
-                             @Nullable String sdp,
-                             boolean          remoteSupportsMultiRing,
+  public void receivedAnswer(         CallId  callId,
+                                      Integer remoteDeviceId,
+                             @NonNull byte[]  opaque,
+                                      boolean remoteSupportsMultiRing,
                              @NonNull byte[]  senderIdentityKey,
                              @NonNull byte[]  receiverIdentityKey)
     throws CallException
@@ -481,7 +475,6 @@ public class CallManager {
                           callId.longValue(),
                           remoteDeviceId.intValue(),
                           opaque,
-                          sdp,
                           remoteSupportsMultiRing,
                           senderIdentityKey,
                           receiverIdentityKey);
@@ -498,7 +491,9 @@ public class CallManager {
    * @throws CallException for native code failures
    *
    */
-  public void receivedIceCandidates(CallId callId, Integer remoteDeviceId, List<IceCandidate> iceCandidates)
+  public void receivedIceCandidates(         CallId       callId,
+                                             Integer      remoteDeviceId,
+                                    @NonNull List<byte[]> iceCandidates)
     throws CallException
   {
     checkCallManagerExists();
@@ -564,6 +559,17 @@ public class CallManager {
 
   /**
    *
+   * Provides a generic call message that has been received to the
+   * RingRTC Call Manager for handling.
+   *
+   * @param senderUuid      the UUID of the sending user
+   * @param senderDeviceId  the deviceId of the sending device
+   * @param localDeviceId   the local deviceId
+   * @param message         the byte array of the actual message
+   * @param messageAgeSec   the age of the message, in seconds
+   *
+   * @throws CallException for native code failures
+   *
    */
   public void receivedCallMessage(@NonNull UUID    senderUuid,
                                   @NonNull Integer senderDeviceId,
@@ -586,6 +592,15 @@ public class CallManager {
 
   /**
    *
+   * Provides a HTTP response that has been received for a prior request
+   * to the RingRTC Call Manager for handling.
+   *
+   * @param requestId       the Id of the request that the response belongs to
+   * @param status          the standard HTTP status value of the response
+   * @param body            the body of the response
+   *
+   * @throws CallException for native code failures
+   *
    */
   public void receivedHttpResponse(         long   requestId,
                                             int    status,
@@ -602,6 +617,12 @@ public class CallManager {
   }
 
   /**
+   *
+   * Indicates a failure that has been detected for a HTTP request.
+   *
+   * @param requestId       the Id of the request that the response belongs to
+   *
+   * @throws CallException for native code failures
    *
    */
   public void httpRequestFailed(long requestId)
@@ -692,20 +713,20 @@ public class CallManager {
 
   /**
    *
-   * Notification from application to enable/disable the low bandwidth
-   * mode for the session.
+   * Allows the application to constrain bandwidth if so configured
+   * by the user.
    *
-   * @param enabled  if true, then enable low bandwidth mode
+   * @param bandwidthMode  one of the BandwidthMode enumerated values
    *
    * @throws CallException for native code failures
    *
    */
-  public void setLowBandwidthMode(boolean enabled)
+  public void updateBandwidthMode(BandwidthMode bandwidthMode)
     throws CallException
   {
     checkCallManagerExists();
 
-    ringrtcSetLowBandwidthMode(nativeCallManager, enabled);
+    ringrtcUpdateBandwidthMode(nativeCallManager, bandwidthMode.ordinal());
   }
 
   /**
@@ -753,6 +774,16 @@ public class CallManager {
 
   /**
    *
+   * Asynchronous request for the group call state from the SFU for a particular
+   * group. Does not require a group call object.
+   *
+   * @param sfuUrl           the URL to use when accessing the SFU
+   * @param membershipProof  byte array containing the proof for accessing a specific group call
+   * @param groupMembers     a GroupMemberInfo object for each member in a group
+   * @param handler          a handler function which is invoked once the data is available
+   *
+   * @throws CallException for native code failures
+   *
    */
   public void peekGroupCall(@NonNull String                                sfuUrl,
                             @NonNull byte[]                                membershipProof,
@@ -769,10 +800,17 @@ public class CallManager {
   }
 
   /**
+   *
    * Creates and returns a GroupCall object.
    *
    * If there is any error when allocating resources for the object,
    * null is returned.
+   *
+   * @param groupId      the unique identifier for the group
+   * @param sfuUrl       the URL to use when accessing the SFU
+   * @param eglBase      graphics base needed to initialize media
+   * @param observer     the observer that the group call object will use for callback notifications
+   *
    */
   public GroupCall createGroupCall(@NonNull byte[]             groupId,
                                    @NonNull String             sfuUrl,
@@ -991,19 +1029,19 @@ public class CallManager {
   }
 
   @CalledByNative
-  private void onSendOffer(long callId, Remote remote, int remoteDeviceId, boolean broadcast, @Nullable byte[] opaque, @Nullable String sdp, CallMediaType callMediaType) {
+  private void onSendOffer(long callId, Remote remote, int remoteDeviceId, boolean broadcast, @NonNull byte[] opaque, CallMediaType callMediaType) {
     Log.i(TAG, "onSendOffer():");
-    observer.onSendOffer(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), opaque, sdp, callMediaType);
+    observer.onSendOffer(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), opaque, callMediaType);
   }
 
   @CalledByNative
-  private void onSendAnswer(long callId, Remote remote, int remoteDeviceId, boolean broadcast, @Nullable byte[] opaque, @Nullable String sdp) {
+  private void onSendAnswer(long callId, Remote remote, int remoteDeviceId, boolean broadcast, @NonNull byte[] opaque) {
     Log.i(TAG, "onSendAnswer():");
-    observer.onSendAnswer(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), opaque, sdp);
+    observer.onSendAnswer(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), opaque);
   }
 
   @CalledByNative
-  private void onSendIceCandidates(long callId, Remote remote, int remoteDeviceId, boolean broadcast, List<IceCandidate> iceCandidates) {
+  private void onSendIceCandidates(long callId, Remote remote, int remoteDeviceId, boolean broadcast, List<byte[]> iceCandidates) {
     Log.i(TAG, "onSendIceCandidates():");
     observer.onSendIceCandidates(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), iceCandidates);
   }
@@ -1363,7 +1401,6 @@ public class CallManager {
     static CallEvent fromNativeIndex(int nativeIndex) {
       return values()[nativeIndex];
     }
-
   }
 
   /**
@@ -1383,7 +1420,6 @@ public class CallManager {
     static CallMediaType fromNativeIndex(int nativeIndex) {
       return values()[nativeIndex];
     }
-
   }
 
   /**
@@ -1412,7 +1448,35 @@ public class CallManager {
     static HangupType fromNativeIndex(int nativeIndex) {
       return values()[nativeIndex];
     }
+  }
 
+  /**
+   * Modes of operation when working with different bandwidth environments.
+   */
+  public enum BandwidthMode {
+
+    /**
+     * Intended for audio-only, to help ensure reliable audio over
+     * severely constrained networks.
+     */
+    VERY_LOW,
+
+    /**
+     * Intended for low bitrate video calls. Useful to reduce
+     * bandwidth costs, especially on mobile networks.
+     */
+    LOW,
+
+    /**
+     * (Default) No specific constraints, but keep a relatively
+     * high bitrate to ensure good quality.
+     */
+    NORMAL;
+
+    @CalledByNative
+    static BandwidthMode fromNativeIndex(int nativeIndex) {
+        return values()[nativeIndex];
+    }
   }
 
   /**
@@ -1438,7 +1502,6 @@ public class CallManager {
     static HttpMethod fromNativeIndex(int nativeIndex) {
       return values()[nativeIndex];
     }
-
   }
 
   /**
@@ -1481,32 +1544,30 @@ public class CallManager {
 
     /**
      *
-     * Notification that an SDP offer is ready to be sent
+     * Notification that an offer is ready to be sent
      *
      * @param callId          callId for the call
      * @param remote          remote peer of the outgoing call
      * @param remoteDeviceId  deviceId of remote peer
      * @param broadcast       if true, send broadcast message
      * @param opaque          the opaque offer
-     * @param sdp             the SDP offer (deprecated/legacy)
      * @param callMediaType   the origination type for the call, audio or video
      *
      */
-    void onSendOffer(CallId callId, Remote remote, Integer remoteDeviceId, Boolean broadcast, @Nullable byte[] opaque, @Nullable String sdp, CallMediaType callMediaType);
+    void onSendOffer(CallId callId, Remote remote, Integer remoteDeviceId, Boolean broadcast, @NonNull byte[] opaque, CallMediaType callMediaType);
 
     /**
      *
-     * Notification that an SDP answer is ready to be sent
+     * Notification that an answer is ready to be sent
      *
      * @param callId          callId for the call
      * @param remote          remote peer of the outgoing call
      * @param remoteDeviceId  deviceId of remote peer
      * @param broadcast       if true, send broadcast message
      * @param opaque          the opaque answer
-     * @param sdp             the SDP answer (deprecated/legacy)
      *
      */
-    void onSendAnswer(CallId callId, Remote remote, Integer remoteDeviceId, Boolean broadcast, @Nullable byte[] opaque, @Nullable String sdp);
+    void onSendAnswer(CallId callId, Remote remote, Integer remoteDeviceId, Boolean broadcast, @NonNull byte[] opaque);
 
     /**
      *
@@ -1519,7 +1580,7 @@ public class CallManager {
      * @param iceCandidates   ICE candidates
      *
      */
-    void onSendIceCandidates(CallId callId, Remote remote, Integer remoteDeviceId, Boolean broadcast, List<IceCandidate> iceCandidates);
+    void onSendIceCandidates(CallId callId, Remote remote, Integer remoteDeviceId, Boolean broadcast, List<byte[]> iceCandidates);
 
     /**
      *
@@ -1613,7 +1674,8 @@ public class CallManager {
   private native
     void ringrtcProceed(long        nativeCallManager,
                         long        callId,
-                        CallContext callContext)
+                        CallContext callContext,
+                        int         bandwidthMode)
     throws CallException;
 
   private native
@@ -1629,37 +1691,35 @@ public class CallManager {
     throws CallException;
 
   private native
-    void ringrtcReceivedAnswer(long             nativeCallManager,
-                               long             callId,
-                               int              remoteDeviceId,
-                               @Nullable byte[] opaque,
-                               @Nullable String sdp,
-                               boolean          remoteSupportsMultiRing,
-                               @NonNull byte[]  senderIdentityKey,
-                               @NonNull byte[]  receiverIdentityKey)
+    void ringrtcReceivedAnswer(long    nativeCallManager,
+                               long    callId,
+                               int     remoteDeviceId,
+                               byte[]  opaque,
+                               boolean remoteSupportsMultiRing,
+                               byte[]  senderIdentityKey,
+                               byte[]  receiverIdentityKey)
     throws CallException;
 
   private native
-    void ringrtcReceivedOffer(long             nativeCallManager,
-                              long             callId,
-                              Remote           remote,
-                              int              remoteDeviceId,
-                              @Nullable byte[] opaque,
-                              @Nullable String sdp,
-                              long             messageAgeSec,
-                              int              callMediaType,
-                              int              localDeviceId,
-                              boolean          remoteSupportsMultiRing,
-                              boolean          isLocalDevicePrimary,
-                              @NonNull byte[]  senderIdentityKey,
-                              @NonNull byte[]  receiverIdentityKey)
+    void ringrtcReceivedOffer(long    nativeCallManager,
+                              long    callId,
+                              Remote  remote,
+                              int     remoteDeviceId,
+                              byte[]  opaque,
+                              long    messageAgeSec,
+                              int     callMediaType,
+                              int     localDeviceId,
+                              boolean remoteSupportsMultiRing,
+                              boolean isLocalDevicePrimary,
+                              byte[]  senderIdentityKey,
+                              byte[]  receiverIdentityKey)
     throws CallException;
 
   private native
-    void ringrtcReceivedIceCandidates(long               nativeCallManager,
-                                      long               callId,
-                                      int                remoteDeviceId,
-                                      List<IceCandidate> iceCandidates)
+    void ringrtcReceivedIceCandidates(long         nativeCallManager,
+                                      long         callId,
+                                      int          remoteDeviceId,
+                                      List<byte[]> iceCandidates)
     throws CallException;
 
   private native
@@ -1677,19 +1737,19 @@ public class CallManager {
     throws CallException;
 
   private native
-    void ringrtcReceivedCallMessage(         long   nativeCallManager,
-                                    @NonNull byte[] senderUuid,
-                                             int    senderDeviceId,
-                                             int    localDeviceId,
-                                    @NonNull byte[] message,
-                                             long   messageAgeSec)
+    void ringrtcReceivedCallMessage(long   nativeCallManager,
+                                    byte[] senderUuid,
+                                    int    senderDeviceId,
+                                    int    localDeviceId,
+                                    byte[] message,
+                                    long   messageAgeSec)
     throws CallException;
 
   private native
-    void ringrtcReceivedHttpResponse(         long   nativeCallManager,
-                                              long   requestId,
-                                              int    status,
-                                     @NonNull byte[] body)
+    void ringrtcReceivedHttpResponse(long   nativeCallManager,
+                                     long   requestId,
+                                     int    status,
+                                     byte[] body)
     throws CallException;
 
   private native
@@ -1714,7 +1774,7 @@ public class CallManager {
     throws CallException;
 
   private native
-    void ringrtcSetLowBandwidthMode(long nativeCallManager, boolean enabled)
+    void ringrtcUpdateBandwidthMode(long nativeCallManager, int bandwidthMode)
     throws CallException;
 
   private native
@@ -1730,10 +1790,10 @@ public class CallManager {
     throws CallException;
 
   private native
-    void ringrtcPeekGroupCall(         long   nativeCallManager,
-                                       long   requestId,
-                              @NonNull String sfuUrl,
-                              @NonNull byte[] membershipProof,
-                              @NonNull byte[] serializedGroupMembers)
+    void ringrtcPeekGroupCall(long   nativeCallManager,
+                              long   requestId,
+                              String sfuUrl,
+                              byte[] membershipProof,
+                              byte[] serializedGroupMembers)
     throws CallException;
 }

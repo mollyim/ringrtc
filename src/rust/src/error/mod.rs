@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! Common error codes.
@@ -38,10 +36,10 @@ pub enum RingRtcError {
     #[fail(display = "Active Media Stream is already set, remote_device: {}", _0)]
     ActiveMediaStreamAlreadySet(DeviceId),
     #[fail(
-        display = "Pending incoming call data is already set, remote_device: {}, offer: {}",
-        _0, _1
+        display = "Pending incoming call is already set, remote_device: {}",
+        _0
     )]
-    PendingCallAlreadySet(DeviceId, String),
+    PendingCallAlreadySet(DeviceId),
     #[fail(
         display = "Application Connection is already set, remote_device: {}",
         _0

@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019, 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! Test the FSMs using the Simulation platform
@@ -16,23 +14,15 @@ use std::ptr;
 use std::time::Duration;
 
 use ringrtc::common::{ApplicationEvent, CallId, CallState, ConnectionState, DeviceId};
-
+use ringrtc::core::bandwidth_mode::BandwidthMode;
 use ringrtc::core::call_manager::MAX_MESSAGE_AGE_SEC;
 use ringrtc::core::signaling;
-use ringrtc::webrtc::media::MediaStream;
-
 use ringrtc::webrtc::data_channel::DataChannel;
+use ringrtc::webrtc::media::MediaStream;
 
 #[macro_use]
 mod common;
-use common::{
-    random_received_ice_candidate,
-    random_received_offer,
-    test_init,
-    SignalingType,
-    TestContext,
-    PRNG,
-};
+use common::{random_received_ice_candidate, random_received_offer, test_init, TestContext, PRNG};
 
 // Create an inbound call session up to the ConnectingBeforeAccepted state.
 //
@@ -46,7 +36,7 @@ use common::{
 // - check call is in Connecting state
 // - check answer sent
 // Now in the Connecting state.
-fn start_inbound_call(signaling_type: SignalingType) -> TestContext {
+fn start_inbound_call() -> TestContext {
     let context = TestContext::new();
     let mut cm = context.cm();
 
@@ -55,7 +45,7 @@ fn start_inbound_call(signaling_type: SignalingType) -> TestContext {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(signaling_type, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -74,6 +64,7 @@ fn start_inbound_call(signaling_type: SignalingType) -> TestContext {
     cm.proceed(
         active_call.call_id(),
         format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned(),
+        BandwidthMode::Normal,
     )
     .expect(error_line!());
 
@@ -83,11 +74,8 @@ fn start_inbound_call(signaling_type: SignalingType) -> TestContext {
         .get_connection(1 as DeviceId)
         .expect(error_line!());
 
-    cm.received_ice(
-        active_call.call_id(),
-        random_received_ice_candidate(signaling_type),
-    )
-    .expect(error_line!());
+    cm.received_ice(active_call.call_id(), random_received_ice_candidate())
+        .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
     assert_eq!(
@@ -110,9 +98,7 @@ fn start_inbound_call(signaling_type: SignalingType) -> TestContext {
 fn inbound_ice_connecting() {
     test_init();
 
-    let _ = start_inbound_call(SignalingType::Legacy);
-    let _ = start_inbound_call(SignalingType::BackwardsCompatible);
-    let _ = start_inbound_call(SignalingType::LegacyFree);
+    let _ = start_inbound_call();
 }
 
 // Create an inbound call session up to the ConnectedAndAccepted state.
@@ -125,7 +111,7 @@ fn inbound_ice_connecting() {
 // Now in the ConnectedAndAccepted state.
 
 fn connect_inbound_call() -> TestContext {
-    let context = start_inbound_call(SignalingType::Legacy);
+    let context = start_inbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
     let mut active_connection = context.active_connection();
@@ -299,7 +285,7 @@ fn start_inbound_call_with_error() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -321,6 +307,7 @@ fn start_inbound_call_with_error() {
     cm.proceed(
         active_call.call_id(),
         format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned(),
+        BandwidthMode::Normal,
     )
     .expect(error_line!());
 
@@ -360,7 +347,7 @@ fn receive_offer_while_active() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -387,7 +374,7 @@ fn receive_expired_offer() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(86400)), // one whole day
+        random_received_offer(Duration::from_secs(86400)), // one whole day
     )
     .expect(error_line!());
 
@@ -413,10 +400,7 @@ fn receive_offer_before_age_limit() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(
-            SignalingType::Legacy,
-            Duration::from_secs(MAX_MESSAGE_AGE_SEC - 1),
-        ),
+        random_received_offer(Duration::from_secs(MAX_MESSAGE_AGE_SEC - 1)),
     )
     .expect(error_line!());
 
@@ -442,10 +426,7 @@ fn receive_offer_at_age_limit() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(
-            SignalingType::Legacy,
-            Duration::from_secs(MAX_MESSAGE_AGE_SEC),
-        ),
+        random_received_offer(Duration::from_secs(MAX_MESSAGE_AGE_SEC)),
     )
     .expect(error_line!());
 
@@ -471,10 +452,7 @@ fn receive_expired_offer_after_age_limit() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(
-            SignalingType::Legacy,
-            Duration::from_secs(MAX_MESSAGE_AGE_SEC + 1),
-        ),
+        random_received_offer(Duration::from_secs(MAX_MESSAGE_AGE_SEC + 1)),
     )
     .expect(error_line!());
 

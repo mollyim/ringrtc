@@ -1,8 +1,6 @@
 #
-# Copyright (C) 2019 Signal Messenger, LLC.
-# All rights reserved.
-#
-# SPDX-License-Identifier: GPL-3.0-only
+# Copyright 2019-2021 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 
 if (is_android) {
@@ -40,7 +38,6 @@ if (is_android) {
       "api/org/signal/ringrtc/Connection.java",
       "api/org/signal/ringrtc/GroupCall.java",
       "api/org/signal/ringrtc/HttpHeader.java",
-      "api/org/signal/ringrtc/IceCandidate.java",
       "api/org/signal/ringrtc/Log.java",
       "api/org/signal/ringrtc/PeekInfo.java",
       "api/org/signal/ringrtc/Remote.java",

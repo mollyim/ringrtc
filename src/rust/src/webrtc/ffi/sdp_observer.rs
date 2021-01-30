@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! WebRTC FFI Create / Set Session Description Interface.
@@ -49,10 +47,6 @@ extern "C" {
     pub fn Rust_answerFromSdp(sdp: *const c_char) -> *mut RffiSessionDescription;
 
     pub fn Rust_offerFromSdp(sdp: *const c_char) -> *mut RffiSessionDescription;
-
-    pub fn Rust_replaceRtpDataChannelsWithSctp(
-        session_description: *const RffiSessionDescription,
-    ) -> *mut RffiSessionDescription;
 
     pub fn Rust_disableDtlsAndSetSrtpKey(
         session_description: *mut RffiSessionDescription,

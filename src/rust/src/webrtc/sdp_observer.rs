@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! WebRTC Create Session Description Interface.
@@ -14,6 +12,7 @@ use std::ptr;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::common::Result;
+use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::util::{ptr_as_ref, FutureResult, RustObject};
 use crate::error::RingRtcError;
 use crate::protobuf;
@@ -135,14 +134,6 @@ impl SessionDescription {
         Ok(SessionDescription::new(offer))
     }
 
-    pub fn replace_rtp_data_channels_with_sctp(&self) -> Result<Self> {
-        let rffi = unsafe { sdp::Rust_replaceRtpDataChannelsWithSctp(self.rffi) };
-        if rffi.is_null() {
-            return Err(RingRtcError::MungeSdp.into());
-        }
-        Ok(Self::new(rffi))
-    }
-
     pub fn disable_dtls_and_set_srtp_key(&mut self, key: &SrtpKey) -> Result<()> {
         let success = unsafe {
             sdp::Rust_disableDtlsAndSetSrtpKey(
@@ -164,6 +155,7 @@ impl SessionDescription {
     pub fn to_v4(
         &self,
         public_key: Vec<u8>,
+        bandwidth_mode: BandwidthMode,
     ) -> Result<protobuf::signaling::ConnectionParametersV4> {
         let rffi_v4_ptr = unsafe { sdp::Rust_sessionDescriptionToV4(self.rffi) };
 
@@ -210,6 +202,7 @@ impl SessionDescription {
             ice_ufrag: Some(ice_ufrag),
             ice_pwd: Some(ice_pwd),
             receive_video_codecs,
+            max_bitrate_bps: Some(bandwidth_mode.max_bitrate().as_bps()),
         })
     }
 

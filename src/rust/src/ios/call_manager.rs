@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019, 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! iOS Call Manager
@@ -16,15 +14,8 @@ use crate::ios::api::call_manager_interface::{AppCallContext, AppInterface, AppO
 use crate::ios::ios_platform::IOSPlatform;
 use crate::ios::logging::{init_logging, IOSLogger};
 
-use crate::common::{
-    BandwidthMode,
-    CallId,
-    CallMediaType,
-    DeviceId,
-    FeatureLevel,
-    HttpResponse,
-    Result,
-};
+use crate::common::{CallId, CallMediaType, DeviceId, FeatureLevel, HttpResponse, Result};
+use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call_manager::CallManager;
 use crate::core::util::{ptr_as_box, ptr_as_mut, uuid_to_string};
 use crate::core::{group_call, signaling};
@@ -83,13 +74,14 @@ pub fn proceed(
     call_manager: *mut IOSCallManager,
     call_id: u64,
     app_call_context: AppCallContext,
+    bandwidth_mode: BandwidthMode,
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let call_id = CallId::from(call_id);
 
     info!("proceed(): {}", call_id);
 
-    call_manager.proceed(call_id, Arc::new(app_call_context))
+    call_manager.proceed(call_id, Arc::new(app_call_context), bandwidth_mode)
 }
 
 /// Application notification that the sending of the previous message was a success.
@@ -125,7 +117,6 @@ pub fn received_answer(
     call_id: u64,
     sender_device_id: DeviceId,
     opaque: Option<Vec<u8>>,
-    sdp: Option<String>,
     sender_device_feature_level: FeatureLevel,
     sender_identity_key: Option<Vec<u8>>,
     receiver_identity_key: Option<Vec<u8>>,
@@ -137,6 +128,17 @@ pub fn received_answer(
         "received_answer(): call_id: {} sender_device_id: {}",
         call_id, sender_device_id
     );
+
+    let opaque = match opaque {
+        Some(v) => v,
+        None => {
+            return Err(RingRtcError::OptionValueNotSet(
+                "received_answer()".to_owned(),
+                "opaque".to_owned(),
+            )
+            .into());
+        }
+    };
 
     let sender_identity_key = match sender_identity_key {
         Some(v) => v,
@@ -163,7 +165,7 @@ pub fn received_answer(
     call_manager.received_answer(
         call_id,
         signaling::ReceivedAnswer {
-            answer: signaling::Answer::from_opaque_or_sdp(opaque, sdp)?,
+            answer: signaling::Answer::new(opaque)?,
             sender_device_id,
             sender_device_feature_level,
             sender_identity_key,
@@ -180,7 +182,6 @@ pub fn received_offer(
     remote_peer: *const c_void,
     sender_device_id: DeviceId,
     opaque: Option<Vec<u8>>,
-    sdp: Option<String>,
     age_sec: u64,
     call_media_type: CallMediaType,
     receiver_device_id: DeviceId,
@@ -197,6 +198,17 @@ pub fn received_offer(
         "received_offer(): call_id: {} remote_device_id: {}",
         call_id, sender_device_id
     );
+
+    let opaque = match opaque {
+        Some(v) => v,
+        None => {
+            return Err(RingRtcError::OptionValueNotSet(
+                "received_offer()".to_owned(),
+                "opaque".to_owned(),
+            )
+            .into());
+        }
+    };
 
     let sender_identity_key = match sender_identity_key {
         Some(v) => v,
@@ -224,7 +236,7 @@ pub fn received_offer(
         remote_peer,
         call_id,
         signaling::ReceivedOffer {
-            offer: signaling::Offer::from_opaque_or_sdp(call_media_type, opaque, sdp)?,
+            offer: signaling::Offer::new(call_media_type, opaque)?,
             age: Duration::from_secs(age_sec),
             sender_device_id,
             sender_device_feature_level,
@@ -373,16 +385,16 @@ pub fn set_video_enable(call_manager: *mut IOSCallManager, enable: bool) -> Resu
     active_connection.inject_send_sender_status_via_data_channel(enable)
 }
 
-/// CMI request to set the low bandwidth mode on the direct connection
-pub fn set_direct_bandwidth_mode(
+/// Request to update the bandwidth mode on the direct connection
+pub fn update_bandwidth_mode(
     call_manager: *mut IOSCallManager,
-    mode: BandwidthMode,
+    bandwidth_mode: BandwidthMode,
 ) -> Result<()> {
-    info!("set_low_bandwidth_mode():");
+    info!("update_bandwidth_mode():");
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let mut active_connection = call_manager.active_connection()?;
-    active_connection.set_bandwidth_mode(mode)
+    active_connection.inject_update_bandwidth_mode(bandwidth_mode)
 }
 
 /// CMI request to drop the active call

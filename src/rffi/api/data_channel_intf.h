@@ -1,10 +1,6 @@
 /*
- *
- *  Copyright (C) 2019 Signal Messenger, LLC.
- *  All rights reserved.
- *
- *  SPDX-License-Identifier: GPL-3.0-only
- *
+ * Copyright 2019-2021 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 #ifndef RFFI_API_DATA_CHANNEL_OBSERVER_INTF_H__
@@ -27,8 +23,5 @@ Rust_dataChannelSend(webrtc::DataChannelInterface* data_channel,
                      const uint8_t*                buf,
                      size_t                        len,
                      bool                          binary);
-
-RUSTEXPORT bool
-Rust_dataChannelIsReliable(webrtc::DataChannelInterface* data_channel);
 
 #endif /* RFFI_API_DATA_CHANNEL_OBSERVER_INTF_H__ */

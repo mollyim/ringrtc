@@ -1,8 +1,6 @@
 //
-// Copyright (C) 2019, 2020 Signal Messenger, LLC.
-// All rights reserved.
-//
-// SPDX-License-Identifier: GPL-3.0-only
+// Copyright 2019-2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 //
 
 //! Tests for outgoing calls
@@ -18,17 +16,15 @@ use std::time::Duration;
 
 use ringrtc::common::{
     ApplicationEvent,
-    BandwidthMode,
     CallId,
     CallMediaType,
     CallState,
     ConnectionState,
     DeviceId,
 };
+use ringrtc::core::bandwidth_mode::BandwidthMode;
 use ringrtc::core::signaling;
-
 use ringrtc::sim::error::SimError;
-
 use ringrtc::webrtc::media::MediaStream;
 
 #[macro_use]
@@ -39,7 +35,6 @@ use common::{
     random_received_ice_candidate,
     random_received_offer,
     test_init,
-    SignalingType,
     TestContext,
     PRNG,
 };
@@ -88,6 +83,7 @@ fn start_outbound_and_proceed() -> TestContext {
     cm.proceed(
         active_call.call_id(),
         format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned(),
+        BandwidthMode::Normal,
     )
     .expect(error_line!());
 
@@ -117,7 +113,7 @@ fn start_outbound_and_proceed() -> TestContext {
 // - check call is in Connecting state
 //
 // Now in the Connecting state.
-fn start_outbound_n_remote_call(signaling_type: SignalingType, n_remotes: u16) -> TestContext {
+fn start_outbound_n_remote_call(n_remotes: u16) -> TestContext {
     let context = TestContext::new();
     let mut cm = context.cm();
 
@@ -143,6 +139,7 @@ fn start_outbound_n_remote_call(signaling_type: SignalingType, n_remotes: u16) -
     cm.proceed(
         active_call.call_id(),
         format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned(),
+        BandwidthMode::Normal,
     )
     .expect(error_line!());
 
@@ -151,13 +148,10 @@ fn start_outbound_n_remote_call(signaling_type: SignalingType, n_remotes: u16) -
     // add a received answer for each remote
     for i in 1..(n_remotes + 1) {
         let call_id = active_call.call_id();
-        cm.received_answer(
-            call_id,
-            random_received_answer(signaling_type, i as DeviceId),
-        )
-        .expect(error_line!());
+        cm.received_answer(call_id, random_received_answer(i as DeviceId))
+            .expect(error_line!());
 
-        cm.received_ice(call_id, random_received_ice_candidate(signaling_type))
+        cm.received_ice(call_id, random_received_ice_candidate())
             .expect(error_line!());
 
         cm.synchronize().expect(error_line!());
@@ -194,8 +188,8 @@ fn start_outbound_n_remote_call(signaling_type: SignalingType, n_remotes: u16) -
 // - check call is in Connecting state
 //
 // Now in the Connecting state.
-fn start_outbound_call(signaling_type: SignalingType) -> TestContext {
-    start_outbound_n_remote_call(signaling_type, 1)
+fn start_outbound_call() -> TestContext {
+    start_outbound_n_remote_call(1)
 }
 
 // Create an outbound call session up to the Accepted state.
@@ -210,7 +204,7 @@ fn start_outbound_call(signaling_type: SignalingType) -> TestContext {
 // Now in the Accepted state.
 
 fn connect_outbound_call() -> TestContext {
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
     let mut active_connection = context.active_connection();
@@ -269,9 +263,7 @@ fn connect_outbound_call() -> TestContext {
 fn outbound_receive_answer() {
     test_init();
 
-    let _ = start_outbound_call(SignalingType::Legacy);
-    let _ = start_outbound_call(SignalingType::BackwardsCompatible);
-    let _ = start_outbound_call(SignalingType::LegacyFree);
+    let _ = start_outbound_call();
 }
 
 #[test]
@@ -285,7 +277,7 @@ fn outbound_call_connected() {
 fn outbound_local_hang_up() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
 
@@ -310,7 +302,7 @@ fn outbound_local_hang_up() {
 fn outbound_ice_failed() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
     let mut active_connection = context.active_connection();
@@ -340,7 +332,7 @@ fn outbound_ice_failed() {
 fn outbound_ice_disconnected_before_call_accepted() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
     let mut active_connection = context.active_connection();
@@ -385,7 +377,7 @@ fn outbound_ice_disconnected_before_call_accepted() {
 fn outbound_call_accepted_with_stale_call_id() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
     let mut active_connection = context.active_connection();
@@ -632,15 +624,15 @@ fn inject_send_sender_status_via_data_channel() {
 }
 
 #[test]
-fn set_bandwidth_mode_normal() {
+fn update_bandwidth_mode_default() {
     test_init();
 
     let context = connect_outbound_call();
     let mut cm = context.cm();
-    let mut active_connection = context.active_connection();
+    let active_connection = context.active_connection();
 
     active_connection
-        .set_bandwidth_mode(BandwidthMode::Normal)
+        .update_bandwidth_mode(BandwidthMode::Normal)
         .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
@@ -651,15 +643,15 @@ fn set_bandwidth_mode_normal() {
 }
 
 #[test]
-fn set_bandwidth_mode_low() {
+fn update_bandwidth_mode_low() {
     test_init();
 
     let context = connect_outbound_call();
     let mut cm = context.cm();
-    let mut active_connection = context.active_connection();
+    let active_connection = context.active_connection();
 
     active_connection
-        .set_bandwidth_mode(BandwidthMode::Low)
+        .update_bandwidth_mode(BandwidthMode::Low)
         .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
@@ -677,10 +669,10 @@ fn inject_local_ice_candidate() {
     let mut cm = context.cm();
     let mut active_connection = context.active_connection();
 
-    let ice_candidate = random_ice_candidate(SignalingType::Legacy);
+    let ice_candidate = random_ice_candidate();
     let force_send = true;
     active_connection
-        .inject_local_ice_candidate(ice_candidate, force_send)
+        .inject_local_ice_candidate(ice_candidate, force_send, "")
         .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
@@ -698,11 +690,8 @@ fn receive_remote_ice_candidate() {
 
     // add a received ICE candidate
     let call_id = active_call.call_id();
-    cm.received_ice(
-        call_id,
-        random_received_ice_candidate(SignalingType::Legacy),
-    )
-    .expect("receive_ice");
+    cm.received_ice(call_id, random_received_ice_candidate())
+        .expect("receive_ice");
     cm.synchronize().expect(error_line!());
 
     assert_eq!(context.error_count(), 0);
@@ -751,11 +740,11 @@ fn received_remote_hangup_before_connection_with_message_in_flight() {
     // the subsequent Hangup message is queued until message_sent() is called.
     context.no_auto_message_sent_for_ice(true);
 
-    let ice_candidate = random_ice_candidate(SignalingType::Legacy);
+    let ice_candidate = random_ice_candidate();
     let force_send = true;
     parent_connection
         .unwrap()
-        .inject_local_ice_candidate(ice_candidate, force_send)
+        .inject_local_ice_candidate(ice_candidate, force_send, "")
         .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
@@ -834,11 +823,11 @@ fn received_remote_hangup_before_connection_for_permission_with_message_in_fligh
     // the subsequent Hangup message is queued until message_sent() is called.
     context.no_auto_message_sent_for_ice(true);
 
-    let ice_candidate = random_ice_candidate(SignalingType::Legacy);
+    let ice_candidate = random_ice_candidate();
     let force_send = true;
     parent_connection
         .unwrap()
-        .inject_local_ice_candidate(ice_candidate, force_send)
+        .inject_local_ice_candidate(ice_candidate, force_send, "")
         .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
@@ -905,7 +894,7 @@ fn received_remote_hangup_after_connection() {
 fn received_remote_needs_permission() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let active_call = context.active_call();
 
@@ -987,7 +976,7 @@ fn received_remote_video_status() {
 fn call_timeout_before_connect() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
     let mut active_call = context.active_call();
 
@@ -1046,6 +1035,7 @@ fn outbound_proceed_with_error() {
     cm.proceed(
         active_call.call_id(),
         format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned(),
+        BandwidthMode::Normal,
     )
     .expect(error_line!());
 
@@ -1108,10 +1098,10 @@ fn local_ice_candidate_with_error() {
     // cause the sending of the ICE candidate to fail.
     context.force_internal_fault(true);
 
-    let ice_candidate = random_ice_candidate(SignalingType::Legacy);
+    let ice_candidate = random_ice_candidate();
     let force_send = true;
     active_connection
-        .inject_local_ice_candidate(ice_candidate, force_send)
+        .inject_local_ice_candidate(ice_candidate, force_send, "")
         .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
@@ -1128,12 +1118,12 @@ fn local_ice_candidate_with_error() {
     assert_eq!(context.ice_candidates_sent(), 0);
 }
 
-fn outbound_multiple_remote_devices(signaling_type: SignalingType) {
+fn outbound_multiple_remote_devices() {
     test_init();
 
     // With 5, we hit "too many files open" on Linux.
     let n_remotes: u16 = 3;
-    let context = start_outbound_n_remote_call(signaling_type, n_remotes);
+    let context = start_outbound_n_remote_call(n_remotes);
     let mut cm = context.cm();
     let active_call = context.active_call();
 
@@ -1233,27 +1223,22 @@ fn outbound_multiple_remote_devices(signaling_type: SignalingType) {
 fn outbound_multiple_call_managers() {
     test_init();
 
+    let n_call_manager = 5;
+
     let mut thread_vec = Vec::new();
-    for (i, signaling_type) in [
-        SignalingType::Legacy,
-        SignalingType::BackwardsCompatible,
-        SignalingType::LegacyFree,
-    ]
-    .iter()
-    .enumerate()
-    {
+    for i in 0..n_call_manager {
         info!("test:{}: creating call manager", i);
 
         let child = thread::spawn(move || {
-            outbound_multiple_remote_devices(*signaling_type);
+            outbound_multiple_remote_devices();
         });
 
         thread_vec.push(child);
     }
 
-    info!("test: joinging threads");
+    info!("test: joining threads");
     for child in thread_vec {
-        info!("test: joinging thread...");
+        info!("test: joining thread...");
         // Make sure no threads panicked
         assert!(child.join().is_ok());
     }
@@ -1266,7 +1251,7 @@ fn outbound_multiple_call_managers() {
 fn glare_before_connect_winner() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
 
     // Create incoming call with same remote
@@ -1287,7 +1272,7 @@ fn glare_before_connect_winner() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -1310,7 +1295,7 @@ fn glare_before_connect_winner() {
 fn glare_before_connect_loser() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
 
     // Create incoming call with same remote
@@ -1331,7 +1316,7 @@ fn glare_before_connect_loser() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -1354,7 +1339,7 @@ fn glare_before_connect_loser() {
 fn glare_before_connect_equal() {
     test_init();
 
-    let context = start_outbound_call(SignalingType::Legacy);
+    let context = start_outbound_call();
     let mut cm = context.cm();
 
     // Create incoming call with same remote
@@ -1370,7 +1355,7 @@ fn glare_before_connect_equal() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -1420,7 +1405,7 @@ fn glare_after_connect_winner() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -1465,7 +1450,7 @@ fn glare_after_connect_loser() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -1505,7 +1490,7 @@ fn glare_after_connect_equal() {
     cm.received_offer(
         remote_peer,
         call_id,
-        random_received_offer(SignalingType::Legacy, Duration::from_secs(0)),
+        random_received_offer(Duration::from_secs(0)),
     )
     .expect(error_line!());
 
@@ -1553,8 +1538,12 @@ fn start_outbound_receive_busy() {
         active_call.call_id()
     };
 
-    cm.proceed(call_id, format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned())
-        .expect(error_line!());
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", PRNG.gen::<u16>()).to_owned(),
+        BandwidthMode::Normal,
+    )
+    .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
 

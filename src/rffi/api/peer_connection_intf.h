@@ -1,10 +1,6 @@
 /*
- *
- *  Copyright (C) 2019 Signal Messenger, LLC.
- *  All rights reserved.
- *
- *  SPDX-License-Identifier: GPL-3.0-only
- *
+ * Copyright 2019-2021 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 #ifndef RFFI_API_PEER_CONNECTION_INTF_H__
@@ -37,9 +33,6 @@ Rust_answerFromSdp(const char* sdp);
 
 RUSTEXPORT webrtc::SessionDescriptionInterface*
 Rust_offerFromSdp(const char* sdp);
-
-RUSTEXPORT webrtc::SessionDescriptionInterface*
-Rust_replaceRtpDataChannelsWithSctp(const webrtc::SessionDescriptionInterface* session_description);
 
 RUSTEXPORT bool
 Rust_disableDtlsAndSetSrtpKey(webrtc::SessionDescriptionInterface* session_description,
@@ -156,5 +149,7 @@ Rust_sendRtp(webrtc::PeerConnectionInterface* peer_connection,
 RUSTEXPORT bool
 Rust_receiveRtp(webrtc::PeerConnectionInterface* peer_connection, uint8_t pt);
 
+RUSTEXPORT void
+Rust_configureAudioEncoders(webrtc::PeerConnectionInterface* peer_connection, const webrtc::AudioEncoder::Config* config);
 
 #endif /* RFFI_API_PEER_CONNECTION_INTF_H__ */
