@@ -11,6 +11,9 @@
 //! call signaling transport.
 //!
 
+// TODO: Fix return values to avoid unnecessary wraps.
+#![allow(clippy::unnecessary_wraps)]
+
 #[macro_use]
 extern crate failure;
 
@@ -56,7 +59,7 @@ mod protobuf {
     pub mod signaling;
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", feature = "check-all"))]
 /// Android specific implementation.
 mod android {
     extern crate jni;
@@ -73,7 +76,7 @@ mod android {
     mod webrtc_peer_connection_factory;
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", feature = "check-all"))]
 /// iOS specific implementation.
 mod ios {
     mod api {
