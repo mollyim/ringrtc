@@ -1,6 +1,5 @@
 apply plugin: 'com.android.library'
 apply plugin: 'maven-publish'
-apply plugin: 'com.jfrog.bintray'
 
 archivesBaseName = "ringrtc-android"
 version          = version_number
@@ -42,6 +41,14 @@ dependencies {
 publishing {
     repositories {
         mavenLocal()
+        maven {
+            name = 'GitHubPackages'
+            url = uri('https://maven.pkg.github.com/mollyim/ringrtc')
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
     }
 
     publications {
@@ -74,26 +81,7 @@ publishing {
     }
 }
 
-bintray {
-    user = System.getenv('BINTRAY_USER')
-    key  = System.getenv('BINTRAY_KEY')
-    publications = ['ringrtc']
-    publish = true
-    override = true
-    pkg {
-        repo = 'maven'
-        userOrg = 'mollyim'
-        name = archivesBaseName
-        vcsUrl = 'https://github.com/mollyim/ringrtc.git'
-        licenses = ['GPL-3.0']
-    }
-}
-
 tasks.withType(AbstractPublishToMaven) {
-    dependsOn release:assemble
-}
-
-bintrayUpload {
     dependsOn release:assemble
 }
 
@@ -102,5 +90,5 @@ task installArchives {
 }
 
 task uploadArchives {
-    dependsOn bintrayUpload
+    dependsOn publishRingrtcPublicationToGitHubPackagesRepository
 }
