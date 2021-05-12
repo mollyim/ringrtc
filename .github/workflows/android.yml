@@ -11,14 +11,14 @@ jobs:
     - name: Set up JDK 1.8
       uses: actions/setup-java@v1
       with:
-        java-version: '8.0.272'
+        java-version: '8.0.292'
     - name: Validate Gradle Wrapper
       uses: gradle/wrapper-validation-action@v1
     - name: Install depot_tools
       run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /opt/depot_tools
           cd /opt/depot_tools
-          git checkout ea89b0d66a4c18363296667a9f37afe75f1f53f2^{commit}
+          git checkout c4575f80164adf0d5c75141339653e482602e418^{commit}
           echo "/opt/depot_tools" >> "$GITHUB_PATH"
     - name: Install Rust targets
       run: rustup target add arm-linux-androideabi aarch64-linux-android x86_64-linux-android
