@@ -20,6 +20,8 @@ jobs:
           cd /opt/depot_tools
           git checkout c4575f80164adf0d5c75141339653e482602e418^{commit}
           echo "/opt/depot_tools" >> "$GITHUB_PATH"
+    - name: Install Clippy
+      run: rustup component add clippy
     - name: Install Rust targets
       run: rustup target add arm-linux-androideabi aarch64-linux-android x86_64-linux-android
     - name: Free up disk space
