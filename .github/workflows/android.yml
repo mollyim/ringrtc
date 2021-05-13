@@ -32,6 +32,8 @@ jobs:
       run: ./bin/build-aar --arch arm arm64 x64 --release-build
       env:
         ORG_GRADLE_PROJECT_ci: 1
+    - name: Log checksums
+      run: sha256sum out/gradle/outputs/aar/*
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
