@@ -1266,7 +1266,7 @@ public class CallManager {
       this.remoteSink    = remoteSink;
       this.cameraControl = camera;
       this.iceServers    = iceServers;
-      this.proxyInfo      = proxyInfo;
+      this.proxyInfo     = proxyInfo;
       this.hideIp        = hideIp;
       this.certificate   = certificate;
 
@@ -1378,6 +1378,12 @@ public class CallManager {
 
     /** The remote peer indicates its video stream is disabled. */
     REMOTE_VIDEO_DISABLE,
+
+    /** The remote peer is sharing its screen. */
+    REMOTE_SHARING_SCREEN_ENABLE,
+
+    /** The remote peer is not (no longer) sharing its screen. */
+    REMOTE_SHARING_SCREEN_DISABLE,
 
     /** The call dropped while connected and is now reconnecting. */
     RECONNECTING,

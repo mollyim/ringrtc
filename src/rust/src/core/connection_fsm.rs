@@ -19,7 +19,7 @@
 //! - AcceptOffer
 //! - AnswerCall
 //! - LocalHangup
-//! - SendSenderStatusViaDataChannel
+//! - UpdateSenderStatus
 //! - SendReceiverStatusViaDataChannel
 //! - SendBusy
 //! - ReceivedIce
@@ -91,15 +91,15 @@ pub enum ConnectionEvent {
     /// Receive sender status change from remote peer.
     /// Source: data channel (PeerConnection)
     /// Action: Bubble up to app, which should change the "in call" screen.
-    ReceivedSenderStatusViaDataChannel(CallId, bool, Option<u64>),
+    ReceivedSenderStatusViaDataChannel(CallId, signaling::SenderStatus, Option<u64>),
     /// Receive receiver status change from remote peer.
     /// Source: data channel (PeerConnection)
     /// Action: Make adjustments in connection if necessary.
     ReceivedReceiverStatusViaDataChannel(CallId, DataRate, Option<u64>),
     /// Send sender status message via the data channel
     /// Source: app (user action)
-    /// Action: Send a sender status message over the data channel.
-    SendSenderStatusViaDataChannel(bool),
+    /// Action: Accumulate and send a sender status message over the data channel.
+    UpdateSenderStatus(signaling::SenderStatus),
     /// Set bandwidth mode
     /// Source: app (user setting)
     /// Action: Update and send bitrate via a receiver status message over the data channel.
@@ -152,10 +152,10 @@ impl fmt::Display for ConnectionEvent {
             ConnectionEvent::ReceivedAcceptedViaDataChannel(id) => {
                 format!("ReceivedAcceptedViaDataChannel, call_id: {}", id)
             }
-            ConnectionEvent::ReceivedSenderStatusViaDataChannel(id, video_enabled, sequence_number) => {
+            ConnectionEvent::ReceivedSenderStatusViaDataChannel(id, status, sequence_number) => {
                 format!(
-                    "ReceivedSenderStatusViaDataChannel, call_id: {}, video_enabled: {}, seqnum: {:?}",
-                    id, video_enabled, sequence_number
+                    "ReceivedSenderStatusViaDataChannel, call_id: {}, status: {:?}, seqnum: {:?}",
+                    id, status, sequence_number
                 )
             }
             ConnectionEvent::ReceivedReceiverStatusViaDataChannel(id, max_bitrate, sequence_number) => {
@@ -168,9 +168,9 @@ impl fmt::Display for ConnectionEvent {
             ConnectionEvent::SendHangupViaDataChannel(hangup) => {
                 format!("SendHangupViaDataChannel, hangup: {}", hangup)
             }
-            ConnectionEvent::SendSenderStatusViaDataChannel(enabled) => format!(
-                "SendSenderStatusViaDataChannel, enabled: {}",
-                enabled
+            ConnectionEvent::UpdateSenderStatus(status) => format!(
+                "UpdateSenderStatus, status: {:?}",
+                status
             ),
             ConnectionEvent::UpdateBandwidthMode(mode) => format!(
                 "UpdateBandwidthMode, mode: {:?}",
@@ -394,17 +394,15 @@ where
             ConnectionEvent::ReceivedAcceptedViaDataChannel(id) => {
                 self.handle_received_accepted_via_data_channel(connection, state, id)
             }
-            ConnectionEvent::ReceivedSenderStatusViaDataChannel(
-                id,
-                video_enable,
-                sequence_number,
-            ) => self.handle_received_sender_status_via_data_channel(
-                connection,
-                state,
-                id,
-                video_enable,
-                sequence_number,
-            ),
+            ConnectionEvent::ReceivedSenderStatusViaDataChannel(id, status, sequence_number) => {
+                self.handle_received_sender_status_via_data_channel(
+                    connection,
+                    state,
+                    id,
+                    status,
+                    sequence_number,
+                )
+            }
             ConnectionEvent::ReceivedReceiverStatusViaDataChannel(
                 id,
                 max_bitrate,
@@ -417,8 +415,8 @@ where
                 sequence_number,
             ),
             ConnectionEvent::ReceivedIce(ice) => self.handle_received_ice(connection, state, ice),
-            ConnectionEvent::SendSenderStatusViaDataChannel(enabled) => {
-                self.handle_send_sender_status_via_data_channel(connection, state, enabled)
+            ConnectionEvent::UpdateSenderStatus(status) => {
+                self.handle_update_sender_status(connection, state, status)
             }
             ConnectionEvent::UpdateBandwidthMode(mode) => {
                 self.handle_update_bandwidth_mode(connection, state, mode)
@@ -520,12 +518,12 @@ where
         connection: Connection<T>,
         state: ConnectionState,
         call_id: CallId,
-        video_enable: bool,
+        status: signaling::SenderStatus,
         sequence_number: Option<u64>,
     ) -> Result<()> {
         debug!(
-            "handle_received_sender_status_via_data_channel(): video_enable: {}, sequence_number: {:?}",
-            video_enable, sequence_number
+            "handle_received_sender_status_via_data_channel(): status: {:?}, sequence_number: {:?}",
+            status, sequence_number
         );
 
         if connection.call_id() != call_id {
@@ -566,7 +564,7 @@ where
             | ConnectionState::ConnectedBeforeAccepted
             | ConnectionState::ConnectedAndAccepted => self.notify_observer(
                 connection,
-                ConnectionObserverEvent::ReceivedSenderStatusViaDataChannel(video_enable),
+                ConnectionObserverEvent::ReceivedSenderStatusViaDataChannel(status),
             ),
             _ => self.unexpected_state(state, "ReceivedSenderStatusViaDataChannel"),
         };
@@ -704,11 +702,11 @@ where
         Ok(())
     }
 
-    fn handle_send_sender_status_via_data_channel(
+    fn handle_update_sender_status(
         &mut self,
         connection: Connection<T>,
         state: ConnectionState,
-        video_enabled: bool,
+        sender_status: signaling::SenderStatus,
     ) -> Result<()> {
         match state {
             ConnectionState::ConnectingBeforeAccepted
@@ -721,7 +719,7 @@ where
                     if connection.terminating()? {
                         return Ok(());
                     }
-                    connection.send_sender_status_via_data_channel(video_enabled)
+                    connection.update_sender_status_from_fsm(sender_status)
                 })
                 .map_err(move |err| {
                     err_connection.inject_internal_error(err, "Sending local sender status failed");
@@ -729,7 +727,7 @@ where
 
                 self.worker_spawn(send_sender_status_future);
             }
-            _ => self.unexpected_state(state, "SendSenderStatusViaDataChannel"),
+            _ => self.unexpected_state(state, "UpdateSenderStatus"),
         };
         Ok(())
     }
