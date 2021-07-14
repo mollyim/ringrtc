@@ -29,7 +29,7 @@ use crate::{
     webrtc::{
         data_channel::DataChannel,
         media::{AudioTrack, VideoTrack},
-        peer_connection::PeerConnection,
+        peer_connection::{PeerConnection, SendRates},
         peer_connection_factory::{Certificate, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
             IceConnectionState,
@@ -138,7 +138,7 @@ pub trait Observer {
         connection_state: ConnectionState,
     );
     fn handle_join_state_changed(&self, client_id: ClientId, join_state: JoinState);
-    fn handle_max_send_bitrate_changed(&self, _client_id: ClientId, _rate: DataRate) {}
+    fn handle_send_rates_changed(&self, _client_id: ClientId, _send_rates: SendRates) {}
 
     // The following notify the observer of state changes to the remote devices.
     fn handle_remote_devices_changed(
@@ -438,7 +438,7 @@ const RTP_DATA_TO_SFU_SSRC: rtp::Ssrc = 1;
 // It looks like the bandwidth estimator will only probe up to 100kbps,
 // but that's better than nothing.  It appears to take 26 seconds to
 // ramp all the way up, though.
-const ALL_ALONE_SEND_BITRATE_KBPS: u64 = 1;
+const ALL_ALONE_MAX_SEND_RATE_KBPS: u64 = 1;
 
 // The time between when a sender generates a new media send key
 // and applies it.  It needs to be big enough that there is
@@ -574,8 +574,7 @@ struct State {
     on_demand_video_request_sent_since_last_tick: bool,
     speaker_rtp_timestamp:                        Option<rtp::Timestamp>,
 
-    // If unset, will use automatic behavior
-    max_send_bitrate: Option<DataRate>,
+    send_rates: SendRates,
 
     actor: Actor<State>,
 }
@@ -701,7 +700,7 @@ impl Client {
                     on_demand_video_request_sent_since_last_tick: false,
                     speaker_rtp_timestamp: None,
 
-                    max_send_bitrate: None,
+                    send_rates: SendRates::default(),
 
                     actor,
                 })
@@ -1096,8 +1095,8 @@ impl Client {
                     err
                 );
             }
-            let max_bitrate = Self::compute_max_bitrate(state.joined_members.len(), sharing_screen);
-            Self::set_max_send_bitrate_inner(state, max_bitrate);
+            let send_rates = Self::compute_send_rates(state.joined_members.len(), sharing_screen);
+            Self::set_send_rates_inner(state, send_rates);
         });
     }
 
@@ -1144,26 +1143,22 @@ impl Client {
         });
     }
 
-    pub fn set_max_send_bitrate(&self, _rate: DataRate) {
-        // TODO: Handle bitrate adjustment once group call bandwidth plan is finalized.
-    }
-
-    fn set_max_send_bitrate_inner(state: &mut State, rate: DataRate) {
-        if state.max_send_bitrate != Some(rate) {
-            if rate.as_kbps() == ALL_ALONE_SEND_BITRATE_KBPS {
+    fn set_send_rates_inner(state: &mut State, send_rates: SendRates) {
+        if state.send_rates != send_rates {
+            if send_rates.max == Some(DataRate::from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS)) {
                 info!("Disabling outgoing media because there are no other devices.");
                 state.peer_connection.set_outgoing_media_enabled(false);
             } else {
                 info!("Enabling outgoing media because there are other devices.");
                 state.peer_connection.set_outgoing_media_enabled(true);
             }
-            if let Err(e) = state.peer_connection.set_max_send_bitrate(rate) {
-                warn!("Could not set max send bitrate to {:?}: {}", rate, e);
+            if let Err(e) = state.peer_connection.set_send_rates(send_rates.clone()) {
+                warn!("Could not set send rates to {:?}: {}", send_rates, e);
             } else {
-                info!("Set max send bitrate to {:?}", rate);
+                info!("Setting send rates to {:?}", send_rates);
                 state
                     .observer
-                    .handle_max_send_bitrate_changed(state.client_id, rate);
+                    .handle_send_rates_changed(state.client_id, send_rates);
             }
         }
     }
@@ -1353,9 +1348,12 @@ impl Client {
                         };
 
                         // Set a low bitrate until we learn someone else is in the call.
-                        Self::set_max_send_bitrate_inner(
+                        Self::set_send_rates_inner(
                             state,
-                            DataRate::from_kbps(ALL_ALONE_SEND_BITRATE_KBPS),
+                            SendRates {
+                                max: Some(DataRate::from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS)),
+                                ..SendRates::default()
+                            },
                         );
 
                         state.sfu_info = Some(sfu_info);
@@ -1550,7 +1548,7 @@ impl Client {
             RemoteDevicesRequestState::Updated { at: Instant::now() };
 
         let old_user_ids: HashSet<UserId> =
-            std::mem::replace(&mut state.joined_members, HashSet::new());
+            std::mem::take(&mut state.joined_members);
         let new_user_ids: HashSet<UserId> = peek_info
             .devices
             .iter()
@@ -1587,7 +1585,7 @@ impl Client {
             // from the old values and then building a new Vec using either the old value (if there is one)
             // or creating a new one.
             let mut old_remote_devices_by_id_pair: HashMap<(DemuxId, UserId), RemoteDeviceState> =
-                std::mem::replace(&mut state.remote_devices, Vec::new())
+                std::mem::take(&mut state.remote_devices)
                     .into_iter()
                     .map(|rd| ((rd.demux_id, rd.user_id.clone()), rd))
                     .collect();
@@ -1696,15 +1694,14 @@ impl Client {
             }
 
             // If someone was removed, we must reset the send media key and send it to everyone not removed.
-            let user_ids_removed: Vec<&UserId> = old_user_ids.difference(&new_user_ids).collect();
-            if !user_ids_removed.is_empty() {
+            if old_user_ids.difference(&new_user_ids).next().is_some() {
                 Self::rotate_media_send_key_and_send_to_users_not_removed(state);
             }
 
             // We can't gate this behind the demux IDs changing because a forged demux ID might
             // be in there already when the non-forged one comes in.
             let pending_receive_keys =
-                std::mem::replace(&mut state.pending_media_receive_keys, Vec::new());
+                std::mem::take(&mut state.pending_media_receive_keys);
             for (user_id, demux_id, ratchet_counter, secret) in pending_receive_keys {
                 // If we the key is still pending, we'll just put this back into state.pending_media_receive_keys.
                 Self::add_media_receive_key_or_store_for_later(
@@ -1716,14 +1713,14 @@ impl Client {
                 );
             }
             if new_demux_ids.len() != old_demux_ids.len() {
-                let max_bitrate = Self::compute_max_bitrate(
+                let send_rates = Self::compute_send_rates(
                     new_demux_ids.len(),
                     state
                         .outgoing_heartbeat_state
                         .sharing_screen
                         .unwrap_or(false),
                 );
-                Self::set_max_send_bitrate_inner(state, max_bitrate);
+                Self::set_send_rates_inner(state, send_rates);
             }
         }
         state.last_peek_info = Some(peek_info_to_remember);
@@ -1740,17 +1737,32 @@ impl Client {
         }
     }
 
-    fn compute_max_bitrate(joined_member_count: usize, sharing_screen: bool) -> DataRate {
-        DataRate::from_kbps(match (joined_member_count, sharing_screen) {
+    // Returns (min, start, max)
+    fn compute_send_rates(joined_member_count: usize, sharing_screen: bool) -> SendRates {
+        let from_kbps = |kbps| Some(DataRate::from_kbps(kbps));
+        match (joined_member_count, sharing_screen) {
             // No one is here, so push it down as low as WebRTC will let us.
-            (0, _) => ALL_ALONE_SEND_BITRATE_KBPS,
-            // Use a higher bitrate for screen sharing.
-            (_, true) => 5000,
+            (0, _) => SendRates {
+                max: from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS),
+                ..SendRates::default()
+            },
+            // Use a higher bitrate for screen sharing
+            (_, true) => SendRates {
+                min:   from_kbps(2000),
+                start: from_kbps(2000),
+                max:   from_kbps(5000),
+            },
             // Send between 500kbps and 1Mbps depending on how many other devices there are.
             // The more there are, the less we will send.
-            (1..=7, _) => 1000, // Pretty much the default
-            _ => 500,
-        })
+            (1..=7, _) => SendRates {
+                max: from_kbps(1000),
+                ..SendRates::default()
+            },
+            _ => SendRates {
+                max: from_kbps(500),
+                ..SendRates::default()
+            },
+        }
     }
 
     // Pulled into a named private method because it might be called by set_peek_info
@@ -2253,7 +2265,7 @@ impl Client {
                 // Plus the above sequence number is too small to be useful.
                 timestamp: seqnum,
             };
-            state.peer_connection.send_rtp(header, &message)?;
+            state.peer_connection.send_rtp(header, message)?;
         }
         Ok(())
     }
@@ -2864,7 +2876,7 @@ mod tests {
         remote_devices:              Arc<CallMutex<Vec<RemoteDeviceState>>>,
         remote_devices_at_join_time: Arc<CallMutex<Vec<RemoteDeviceState>>>,
         peek_state:                  Arc<CallMutex<FakeObserverPeekState>>,
-        max_send_bitrate:            Arc<CallMutex<Option<DataRate>>>,
+        send_rates:                  Arc<CallMutex<Option<SendRates>>>,
         ended:                       Waitable<EndReason>,
         era_id:                      Option<String>,
     }
@@ -2888,7 +2900,7 @@ mod tests {
                     FakeObserverPeekState::default(),
                     "FakeObserver peek state",
                 )),
-                max_send_bitrate: Arc::new(CallMutex::new(None, "FakeObserver max send bitrate")),
+                send_rates: Arc::new(CallMutex::new(None, "FakeObserver send rates")),
                 ended: Waitable::default(),
                 era_id: None,
             }
@@ -2944,12 +2956,9 @@ mod tests {
             peek_state.clone()
         }
 
-        fn max_send_bitrate(&self) -> Option<DataRate> {
-            let max_send_bitrate = self
-                .max_send_bitrate
-                .lock()
-                .expect("Lock max send bitrate to read it");
-            *max_send_bitrate
+        fn send_rates(&self) -> Option<SendRates> {
+            let send_rates = self.send_rates.lock().expect("Lock send rates to read it");
+            send_rates.clone()
         }
     }
 
@@ -3002,12 +3011,12 @@ mod tests {
             owned_state.max_devices = max_devices;
             owned_state.device_count = device_count;
         }
-        fn handle_max_send_bitrate_changed(&self, _client_id: ClientId, rate: DataRate) {
-            let mut max_send_bitrate = self
-                .max_send_bitrate
+        fn handle_send_rates_changed(&self, _client_id: ClientId, send_rates: SendRates) {
+            let mut self_send_rates = self
+                .send_rates
                 .lock()
-                .expect("Lock max_send_bitrate to handle update");
-            *max_send_bitrate = Some(rate);
+                .expect("Lock send rates to handle update");
+            *self_send_rates = Some(send_rates);
         }
 
         fn send_signaling_message(
@@ -4212,14 +4221,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn send_bitrate() {
+    fn send_rates() {
         init_logging();
         let client1 = TestClient::new(vec![1], 1, None);
         client1.connect_join_and_wait_until_joined();
         assert_eq!(
-            Some(DataRate::from_kbps(1)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1)),
+            }),
+            client1.observer.send_rates()
         );
 
         let devices: Vec<PeekDeviceInfo> = (1..=20)
@@ -4242,8 +4254,12 @@ mod tests {
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(1)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1)),
+            }),
+            client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
@@ -4255,8 +4271,12 @@ mod tests {
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(1)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1)),
+            }),
+            client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
@@ -4268,8 +4288,12 @@ mod tests {
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(1000)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1000)),
+            }),
+            client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
@@ -4281,8 +4305,12 @@ mod tests {
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(1000)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1000)),
+            }),
+            client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
@@ -4294,42 +4322,79 @@ mod tests {
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(500)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(500)),
+            }),
+            client1.observer.send_rates()
+        );
+
+        client1.client.set_sharing_screen(true);
+        client1.wait_for_client_to_process();
+        assert_eq!(
+            Some(SendRates {
+                min:   Some(DataRate::from_kbps(2000)),
+                start: Some(DataRate::from_kbps(2000)),
+                max:   Some(DataRate::from_kbps(5000)),
+            }),
+            client1.observer.send_rates()
+        );
+
+        client1.client.set_sharing_screen(false);
+        client1.wait_for_client_to_process();
+        assert_eq!(
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(500)),
+            }),
+            client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..1]).to_vec(),
-            device_count: 1,
+            devices:      (&devices[..0]).to_vec(),
+            device_count: 0,
             max_devices:  None,
             creator:      None,
             era_id:       None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(1)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1)),
+            }),
+            client1.observer.send_rates()
         );
 
-        client1
-            .client
-            .set_max_send_bitrate(DataRate::from_kbps(2000));
+        client1.client.set_sharing_screen(true);
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(2000)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   None,
+                start: None,
+                max:   Some(DataRate::from_kbps(1)),
+            }),
+            client1.observer.send_rates()
         );
+
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..1]).to_vec(),
-            device_count: 1,
+            devices:      (&devices[..20]).to_vec(),
+            device_count: 20,
             max_devices:  None,
             creator:      None,
             era_id:       None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
-            Some(DataRate::from_kbps(2000)),
-            client1.observer.max_send_bitrate()
+            Some(SendRates {
+                min:   Some(DataRate::from_kbps(2000)),
+                start: Some(DataRate::from_kbps(2000)),
+                max:   Some(DataRate::from_kbps(5000)),
+            }),
+            client1.observer.send_rates()
         );
 
         client1.disconnect_and_wait_until_ended();

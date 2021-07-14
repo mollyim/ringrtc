@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.10.6
+
+- Electron: Use Buffer everywhere we used to use ArrayBuffer
+
+- iOS: Update builds and tests to support M1 iOS simulator
+
+- Update to Rust nightly
+
+## v2.10.5
+
+- Screenshare: Allow screenshare without a camera
+
+## v2.10.4
+
+- Screenshare: Add optimizations
+
+## v2.10.3
+
+- Screenshare: Fix bandwidth for group call
+
+## v2.10.2
+
+- Screenshare: Fix sending of status
+
 ## v2.10.1
 
 - Screenshare: Fixes for legacy clients

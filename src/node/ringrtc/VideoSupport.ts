@@ -15,12 +15,12 @@ export interface VideoFrameSource {
   // Fills in the given buffer and returns the width x height
   // or returns undefined if nothing was filled in because no
   // video frame was available.
-  receiveVideoFrame(buffer: ArrayBuffer): [number, number] | undefined;
+  receiveVideoFrame(buffer: Buffer): [number, number] | undefined;
 }
 
 // The way a GumVideoCapturer sends frames
 interface VideoFrameSender {
-  sendVideoFrame(width: number, height: number, rgbaBuffer: ArrayBuffer): void;
+  sendVideoFrame(width: number, height: number, rgbaBuffer: Buffer): void;
 }
 
 export class GumVideoCaptureOptions {
@@ -34,7 +34,6 @@ export class GumVideoCapturer {
   private defaultCaptureOptions: GumVideoCaptureOptions;
   private localPreview?: Ref<HTMLVideoElement>;
   private captureOptions?: GumVideoCaptureOptions;
-  private getUserMediaPromise?: Promise<MediaStream>;
   private sender?: VideoFrameSender;
   private mediaStream?: MediaStream;
   private canvas?: OffscreenCanvas;
@@ -94,42 +93,35 @@ export class GumVideoCapturer {
     return cameras;
   }
 
-  // This helps prevent concurrent calls to `getUserMedia`.
   private getUserMedia(options: GumVideoCaptureOptions): Promise<MediaStream> {
-    if (!this.getUserMediaPromise) {
-      let contraints: any = {
-        audio: false,
-        video: {
-          deviceId: options.preferredDeviceId ?? this.preferredDeviceId,
-          width: {
-            max: options.maxWidth,
-          },
-          height: {
-            max: options.maxHeight,
-          },
-          frameRate: {
-            max: options.maxFramerate,
-          },
+    // TODO: Figure out a better way to make typescript accept "mandatory".
+    let constraints: any = {
+      audio: false,
+      video: {
+        deviceId: options.preferredDeviceId ?? this.preferredDeviceId,
+        width: {
+          max: options.maxWidth,
         },
+        height: {
+          max: options.maxHeight,
+        },
+        frameRate: {
+          max: options.maxFramerate,
+        },
+      },
+    };
+    if (options.screenShareSourceId != undefined) {
+      constraints.video = {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: options.screenShareSourceId,
+          maxWidth: options.maxWidth,
+          maxHeight: options.maxHeight,
+          maxFrameRate: options.maxFramerate,
+        }
       };
-      if (options.screenShareSourceId != undefined) {
-        contraints.video = {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: options.screenShareSourceId,
-            maxWidth: options.maxWidth,
-            maxHeight: options.maxHeight,
-            maxFrameRate: options.maxFramerate,
-          }
-        };
-      }
-      // TODO: Figure out a better way to make typescript accept "mandatory".
-      this.getUserMediaPromise = window.navigator.mediaDevices.getUserMedia(contraints).then(mediaStream => {
-          delete this.getUserMediaPromise;
-          return mediaStream;
-        });
     }
-    return this.getUserMediaPromise;
+    return window.navigator.mediaDevices.getUserMedia(constraints);
   }
 
   private async startCapturing(options: GumVideoCaptureOptions): Promise<void> {
@@ -139,9 +131,14 @@ export class GumVideoCapturer {
     this.captureOptions = options;
     this.capturingStartTime = Date.now();
     try {
+      // If we start/stop/start, we may have concurrent calls to getUserMedia,
+      // which is what we want if we're switching from camera to screenshare.
+      // But we need to make sure we deal with the fact that things might be
+      // different after the await here.
       const mediaStream = await this.getUserMedia(options);
-      // We could have been disabled between when we requested the stream
-      // and when we got it.
+      // It's possible video was disabled, switched to screenshare, or
+      // switched to a different camera while awaiting a response, in
+      // which case we need to disable the camera we just accessed.
       if (this.captureOptions != options) {
         for (const track of mediaStream.getVideoTracks()) {
           // Make the light turn off faster
@@ -154,8 +151,14 @@ export class GumVideoCapturer {
         this.setLocalPreviewSourceObject(mediaStream);
       }
       this.mediaStream = mediaStream;
-    } catch {
-      // We couldn't open the camera.  Oh well.
+    } catch (e) {
+      // It's possible video was disabled, switched to screenshare, or
+      // switched to a different camera while awaiting a response, in
+      // which case we should reset the captureOptions if we set them.
+      if (this.captureOptions == options) {
+        // We couldn't open the camera.  Oh well.
+        this.captureOptions = undefined;
+      }
     }
   }
 
@@ -234,7 +237,8 @@ export class GumVideoCapturer {
       let duration = Date.now() - this.capturingStartTime;
       this.drawFakeVideo(this.canvasContext, width, height, this.fakeVideoName, duration);
       const image = this.canvasContext.getImageData(0, 0, width, height);
-      this.sender.sendVideoFrame(image.width, image.height, image.data.buffer);
+      let bufferWithoutCopying = Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength);
+      this.sender.sendVideoFrame(image.width, image.height, bufferWithoutCopying);
       return;
     }
 
@@ -256,7 +260,8 @@ export class GumVideoCapturer {
         height
       );
       const image = this.canvasContext.getImageData(0, 0, width, height);
-      this.sender.sendVideoFrame(image.width, image.height, image.data.buffer);
+      let bufferWithoutCopying = Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength);
+      this.sender.sendVideoFrame(image.width, image.height, bufferWithoutCopying);
     }
   }
 
@@ -317,15 +322,21 @@ export class GumVideoCapturer {
   }
 }
 
+// We add 10% in each dimension to allow for things that are slightly wider or taller than 1080p.
+const MAX_VIDEO_CAPTURE_MULTIPLIER = 1.0;
+export const MAX_VIDEO_CAPTURE_WIDTH = 1920 * MAX_VIDEO_CAPTURE_MULTIPLIER;
+export const MAX_VIDEO_CAPTURE_HEIGHT = 1080 * MAX_VIDEO_CAPTURE_MULTIPLIER;
+export const MAX_VIDEO_CAPTURE_AREA = MAX_VIDEO_CAPTURE_WIDTH * MAX_VIDEO_CAPTURE_HEIGHT;
+export const MAX_VIDEO_CAPTURE_BUFFER_SIZE = MAX_VIDEO_CAPTURE_AREA * 4;
+
 export class CanvasVideoRenderer {
   private canvas?: Ref<HTMLCanvasElement>;
-  private buffer: ArrayBuffer;
+  private buffer: Buffer;
   private source?: VideoFrameSource;
   private rafId?: any;
 
   constructor() {
-    // The max size video frame we'll support (in RGBA)
-    this.buffer = new ArrayBuffer(1920 * 1080 * 4);
+    this.buffer = Buffer.alloc(MAX_VIDEO_CAPTURE_BUFFER_SIZE);
   }
 
   setCanvas(canvas: Ref<HTMLCanvasElement> | undefined) {
@@ -426,8 +437,10 @@ export class CanvasVideoRenderer {
       context.fillRect(0, 0, canvas.width, canvas.height);
     }
 
+    // Share the same buffer as this.buffer.
+    const clampedArrayBuffer = new Uint8ClampedArray(this.buffer.buffer, this.buffer.byteOffset, width * height * 4);
     context.putImageData(
-      new ImageData(new Uint8ClampedArray(this.buffer, 0, width * height * 4), width, height),
+      new ImageData(clampedArrayBuffer, width, height),
       dx,
       dy
     );
