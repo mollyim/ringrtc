@@ -254,13 +254,13 @@ where
     }
 
     /// Start a timer to terminate the call if setup takes too long.
-    pub fn start_timeout_timer(&self, time_out_period: u64) -> Result<()> {
-        if time_out_period > 0 {
+    pub fn start_timeout_timer(&self, time_out_period: Duration) -> Result<()> {
+        if !time_out_period.is_zero() {
             if let Ok(mut fsm_context) = self.fsm_context.lock() {
                 let timeout_runtime = TaskQueueRuntime::new("fsm-timeout")?;
 
                 let mut call_clone = self.clone();
-                let when = Instant::now() + Duration::from_secs(time_out_period);
+                let when = Instant::now() + time_out_period;
                 let call_timeout_future = async move {
                     let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(when));
                     sleep.await;
@@ -545,10 +545,7 @@ where
                     self,
                     0,
                     ConnectionType::OutgoingParent,
-                    // This is V2 instead of V3 so that we can send out the same SDP in the offer
-                    // for V2 and V3, which has DTLS.
-                    // It's just that before we use the SDP for V3, we replace DTLS with SDES.
-                    signaling::Version::V2,
+                    signaling::Version::V4,
                     bandwidth_mode,
                 )?;
                 let (local_secret, ice_gatherer, offer) =

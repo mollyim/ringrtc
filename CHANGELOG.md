@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.11.1
+
+- Update Group Ringing feature
+
+## v2.11.0
+
+- Add Group Ringing feature
+
+- Reference signalapp/webrtc@4389f
+
+- Remove DTLS and SDP
+
 ## v2.10.8
 
 - Group Calling: Reduce notifications for active speakers

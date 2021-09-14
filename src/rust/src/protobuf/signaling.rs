@@ -1,39 +1,25 @@
 /// A serialized one these goes in the "opaque" field of the CallingMessage::Offer in SignalService.proto
-/// For future compatibility, we can add new slots (v2, v3, v4 ....)
+/// For future compatibility, we can add new slots (v5, v6, ...)
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Offer {
-    #[prost(message, optional, tag="2")]
-    pub v3_or_v2: ::std::option::Option<ConnectionParametersV3OrV2>,
     #[prost(message, optional, tag="4")]
     pub v4: ::std::option::Option<ConnectionParametersV4>,
 }
 /// A serialized one these goes in the "opaque" field of the CallingMessage::Offer in SignalService.proto
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Answer {
-    #[prost(message, optional, tag="2")]
-    pub v3_or_v2: ::std::option::Option<ConnectionParametersV3OrV2>,
     #[prost(message, optional, tag="4")]
     pub v4: ::std::option::Option<ConnectionParametersV4>,
 }
 /// A serialized one these goes in the "opaque" field of the CallingMessage::Ice in SignalService.proto
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IceCandidate {
+    /// Use a field value of 2 for compatibility since both V2 and V3 have the same format.
     #[prost(message, optional, tag="2")]
-    pub v3_or_v2: ::std::option::Option<IceCandidateV3OrV2>,
-}
-/// The V2 protocol uses SDP, DTLS, but not SCTP.
-/// The V3 protocol uses SDP, but not DTLS, but not SCTP.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ConnectionParametersV3OrV2 {
-    #[prost(string, optional, tag="1")]
-    pub sdp: ::std::option::Option<std::string::String>,
-    /// V2 has this unset.
-    /// V3 has this set
-    #[prost(bytes, optional, tag="2")]
-    pub public_key: ::std::option::Option<std::vec::Vec<u8>>,
+    pub v3: ::std::option::Option<IceCandidateV3>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct IceCandidateV3OrV2 {
+pub struct IceCandidateV3 {
     #[prost(string, optional, tag="1")]
     pub sdp: ::std::option::Option<std::string::String>,
 }
@@ -67,6 +53,48 @@ pub struct ConnectionParametersV4 {
 pub struct CallMessage {
     #[prost(message, optional, tag="1")]
     pub group_call_message: ::std::option::Option<super::group_call::DeviceToDevice>,
+    #[prost(message, optional, tag="2")]
+    pub ring_intention: ::std::option::Option<call_message::RingIntention>,
+    #[prost(message, optional, tag="3")]
+    pub ring_response: ::std::option::Option<call_message::RingResponse>,
+}
+pub mod call_message {
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct RingIntention {
+        #[prost(bytes, optional, tag="1")]
+        pub group_id: ::std::option::Option<std::vec::Vec<u8>>,
+        #[prost(enumeration="ring_intention::Type", optional, tag="2")]
+        pub r#type: ::std::option::Option<i32>,
+        #[prost(sfixed64, optional, tag="3")]
+        pub ring_id: ::std::option::Option<i64>,
+    }
+    pub mod ring_intention {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+        #[repr(i32)]
+        pub enum Type {
+            Ring = 0,
+            Cancelled = 1,
+        }
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct RingResponse {
+        #[prost(bytes, optional, tag="1")]
+        pub group_id: ::std::option::Option<std::vec::Vec<u8>>,
+        #[prost(enumeration="ring_response::Type", optional, tag="2")]
+        pub r#type: ::std::option::Option<i32>,
+        #[prost(sfixed64, optional, tag="3")]
+        pub ring_id: ::std::option::Option<i64>,
+    }
+    pub mod ring_response {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+        #[repr(i32)]
+        pub enum Type {
+            Ringing = 0,
+            Accepted = 1,
+            Declined = 2,
+            Busy = 3,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
