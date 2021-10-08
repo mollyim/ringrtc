@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use crate::webrtc;
 use crate::webrtc::ffi::media::{RffiAudioTrack, RffiVideoSource, RffiVideoTrack};
 use crate::webrtc::ffi::peer_connection::RffiPeerConnection;
 use crate::webrtc::ffi::peer_connection_observer::RffiPeerConnectionObserver;
@@ -17,14 +18,25 @@ pub struct RffiPeerConnectionFactory {
     _private: [u8; 0],
 }
 
+impl webrtc::RefCounted for RffiPeerConnectionFactory {}
+
 /// Incomplete type for C++ RTCCertificate.
 #[repr(C)]
 pub struct RffiCertificate {
     _private: [u8; 0],
 }
 
+/// Incomplete type for C++ PeerConnectionFactory.
+#[repr(C)]
+pub struct RffiAudioDeviceModule {
+    _private: [u8; 0],
+}
+
+
 extern "C" {
     pub fn Rust_createPeerConnectionFactory(
+        adm: *const RffiAudioDeviceModule,
+        use_new_audio_device_module: bool,
         use_injectable_network: bool,
     ) -> *const RffiPeerConnectionFactory;
     #[cfg(feature = "simnet")]

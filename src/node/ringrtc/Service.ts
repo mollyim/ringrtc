@@ -17,12 +17,28 @@ const Native = require('../../build/' +
   process.arch +
   '.node');
 
+class Config {
+  use_new_audio_device_module: boolean = false;
+}
+
 // tslint:disable-next-line no-unnecessary-class
 class NativeCallManager {
   constructor() {
-    const callEndpoint = Native.createCallEndpoint();
+    this.createCallEndpoint(true, new Config());
+  }
+
+  setConfig(config: Config) {
+    this.createCallEndpoint(false, config);
+  }
+
+  private createCallEndpoint(first_time: boolean, config: Config) {
+    const callEndpoint = Native.createCallEndpoint(
+      first_time,
+      config.use_new_audio_device_module
+    );
     Object.defineProperty(this, Native.callEndpointPropertyKey, {
       value: callEndpoint,
+      configurable: true, // allows it to be changed
     });
   }
 }
@@ -116,6 +132,41 @@ export class PeekInfo {
   }
 }
 
+// In sync with WebRTC's PeerConnection.AdapterType.
+// Despite how it looks, this is not an option set.
+// A network adapter type can only be one of the listed values.
+// And there are a few oddities to note:
+// - Cellular means we don't know if it's 2G, 3G, 4G, 5G, ...
+//   If we know, it will be one of those corresponding enum values.
+//   This means to know if something is cellular or not, you must
+//   check all of those values.
+// - Default means we don't know the adapter type (like Unknown)
+//   but it's because we bound to the default IP address (0.0.0.0)
+//   so it's probably the default adapter (wifi if available, for example)
+//   This is unlikely to happen in practice.
+enum NetworkAdapterType {
+  Unknown = 0,
+  Ethernet = 1 << 0,
+  Wifi = 1 << 1,
+  Cellular = 1 << 2,
+  Vpn = 1 << 3,
+  Loopback = 1 << 4,
+  Default = 1 << 5,
+  Cellular2G = 1 << 6,
+  Cellular3G = 1 << 7,
+  Cellular4G = 1 << 8,
+  Cellular5G = 1 << 9,
+}
+
+// Information about the network route being used for sending audio/video/data
+export class NetworkRoute {
+  localAdapterType: NetworkAdapterType;
+
+  constructor() {
+    this.localAdapterType = NetworkAdapterType.Unknown;
+  }
+}
+
 class Requests<T> {
   private _resolveById: Map<number, (response: T) => void> = new Map();
   private _nextId: number = 1;
@@ -152,7 +203,7 @@ export class RingRTCType {
   handleIncomingCall: ((call: Call) => Promise<CallSettings | null>) | null =
     null;
   handleAutoEndedIncomingCallRequest:
-    | ((remoteUserId: UserId, reason: CallEndedReason) => void)
+    | ((remoteUserId: UserId, reason: CallEndedReason, ageSec: number) => void)
     | null = null;
   handleLogMessage:
     | ((
@@ -179,11 +230,7 @@ export class RingRTCType {
       ) => void)
     | null = null;
   handleSendCallMessageToGroup:
-    | ((
-        groupId: Buffer,
-        message: Buffer,
-        urgency: CallMessageUrgency
-      ) => void)
+    | ((groupId: Buffer, message: Buffer, urgency: CallMessageUrgency) => void)
     | null = null;
   handleGroupCallRingUpdate:
     | ((
@@ -202,6 +249,10 @@ export class RingRTCType {
     this.pollEvery(50);
   }
 
+  setConfig(config: Config) {
+    this.callManager.setConfig(config);
+  }
+
   private pollEvery(intervalMs: number): void {
     this.callManager.poll(this);
     setTimeout(() => {
@@ -210,10 +261,8 @@ export class RingRTCType {
   }
 
   // Called by UX
-  setSelfUuid(
-    uuid: Buffer
-  ): void {
-    this.callManager.setSelfUuid(uuid)
+  setSelfUuid(uuid: Buffer): void {
+    this.callManager.setSelfUuid(uuid);
   }
 
   // Called by UX
@@ -246,7 +295,11 @@ export class RingRTCType {
   }
 
   // Called by UX
-  cancelGroupRing(groupId: GroupId, ringId: bigint, reason: RingCancelReason | null): void {
+  cancelGroupRing(
+    groupId: GroupId,
+    ringId: bigint,
+    reason: RingCancelReason | null
+  ): void {
     silly_deadlock_protection(() => {
       this.callManager.cancelGroupRing(groupId, ringId.toString(), reason);
     });
@@ -274,7 +327,15 @@ export class RingRTCType {
     // after the outgoing call is ended. In that case, ignore it once.
     if (this._call && this._call.endedReason === CallEndedReason.Glare) {
       this._call.endedReason = undefined;
-      this.ignore(callId);
+      // EVIL HACK: We are the "loser" of a glare collision and have ended the outgoing call
+      // and are now receiving the incoming call from the remote side (the "winner").
+      // However, the Desktop client has a bug where it re-orders the events so that
+      // instead of seeing ("outgoing call ended", "incoming call"), it sees
+      // ("incoming call", "call ended") and it gets messed up.
+      // The solution?  Delay processing the incoming call.
+      setTimeout(() => {
+        this.onStartIncomingCall(remoteUserId, callId, isVideoCall);
+      }, 500);
       return;
     }
 
@@ -331,20 +392,24 @@ export class RingRTCType {
   }
 
   // Called by Rust
-  onCallEnded(remoteUserId: UserId, reason: CallEndedReason) {
+  onCallEnded(remoteUserId: UserId, reason: CallEndedReason, ageSec: number) {
     const call = this._call;
+    if (call && reason == CallEndedReason.ReceivedOfferWithGlare) {
+      // The current call is the outgoing call.
+      // The ended call is the incoming call.
+      // We're the "winner", so ignore the incoming call and keep going with the outgoing call.
+      return;
+    }
 
-    // Temporary: Force hangup in all glare scenarios until handled gracefully.
-    if (
-      call &&
-      (reason === CallEndedReason.ReceivedOfferWithGlare ||
-        reason === CallEndedReason.Glare)
-    ) {
-      call.hangup();
+    if (call && reason === CallEndedReason.Glare) {
+      // The current call is the outgoing call.
+      // The ended call is the outgoing call.
+      // We're the "loser", so end the outgoing/current call and wait for a new incoming call.
+      // (proceeded down to the code below)
     }
 
     // If there is no call or the remoteUserId doesn't match that of
-    // the current call, or if one of the "receive offer while alread
+    // the current call, or if one of the "receive offer while already
     // in a call" reasons are provided, don't end the current call,
     // just update the call history.
     if (
@@ -354,7 +419,7 @@ export class RingRTCType {
       reason === CallEndedReason.ReceivedOfferExpired
     ) {
       if (this.handleAutoEndedIncomingCallRequest) {
-        this.handleAutoEndedIncomingCallRequest(remoteUserId, reason);
+        this.handleAutoEndedIncomingCallRequest(remoteUserId, reason, ageSec);
       }
       return;
     }
@@ -386,6 +451,21 @@ export class RingRTCType {
     call.remoteSharingScreen = enabled;
     if (call.handleRemoteSharingScreen) {
       call.handleRemoteSharingScreen();
+    }
+  }
+
+  onNetworkRouteChanged(
+    remoteUserId: UserId,
+    localNetworkAdapterType: NetworkAdapterType
+  ): void {
+    const call = this._call;
+    if (!call || call.remoteUserId !== remoteUserId) {
+      return;
+    }
+
+    call.networkRoute.localAdapterType = localNetworkAdapterType;
+    if (call.handleNetworkRouteChanged) {
+      call.handleNetworkRouteChanged();
     }
   }
 
@@ -708,6 +788,27 @@ export class RingRTCType {
   }
 
   // Called by Rust
+  handleNetworkRouteChanged(
+    clientId: GroupCallClientId,
+    localNetworkAdapterType: NetworkAdapterType
+  ): void {
+    silly_deadlock_protection(() => {
+      let groupCall = this._groupCallByClientId.get(clientId);
+      if (!groupCall) {
+        this.onLogMessage(
+          CallLogLevel.Error,
+          'Service.ts',
+          0,
+          'handleNetworkRouteChanged(): GroupCall not found in map!'
+        );
+        return;
+      }
+
+      groupCall.handleNetworkRouteChanged(localNetworkAdapterType);
+    });
+  }
+
+  // Called by Rust
   handleRemoteDevicesChanged(
     clientId: GroupCallClientId,
     remoteDeviceStates: Array<RemoteDeviceState>
@@ -1008,11 +1109,7 @@ export class RingRTCType {
     urgency: CallMessageUrgency
   ): void {
     if (this.handleSendCallMessage) {
-      this.handleSendCallMessage(
-        recipientUuid,
-        message,
-        urgency
-      );
+      this.handleSendCallMessage(recipientUuid, message, urgency);
     } else {
       console.log('RingRTC.handleSendCallMessage is not set!');
     }
@@ -1025,11 +1122,7 @@ export class RingRTCType {
     urgency: CallMessageUrgency
   ): void {
     if (this.handleSendCallMessageToGroup) {
-      this.handleSendCallMessageToGroup(
-        groupId,
-        message,
-        urgency
-      );
+      this.handleSendCallMessageToGroup(groupId, message, urgency);
     } else {
       console.log('RingRTC.handleSendCallMessageToGroup is not set!');
     }
@@ -1206,6 +1299,7 @@ export class Call {
   private _outgoingVideoIsScreenShare: boolean = false;
   private _remoteVideoEnabled: boolean = false;
   remoteSharingScreen: boolean = false;
+  networkRoute: NetworkRoute = new NetworkRoute();
   private _videoCapturer: VideoCapturer | null = null;
   private _videoRenderer: VideoRenderer | null = null;
   endedReason?: CallEndedReason;
@@ -1214,6 +1308,7 @@ export class Call {
   handleStateChanged?: () => void;
   handleRemoteVideoEnabled?: () => void;
   handleRemoteSharingScreen?: () => void;
+  handleNetworkRouteChanged?: () => void;
 
   // This callback should be set by the VideoCapturer,
   // But could also be set by the UX.
@@ -1513,6 +1608,7 @@ export class LocalDeviceState {
   videoMuted: boolean;
   presenting: boolean;
   sharingScreen: boolean;
+  networkRoute: NetworkRoute;
 
   constructor() {
     this.connectionState = ConnectionState.NotConnected;
@@ -1522,6 +1618,7 @@ export class LocalDeviceState {
     this.videoMuted = true;
     this.presenting = false;
     this.sharingScreen = false;
+    this.networkRoute = new NetworkRoute();
   }
 }
 
@@ -1538,6 +1635,7 @@ export class RemoteDeviceState {
   videoAspectRatio: number | undefined; // Float
   addedTime: string | undefined; // unix millis (to be converted to a numeric type)
   speakerTime: string | undefined; // unix millis; 0 if they've never spoken (to be converted to a numeric type)
+  forwardingVideo: boolean | undefined;
 
   constructor(demuxId: number, userId: Buffer, mediaKeysReceived: boolean) {
     this.demuxId = demuxId;
@@ -1737,6 +1835,14 @@ export class GroupCall {
   }
 
   // Called by Rust via RingRTC object
+  handleNetworkRouteChanged(localNetworkAdapterType: NetworkAdapterType): void {
+    this._localDeviceState.networkRoute.localAdapterType =
+      localNetworkAdapterType;
+
+    this._observer.onLocalDeviceStateChanged(this);
+  }
+
+  // Called by Rust via RingRTC object
   handleRemoteDevicesChanged(
     remoteDeviceStates: Array<RemoteDeviceState>
   ): void {
@@ -1920,6 +2026,7 @@ export enum RingCancelReason {
 }
 
 export interface CallManager {
+  setConfig(config: Config): void;
   setSelfUuid(uuid: Buffer): void;
   createOutgoingCall(
     remoteUserId: UserId,
@@ -1937,7 +2044,11 @@ export interface CallManager {
   accept(callId: CallId): void;
   ignore(callId: CallId): void;
   hangup(): void;
-  cancelGroupRing(groupId: GroupId, ringId: string, reason: RingCancelReason | null): void;
+  cancelGroupRing(
+    groupId: GroupId,
+    ringId: string,
+    reason: RingCancelReason | null
+  ): void;
   signalingMessageSent(callId: CallId): void;
   signalingMessageSendFailed(callId: CallId): void;
   setOutgoingAudioEnabled(enabled: boolean): void;
@@ -2055,7 +2166,11 @@ export interface CallManagerCallbacks {
     isVideoCall: boolean
   ): void;
   onCallState(remoteUserId: UserId, state: CallState): void;
-  onCallEnded(remoteUserId: UserId, endedReason: CallEndedReason): void;
+  onCallEnded(
+    remoteUserId: UserId,
+    endedReason: CallEndedReason,
+    ageSec: number
+  ): void;
   onRemoteVideoEnabled(remoteUserId: UserId, enabled: boolean): void;
   onRemoteSharingScreen(remoteUserId: UserId, enabled: boolean): void;
   onSendOffer(

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::common::{
     ApplicationEvent,
@@ -28,6 +29,7 @@ use crate::core::{group_call, signaling};
 use crate::sim::error::SimError;
 use crate::webrtc::media::{MediaStream, VideoTrack};
 use crate::webrtc::peer_connection::PeerConnection;
+use crate::webrtc::peer_connection_observer::NetworkRoute;
 use crate::webrtc::sim::peer_connection::RffiPeerConnection;
 
 /// Simulation implementation for platform::Platform::{AppIncomingMedia,
@@ -59,6 +61,8 @@ struct SimStats {
     start_outgoing:               AtomicUsize,
     /// Number of start incoming call events
     start_incoming:               AtomicUsize,
+    /// Number of offer expired events
+    offer_expired:                AtomicUsize,
     /// Number of call concluded events
     call_concluded:               AtomicUsize,
     /// Track stream counts
@@ -102,6 +106,8 @@ pub struct SimPlatform {
     call_manager:                 Arc<Mutex<Option<CallManager<Self>>>>,
     /// True to manually require message_sent() to be invoked for Ice messages.
     no_auto_message_sent_for_ice: Arc<AtomicBool>,
+    /// Last sent message from on_send_ice
+    last_ice_sent:                Arc<Mutex<Option<signaling::SendIce>>>,
 }
 
 impl fmt::Display for SimPlatform {
@@ -154,8 +160,9 @@ impl Platform for SimPlatform {
         .unwrap();
         connection.set_app_connection(fake_pc).unwrap();
 
+        let peer_connection_factory = None;
         let peer_connection =
-            PeerConnection::unowned(connection.app_connection_ptr_for_tests(), std::ptr::null());
+            PeerConnection::new(connection.peer_connection_rffi(), std::ptr::null(), peer_connection_factory);
 
         connection.set_peer_connection(peer_connection).unwrap();
 
@@ -191,6 +198,11 @@ impl Platform for SimPlatform {
         let mut map = self.event_map.lock().unwrap();
         map.entry(event).and_modify(|e| *e += 1).or_insert(1);
 
+        Ok(())
+    }
+
+    fn on_network_route_changed(&self, _remote_peer: &Self::AppRemotePeer, network_route: NetworkRoute) -> Result<()> {
+        info!("on_network_route_changed(): {:?}", network_route);
         Ok(())
     }
 
@@ -264,13 +276,15 @@ impl Platform for SimPlatform {
             remote_peer, call_id, receiver_device_id
         );
 
+        *self.last_ice_sent.lock().unwrap() = Some(send.clone());
+
         if self.force_internal_fault.load(Ordering::Acquire) {
             Err(SimError::SendIceCandidateError.into())
         } else {
             let _ = self
                 .stats
                 .ice_candidates_sent
-                .fetch_add(send.ice.candidates_added.len(), Ordering::AcqRel);
+                .fetch_add(send.ice.candidates.len(), Ordering::AcqRel);
             if self.force_internal_fault.load(Ordering::Acquire) {
                 if !self.no_auto_message_sent_for_ice.load(Ordering::Acquire) {
                     self.message_send_failure(call_id).unwrap();
@@ -446,6 +460,12 @@ impl Platform for SimPlatform {
         Ok(remote_peer1 == remote_peer2)
     }
 
+    fn on_offer_expired(&self, _remote_peer: &Self::AppRemotePeer, _age: Duration) -> Result<()> {
+        info!("on_offer_expired():");
+        let _ = self.stats.offer_expired.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
     fn on_call_concluded(&self, _remote_peer: &Self::AppRemotePeer) -> Result<()> {
         info!("on_call_concluded():");
         if self.force_internal_fault.load(Ordering::Acquire) {
@@ -472,6 +492,15 @@ impl Platform for SimPlatform {
         _connection_state: group_call::ConnectionState,
     ) {
         unimplemented!()
+    }
+
+
+    fn handle_network_route_changed(
+        &self,
+        _client_id: group_call::ClientId,
+        network_route: NetworkRoute,
+    ) {
+        info!("handle_network_route_changed(): {:?}", network_route);
     }
 
     fn handle_join_state_changed(
@@ -616,6 +645,7 @@ impl SimPlatform {
             ApplicationEvent::EndedRemoteBusy,
             ApplicationEvent::EndedTimeout,
             ApplicationEvent::EndedInternalFailure,
+            ApplicationEvent::EndedSignalingFailure,
             ApplicationEvent::EndedConnectionFailure,
             ApplicationEvent::EndedAppDroppedCall,
         ];
@@ -636,6 +666,10 @@ impl SimPlatform {
 
     pub fn ice_candidates_sent(&self) -> usize {
         self.stats.ice_candidates_sent.load(Ordering::Acquire)
+    }
+
+    pub fn last_ice_sent(&self) -> Option<signaling::SendIce> {
+        self.last_ice_sent.lock().unwrap().clone()
     }
 
     pub fn normal_hangups_sent(&self) -> usize {
@@ -678,6 +712,10 @@ impl SimPlatform {
 
     pub fn start_incoming_count(&self) -> usize {
         self.stats.start_incoming.load(Ordering::Acquire)
+    }
+
+    pub fn offer_expired_count(&self) -> usize {
+        self.stats.offer_expired.load(Ordering::Acquire)
     }
 
     pub fn call_concluded_count(&self) -> usize {

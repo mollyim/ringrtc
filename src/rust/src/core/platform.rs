@@ -7,6 +7,7 @@
 /// implement for calling.
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 use crate::common::{
     ApplicationEvent,
@@ -22,6 +23,7 @@ use crate::core::call::Call;
 use crate::core::connection::{Connection, ConnectionType};
 use crate::core::{group_call, signaling};
 use crate::webrtc::media::{MediaStream, VideoTrack};
+use crate::webrtc::peer_connection_observer::NetworkRoute;
 
 /// A trait encompassing the traits the platform associated types must
 /// implement.
@@ -63,6 +65,9 @@ pub trait Platform: fmt::Debug + fmt::Display + Send + Sized + 'static {
 
     /// Notify the client application about an event.
     fn on_event(&self, remote_peer: &Self::AppRemotePeer, event: ApplicationEvent) -> Result<()>;
+
+    /// Notify the client application that the network route has changed (1:1 calls)
+    fn on_network_route_changed(&self, remote_peer: &Self::AppRemotePeer, network_route: NetworkRoute) -> Result<()>;
 
     /// Send an offer to a remote peer using the signaling
     /// channel.  Offers are always broadcast to all devices.
@@ -162,6 +167,9 @@ pub trait Platform: fmt::Debug + fmt::Display + Send + Sized + 'static {
         remote_peer2: &Self::AppRemotePeer,
     ) -> Result<bool>;
 
+    /// Notify the application that an offer is too old.
+    fn on_offer_expired(&self, remote_peer: &Self::AppRemotePeer, age: Duration) -> Result<()>;
+
     /// Notify the application that the call is completely concluded
     fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer) -> Result<()>;
 
@@ -199,6 +207,13 @@ pub trait Platform: fmt::Debug + fmt::Display + Send + Sized + 'static {
         &self,
         client_id: group_call::ClientId,
         connection_state: group_call::ConnectionState,
+    );
+
+    /// Notify the client application that the network route has changed (group calls)
+    fn handle_network_route_changed(
+        &self,
+        client_id: group_call::ClientId,
+        network_route: NetworkRoute,
     );
 
     fn handle_join_state_changed(

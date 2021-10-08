@@ -5,8 +5,10 @@
 
 //! Android Platform Interface.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use jni::objects::{AutoLocal, GlobalRef, JObject, JValue};
 use jni::sys::{jboolean, jint, jlong};
@@ -30,7 +32,7 @@ use crate::core::connection::{Connection, ConnectionType};
 use crate::core::platform::{Platform, PlatformItem};
 use crate::core::{group_call, signaling};
 use crate::webrtc::media::{MediaStream, VideoTrack};
-use std::collections::HashMap;
+use crate::webrtc::peer_connection_observer::NetworkRoute;
 
 const RINGRTC_PACKAGE: &str = "org/signal/ringrtc";
 const CALL_MANAGER_CLASS: &str = "CallManager";
@@ -409,6 +411,26 @@ impl Platform for AndroidPlatform {
         Ok(())
     }
 
+
+    // Network route changes for 1:1 calls
+    fn on_network_route_changed(&self, remote_peer: &Self::AppRemotePeer, network_route: NetworkRoute) -> Result<()> {
+        info!("on_network_route_changed(): network_route: {:?}", network_route);
+
+        let env = self.java_env()?;
+
+        let _ = jni_call_method(
+            &env,
+            self.jni_call_manager.as_obj(),
+            "onNetworkRouteChanged",
+            "(Lorg/signal/ringrtc/Remote;I)V",
+            &[
+                remote_peer.as_obj().into(),
+                (network_route.local_adapter_type as i32).into(),
+            ],
+        )?;
+        Ok(())
+    }
+
     fn on_send_offer(
         &self,
         remote_peer: &Self::AppRemotePeer,
@@ -547,7 +569,7 @@ impl Platform for AndroidPlatform {
         let jni_call_manager = self.jni_call_manager.as_obj();
 
         // Set a frame capacity of min (5) + objects (3) + elements (N * 3 object per element).
-        let capacity = (8 + send.ice.candidates_added.len() * 3) as i32;
+        let capacity = (8 + send.ice.candidates.len() * 3) as i32;
         let _ = env.with_local_frame(capacity, || {
             let jni_remote = remote_peer.as_obj();
             let call_id_jlong = u64::from(call_id) as jlong;
@@ -561,7 +583,7 @@ impl Platform for AndroidPlatform {
                 }
             };
 
-            for candidate in send.ice.candidates_added {
+            for candidate in send.ice.candidates {
                 let jni_opaque = JObject::from(env.byte_array_from_slice(&candidate.opaque)?);
                 let result = ice_candidate_list.add(jni_opaque);
                 if result.is_err() {
@@ -948,6 +970,11 @@ impl Platform for AndroidPlatform {
         Ok(result)
     }
 
+    fn on_offer_expired(&self, remote_peer: &Self::AppRemotePeer, _age: Duration) -> Result<()> {
+        // Android already keeps track of the offer timestamp, so no need to pass the age through.
+        self.on_event(remote_peer, ApplicationEvent::ReceivedOfferExpired)
+    }
+
     fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer) -> Result<()> {
         info!("on_call_concluded():");
 
@@ -1156,6 +1183,27 @@ impl Platform for AndroidPlatform {
         );
     }
 
+    fn handle_network_route_changed(
+        &self,
+        client_id: group_call::ClientId,
+        network_route: NetworkRoute,
+    ) {
+        info!("handle_network_route_changed(): client_id: {}, network_route: {:?}", client_id, network_route);
+
+        if let Ok(env) = self.java_env() {
+            let _ = jni_call_method(
+                &env,
+                self.jni_call_manager.as_obj(),
+                "handleNetworkRouteChanged",
+                "(JI)V",
+                &[
+                    (client_id as jlong).into(),
+                    (network_route.local_adapter_type as i32).into(),
+                ],
+            );
+        }
+    }
+
     fn handle_join_state_changed(
         &self,
         client_id: group_call::ClientId,
@@ -1222,7 +1270,7 @@ impl Platform for AndroidPlatform {
 
             for remote_device_state in remote_device_states {
                 const REMOTE_DEVICE_STATE_CTOR_SIG: &str =
-                    "(J[BZLjava/lang/Boolean;Ljava/lang/Boolean;Ljava/lang/Boolean;Ljava/lang/Boolean;JJ)V";
+                    "(J[BZLjava/lang/Boolean;Ljava/lang/Boolean;Ljava/lang/Boolean;Ljava/lang/Boolean;JJLjava/lang/Boolean;)V";
 
                 let jni_demux_id = remote_device_state.demux_id as jlong;
                 let jni_user_id_byte_array =
@@ -1276,7 +1324,16 @@ impl Platform for AndroidPlatform {
                 };
                 let jni_added_time = remote_device_state.added_time_as_unix_millis() as jlong;
                 let jni_speaker_time = remote_device_state.speaker_time_as_unix_millis() as jlong;
-
+                let jni_forwarding_video = match self.get_optional_boolean_object(
+                    &env,
+                    remote_device_state.forwarding_video,
+                ) {
+                    Ok(v) => v,
+                    Err(error) => {
+                        error!("jni_forwarding_video: {:?}", error);
+                        continue;
+                    }
+                };
                 let args = [
                     jni_demux_id.into(),
                     jni_user_id_byte_array.into(),
@@ -1287,6 +1344,7 @@ impl Platform for AndroidPlatform {
                     jni_sharing_screen.into(),
                     jni_added_time.into(),
                     jni_speaker_time.into(),
+                    jni_forwarding_video.into(),
                 ];
 
                 let remote_device_state_obj = match env.new_object(

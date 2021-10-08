@@ -47,11 +47,13 @@ public enum GroupCallEndReason: Int32 {
 /// The local device state for a group call.
 public class LocalDeviceState {
     public internal(set) var connectionState: ConnectionState
+    public internal(set) var networkRoute: NetworkRoute
     public internal(set) var joinState: JoinState
 
     init() {
         self.connectionState = .notConnected
         self.joinState = .notJoined
+        self.networkRoute = NetworkRoute(localAdapterType: .unknown)
     }
 }
 
@@ -67,6 +69,7 @@ public class RemoteDeviceState: Hashable {
     public internal(set) var sharingScreen: Bool?
     public internal(set) var addedTime: UInt64  // unix millis
     public internal(set) var speakerTime: UInt64  // unix millis; 0 if they've never spoken
+    public internal(set) var forwardingVideo: Bool?
 
     public internal(set) var videoTrack: RTCVideoTrack?
 
@@ -505,6 +508,14 @@ public class GroupCall {
         AssertIsOnMainThread()
 
         self.localDeviceState.connectionState = connectionState
+
+        self.delegate?.groupCall(onLocalDeviceStateChanged: self)
+    }
+
+    func handleNetworkRouteChanged(networkRoute: NetworkRoute) {
+        AssertIsOnMainThread()
+
+        self.localDeviceState.networkRoute = networkRoute;
 
         self.delegate?.groupCall(onLocalDeviceStateChanged: self)
     }

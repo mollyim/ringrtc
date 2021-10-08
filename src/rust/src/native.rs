@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 use crate::common::{
     ApplicationEvent,
@@ -26,7 +27,7 @@ use crate::core::{
 use crate::webrtc::media::MediaStream;
 use crate::webrtc::media::{AudioTrack, VideoSink, VideoTrack};
 use crate::webrtc::peer_connection_factory::{Certificate, IceServer, PeerConnectionFactory};
-use crate::webrtc::peer_connection_observer::PeerConnectionObserver;
+use crate::webrtc::peer_connection_observer::{NetworkRoute, PeerConnectionObserver};
 
 // This serves as the Platform::AppCallContext
 // Users of the native platform must provide these things
@@ -115,6 +116,8 @@ pub trait CallStateHandler {
     fn handle_call_state(&self, remote_peer_id: &str, state: CallState) -> Result<()>;
     fn handle_remote_video_state(&self, remote_peer_id: &str, enabled: bool) -> Result<()>;
     fn handle_remote_sharing_screen(&self, remote_peer_id: &str, enabled: bool) -> Result<()>;
+    fn handle_network_route(&self, remote_peer_id: &str, network_route: NetworkRoute)
+        -> Result<()>;
 }
 
 // Starts an HTTP request. CallManager is notified of the result via a separate callback.
@@ -171,6 +174,7 @@ impl fmt::Debug for CallState {
 // These are the different reasons a call can end.
 // Closely tied to call_manager::ApplicationEvent.
 // TODO: Should we unify with ApplicationEvent?
+#[derive(Debug)]
 pub enum EndReason {
     LocalHangup,
     RemoteHangup,
@@ -178,7 +182,7 @@ pub enum EndReason {
     Declined,
     Busy, // Remote side is busy
     Glare,
-    ReceivedOfferExpired,
+    ReceivedOfferExpired { age: Duration },
     ReceivedOfferWhileActive,
     ReceivedOfferWithGlare,
     SignalingFailure,
@@ -200,7 +204,7 @@ impl fmt::Display for EndReason {
             EndReason::Declined => "Declined",
             EndReason::Busy => "Busy",
             EndReason::Glare => "Glare",
-            EndReason::ReceivedOfferExpired => "ReceivedOfferExpired",
+            EndReason::ReceivedOfferExpired { .. } => "ReceivedOfferExpired",
             EndReason::ReceivedOfferWhileActive => "ReceivedOfferWhileActive",
             EndReason::ReceivedOfferWithGlare => "ReceivedOfferWithGlare",
             EndReason::SignalingFailure => "SignalingFailure",
@@ -213,12 +217,6 @@ impl fmt::Display for EndReason {
             EndReason::CallerIsNotMultiring => "CallerIsNotMultiring",
         };
         write!(f, "({})", display)
-    }
-}
-
-impl fmt::Debug for EndReason {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
     }
 }
 
@@ -258,6 +256,7 @@ pub enum GroupUpdate {
         sender:   group_call::UserId,
         update:   group_call::RingUpdate,
     },
+    NetworkRouteChanged(group_call::ClientId, NetworkRoute),
 }
 
 impl fmt::Display for GroupUpdate {
@@ -273,6 +272,9 @@ impl fmt::Display for GroupUpdate {
             GroupUpdate::PeekResponse { .. } => "PeekResponse".to_string(),
             GroupUpdate::Ended(_, reason) => format!("Ended({:?})", reason),
             GroupUpdate::Ring { update, .. } => format!("Ring({:?})", update),
+            GroupUpdate::NetworkRouteChanged(_, network_route) => {
+                format!("NetworkRouteChanged({:?})", network_route)
+            }
         };
         write!(f, "({})", display)
     }
@@ -326,6 +328,11 @@ impl NativePlatform {
 
     fn send_state(&self, peer_id: &str, state: CallState) -> Result<()> {
         self.state_handler.handle_call_state(peer_id, state)
+    }
+
+    fn send_network_route(&self, peer_id: &str, network_route: NetworkRoute) -> Result<()> {
+        self.state_handler
+            .handle_network_route(peer_id, network_route)
     }
 
     fn send_group_update(&self, update: GroupUpdate) -> Result<()> {
@@ -524,10 +531,10 @@ impl Platform for NativePlatform {
             ApplicationEvent::EndedAppDroppedCall => {
                 self.send_state(remote_peer, CallState::Ended(EndReason::Declined))
             }
-            ApplicationEvent::ReceivedOfferExpired => self.send_state(
-                remote_peer,
-                CallState::Ended(EndReason::ReceivedOfferExpired),
-            ),
+            ApplicationEvent::ReceivedOfferExpired => {
+                debug_assert!(false, "should use on_offer_expired instead");
+                self.on_offer_expired(remote_peer, Duration::ZERO)
+            }
             ApplicationEvent::ReceivedOfferWhileActive => self.send_state(
                 remote_peer,
                 CallState::Ended(EndReason::ReceivedOfferWhileActive),
@@ -563,6 +570,32 @@ impl Platform for NativePlatform {
                 self.send_remote_sharing_screen(remote_peer, false)
             }
         }?;
+        Ok(())
+    }
+
+    fn on_network_route_changed(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        network_route: NetworkRoute,
+    ) -> Result<()> {
+        info!(
+            "NativePlatform::on_network_route_changed(): {:?}",
+            network_route
+        );
+
+        self.send_network_route(remote_peer, network_route)
+    }
+
+    fn on_offer_expired(&self, remote_peer: &Self::AppRemotePeer, age: Duration) -> Result<()> {
+        info!(
+            "NativePlatform::on_offer_expired(): remote_peer: {}, age: {:?}",
+            remote_peer, age
+        );
+
+        self.send_state(
+            remote_peer,
+            CallState::Ended(EndReason::ReceivedOfferExpired { age }),
+        )?;
         Ok(())
     }
 
@@ -627,7 +660,7 @@ impl Platform for NativePlatform {
     ) -> Result<()> {
         info!(
             "NativePlatform::on_send_ice(): remote_peer: {}, call_id: {}, receiver_device_id: {:?}, candidates: {}",
-            remote_peer, call_id, send.receiver_device_id, send.ice.candidates_added.len()
+            remote_peer, call_id, send.receiver_device_id, send.ice.candidates.len()
         );
         self.send_signaling(
             remote_peer,
@@ -745,6 +778,22 @@ impl Platform for NativePlatform {
             client_id,
             connection_state,
         ));
+        if result.is_err() {
+            error!("{:?}", result.err());
+        }
+    }
+
+    fn handle_network_route_changed(
+        &self,
+        client_id: group_call::ClientId,
+        network_route: NetworkRoute,
+    ) {
+        info!(
+            "NativePlatformhandle_network_route_changed(): {:?}",
+            network_route
+        );
+        let result =
+            self.send_group_update(GroupUpdate::NetworkRouteChanged(client_id, network_route));
         if result.is_err() {
             error!("{:?}", result.err());
         }

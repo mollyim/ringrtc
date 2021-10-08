@@ -176,6 +176,11 @@ impl TestContext {
         platform.ice_candidates_sent()
     }
 
+    pub fn last_ice_sent(&self) -> Option<signaling::SendIce> {
+        let platform = self.call_manager.platform().unwrap();
+        platform.last_ice_sent()
+    }
+
     pub fn normal_hangups_sent(&self) -> usize {
         let platform = self.call_manager.platform().unwrap();
         platform.normal_hangups_sent()
@@ -239,6 +244,11 @@ impl TestContext {
     pub fn start_incoming_count(&self) -> usize {
         let platform = self.call_manager.platform().unwrap();
         platform.start_incoming_count()
+    }
+
+    pub fn offer_expired_count(&self) -> usize {
+        let platform = self.call_manager.platform().unwrap();
+        platform.offer_expired_count()
     }
 
     pub fn call_concluded_count(&self) -> usize {
@@ -321,7 +331,7 @@ pub fn random_received_ice_candidate(prng: &Prng) -> signaling::ReceivedIce {
     let candidate = random_ice_candidate(prng);
     signaling::ReceivedIce {
         ice:              signaling::Ice {
-            candidates_added: vec![candidate],
+            candidates: vec![candidate],
         },
         sender_device_id: 1 as DeviceId,
     }

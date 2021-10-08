@@ -36,7 +36,13 @@ void PeerConnectionObserverRffi::OnIceCandidate(const IceCandidateInterface* can
 
 void PeerConnectionObserverRffi::OnIceCandidatesRemoved(
     const std::vector<cricket::Candidate>& candidates) {
-  RTC_LOG(LS_INFO) << "OnIceCandidatesRemoved()";
+
+  std::vector<IpPort> removed_addresses;
+  for (const auto& candidate: candidates) {
+    removed_addresses.push_back(RtcSocketAddressToIpPort(candidate.address()));
+  }
+
+  callbacks_.onIceCandidatesRemoved(observer_, removed_addresses.data(), removed_addresses.size());
 }
 
 void PeerConnectionObserverRffi::OnSignalingChange(
@@ -54,6 +60,13 @@ void PeerConnectionObserverRffi::OnConnectionChange(
 
 void PeerConnectionObserverRffi::OnIceConnectionReceivingChange(bool receiving) {
   RTC_LOG(LS_INFO) << "OnIceConnectionReceivingChange()";
+}
+
+void PeerConnectionObserverRffi::OnIceSelectedCandidatePairChanged(
+    const cricket::CandidatePairChangeEvent& event) {
+  auto local_adapter_type = event.selected_candidate_pair.local_candidate().network_type();
+  auto network_route = webrtc::rffi::NetworkRoute{ local_adapter_type, };
+  callbacks_.onIceNetworkRouteChange(observer_, network_route);
 }
 
 void PeerConnectionObserverRffi::OnIceGatheringChange(

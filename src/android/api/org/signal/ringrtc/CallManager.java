@@ -14,6 +14,7 @@ import android.os.Build;
 
 import org.webrtc.AudioSource;
 import org.webrtc.AudioTrack;
+import org.webrtc.ContextUtils;
 import org.webrtc.DefaultVideoDecoderFactory;
 import org.webrtc.DefaultVideoEncoderFactory;
 import org.webrtc.SoftwareVideoEncoderFactory;
@@ -30,6 +31,8 @@ import org.webrtc.VideoEncoderFactory;
 import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 import org.webrtc.VideoSink;
+import org.webrtc.audio.AudioDeviceModule;
+import org.webrtc.audio.JavaAudioDeviceModule;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -173,11 +176,51 @@ public class CallManager {
 
     VideoDecoderFactory decoderFactory = new DefaultVideoDecoderFactory(eglBase.getEglBaseContext());
 
-    return PeerConnectionFactory.builder()
+    // This is a workaround to what appears to a bug in WebRTC.
+    // If you don't call setAudioDeviceModule, then the default ADM created by WebRTC will not
+    // have .release() called, and the ADM will be leaked.
+    // This also lets us control the use of hardware AEC.
+    JavaAudioDeviceModule adm = createAudioDeviceModule();
+    PeerConnectionFactory factory = PeerConnectionFactory.builder()
             .setOptions(new PeerConnectionFactoryOptions())
+            .setAudioDeviceModule(adm)
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
             .createPeerConnectionFactory();
+    adm.release();
+    return factory;
+  }
+
+  // Returns an AndroidAudioDeviceModule with 1 reference owned by the caller.
+  public static long createAudioDeviceModuleOwnedPointer() {
+    AudioDeviceModule adm = createAudioDeviceModule();
+    // The Java ADM keeps the pointer to the native ADM, and thus owns one reference to the native ADM.
+    // But the only thing it does with that pointer is release a ref to it if we call adm.release().
+    // But we don't call adm.release(), so we effectively take ownership of that reference.
+    return adm.getNativeAudioDeviceModulePointer();
+  }
+
+  static JavaAudioDeviceModule createAudioDeviceModule() {
+    Set<String> HARDWARE_AEC_BLOCKLIST = new HashSet<String>() {{
+      add("Pixel");
+      add("Pixel XL");
+      add("Moto G5");
+      add("Moto G (5S) Plus");
+      add("Moto G4");
+      add("TA-1053");
+      add("Mi A1");
+      add("Mi A2");
+      add("E5823"); // Sony z5 compact
+      add("Redmi Note 5");
+      add("FP2"); // Fairphone FP2
+      add("MI 5");
+    }};
+
+    boolean useHardwareAec = !HARDWARE_AEC_BLOCKLIST.contains(Build.MODEL);
+    // Note: There is currently no way to enable the use of OpenSLES.
+    return JavaAudioDeviceModule.builder(ContextUtils.getApplicationContext())
+      .setUseHardwareAcousticEchoCanceler(useHardwareAec)
+      .createAudioDeviceModule();
   }
 
   private void checkCallManagerExists() {
@@ -192,7 +235,7 @@ public class CallManager {
     this.observer            = observer;
     this.nativeCallManager   = 0;
     this.groupCallByClientId = new LongSparseArray<>();
-    this.peekInfoRequests    = new Requests();
+    this.peekInfoRequests    = new Requests<>();
   }
 
   @Nullable
@@ -453,11 +496,11 @@ public class CallManager {
     ringrtcReceivedOffer(nativeCallManager,
                          callId.longValue(),
                          remote,
-                         remoteDeviceId.intValue(),
+                         remoteDeviceId,
                          opaque,
-                         messageAgeSec.longValue(),
+                         messageAgeSec,
                          callMediaType.ordinal(),
-                         localDeviceId.intValue(),
+                         localDeviceId,
                          remoteSupportsMultiRing,
                          isLocalDevicePrimary,
                          senderIdentityKey,
@@ -492,7 +535,7 @@ public class CallManager {
 
     ringrtcReceivedAnswer(nativeCallManager,
                           callId.longValue(),
-                          remoteDeviceId.intValue(),
+                          remoteDeviceId,
                           opaque,
                           remoteSupportsMultiRing,
                           senderIdentityKey,
@@ -521,7 +564,7 @@ public class CallManager {
 
     ringrtcReceivedIceCandidates(nativeCallManager,
                                  callId.longValue(),
-                                 remoteDeviceId.intValue(),
+                                 remoteDeviceId,
                                  iceCandidates);
   }
 
@@ -549,9 +592,9 @@ public class CallManager {
 
     ringrtcReceivedHangup(nativeCallManager,
                           callId.longValue(),
-                          remoteDeviceId.intValue(),
+                          remoteDeviceId,
                           hangupType.ordinal(),
-                          deviceId.intValue());
+                          deviceId);
   }
 
   /**
@@ -573,7 +616,7 @@ public class CallManager {
 
     ringrtcReceivedBusy(nativeCallManager,
                         callId.longValue(),
-                        remoteDeviceId.intValue());
+                        remoteDeviceId);
   }
 
   /**
@@ -603,10 +646,10 @@ public class CallManager {
 
     ringrtcReceivedCallMessage(nativeCallManager,
                                Util.getBytesFromUuid(senderUuid),
-                               senderDeviceId.intValue(),
-                               localDeviceId.intValue(),
+                               senderDeviceId,
+                               localDeviceId,
                                message,
-                               messageAgeSec.longValue());
+                               messageAgeSec);
   }
 
   /**
@@ -926,6 +969,7 @@ public class CallManager {
     configuration.bundlePolicy  = PeerConnection.BundlePolicy.MAXBUNDLE;
     configuration.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
     configuration.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
+    configuration.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
 
     if (callContext.hideIp) {
       configuration.iceTransportsType = PeerConnection.IceTransportsType.RELAY;
@@ -1062,13 +1106,53 @@ public class CallManager {
   @CalledByNative
   private void onStartCall(Remote remote, long callId, boolean isOutgoing, CallMediaType callMediaType) {
     Log.i(TAG, "onStartCall():");
-    observer.onStartCall(remote, new CallId(callId), Boolean.valueOf(isOutgoing), callMediaType);
+    observer.onStartCall(remote, new CallId(callId), isOutgoing, callMediaType);
   }
 
   @CalledByNative
   private void onEvent(Remote remote, CallEvent event) {
     Log.i(TAG, "onEvent():");
     observer.onCallEvent(remote, event);
+  }
+
+  @CalledByNative
+  private void onNetworkRouteChanged(Remote remote, int localNetworkAdapterType) {
+    Log.i(TAG, "onNetworkRouteChange():");
+
+    NetworkRoute networkRoute = new NetworkRoute(NetworkAdapterTypeFromRawValue(localNetworkAdapterType));
+
+    observer.onNetworkRouteChanged(remote, networkRoute);
+  }
+
+  // A faster version of PeerConnection.AdapterType.fromNativeIndex.
+  // It also won't return null.
+  @NonNull
+  private PeerConnection.AdapterType NetworkAdapterTypeFromRawValue(int localNetworkAdapterType) {
+    switch(localNetworkAdapterType) {
+      case 0:
+        return PeerConnection.AdapterType.UNKNOWN;
+      case 1:
+        return PeerConnection.AdapterType.ETHERNET;
+      case 2:
+        return PeerConnection.AdapterType.WIFI;
+      case 4:
+        return PeerConnection.AdapterType.CELLULAR;
+      case 8:
+        return PeerConnection.AdapterType.VPN;
+      case 16:
+        return PeerConnection.AdapterType.LOOPBACK;
+      case 32:
+        return PeerConnection.AdapterType.ADAPTER_TYPE_ANY;
+      case 64:
+        return PeerConnection.AdapterType.CELLULAR_2G;
+      case 128:
+        return PeerConnection.AdapterType.CELLULAR_3G;
+      case 256:
+        return PeerConnection.AdapterType.CELLULAR_4G;
+      case 512:
+        return PeerConnection.AdapterType.CELLULAR_5G;
+    }
+    return PeerConnection.AdapterType.UNKNOWN;
   }
 
   @CalledByNative
@@ -1080,31 +1164,31 @@ public class CallManager {
   @CalledByNative
   private void onSendOffer(long callId, Remote remote, int remoteDeviceId, boolean broadcast, @NonNull byte[] opaque, CallMediaType callMediaType) {
     Log.i(TAG, "onSendOffer():");
-    observer.onSendOffer(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), opaque, callMediaType);
+    observer.onSendOffer(new CallId(callId), remote, remoteDeviceId, broadcast, opaque, callMediaType);
   }
 
   @CalledByNative
   private void onSendAnswer(long callId, Remote remote, int remoteDeviceId, boolean broadcast, @NonNull byte[] opaque) {
     Log.i(TAG, "onSendAnswer():");
-    observer.onSendAnswer(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), opaque);
+    observer.onSendAnswer(new CallId(callId), remote, remoteDeviceId, broadcast, opaque);
   }
 
   @CalledByNative
   private void onSendIceCandidates(long callId, Remote remote, int remoteDeviceId, boolean broadcast, List<byte[]> iceCandidates) {
     Log.i(TAG, "onSendIceCandidates():");
-    observer.onSendIceCandidates(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), iceCandidates);
+    observer.onSendIceCandidates(new CallId(callId), remote, remoteDeviceId, broadcast, iceCandidates);
   }
 
   @CalledByNative
   private void onSendHangup(long callId, Remote remote, int remoteDeviceId, boolean broadcast, HangupType hangupType, int deviceId, boolean useLegacyHangupMessage) {
     Log.i(TAG, "onSendHangup():");
-    observer.onSendHangup(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast), hangupType, Integer.valueOf(deviceId), Boolean.valueOf(useLegacyHangupMessage));
+    observer.onSendHangup(new CallId(callId), remote, remoteDeviceId, broadcast, hangupType, deviceId, useLegacyHangupMessage);
   }
 
   @CalledByNative
   private void onSendBusy(long callId, Remote remote, int remoteDeviceId, boolean broadcast) {
     Log.i(TAG, "onSendBusy():");
-    observer.onSendBusy(new CallId(callId), remote, Integer.valueOf(remoteDeviceId), Boolean.valueOf(broadcast));
+    observer.onSendBusy(new CallId(callId), remote, remoteDeviceId, broadcast);
   }
 
   @CalledByNative
@@ -1200,6 +1284,20 @@ public class CallManager {
     }
 
     groupCall.handleConnectionStateChanged(connectionState);
+  }
+
+  @CalledByNative
+  private void handleNetworkRouteChanged(long clientId, int localNetworkAdapterType) {
+    Log.i(TAG, "handleNetworkRouteChanged():");
+
+    GroupCall groupCall = this.groupCallByClientId.get(clientId);
+    if (groupCall == null) {
+      Log.w(TAG, "groupCall not found by clientId: " + clientId);
+      return;
+    }
+
+    NetworkRoute networkRoute = new NetworkRoute(NetworkAdapterTypeFromRawValue(localNetworkAdapterType));
+    groupCall.handleNetworkRouteChanged(networkRoute);
   }
 
   @CalledByNative
@@ -1624,6 +1722,15 @@ public class CallManager {
 
     /**
      *
+     * Notification that the network route changed
+     *
+     * @param remote        remote peer of the incoming busy call
+     * @param networkRoute  the current network route
+     */
+    void onNetworkRouteChanged(Remote remote, NetworkRoute networkRoute);
+
+    /**
+     *
      * Notification of that the call is completely concluded
      *
      * @param remote  remote peer of the call
@@ -1743,7 +1850,6 @@ public class CallManager {
      * @param update  the updated state to handle
      */
     void onGroupCallRingUpdate(@NonNull byte[] groupId, long ringId, @NonNull UUID sender, RingUpdate update);
-
   }
 
   /**

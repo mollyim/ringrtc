@@ -241,6 +241,7 @@ pub struct AppRemoteDeviceState {
     pub sharingScreen:     AppOptionalBool,
     pub addedTime:         u64, // unix millis
     pub speakerTime:       u64, // unix millis; 0 if never was a speaker
+    pub forwardingVideo:   AppOptionalBool,
 }
 
 #[repr(C)]
@@ -312,6 +313,8 @@ pub struct AppInterface {
     ),
     /// Swift event callback method.
     pub onEvent: extern "C" fn(object: *mut c_void, remote: *const c_void, event: i32),
+    ///
+    pub onNetworkRouteChanged: extern "C" fn(object: *mut c_void, remote: *const c_void, localNetworkAdapterType: i32),
     ///
     pub onSendOffer: extern "C" fn(
         object: *mut c_void,
@@ -434,6 +437,8 @@ pub struct AppInterface {
     ///
     pub handleConnectionStateChanged:
         extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, connectionState: i32),
+    pub handleNetworkRouteChanged:
+        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, localNetworkAdapterType: i32),
     ///
     pub handleJoinStateChanged:
         extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, joinState: i32),
@@ -782,7 +787,7 @@ pub extern "C" fn ringrtcReceivedIceCandidates(
         callId,
         signaling::ReceivedIce {
             ice:              signaling::Ice {
-                candidates_added: ice_candidates,
+                candidates: ice_candidates,
             },
             sender_device_id: senderDeviceId as DeviceId,
         },

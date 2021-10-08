@@ -65,6 +65,7 @@ use crate::core::util::TaskQueueRuntime;
 use crate::error::RingRtcError;
 use crate::webrtc::data_channel::DataChannel;
 use crate::webrtc::media::MediaStream;
+use crate::webrtc::peer_connection_observer::NetworkRoute;
 
 /// The different types of Connection Events.
 pub enum ConnectionEvent {
@@ -104,10 +105,10 @@ pub enum ConnectionEvent {
     /// Source: app (user setting)
     /// Action: Update and send bitrate via a receiver status message over the data channel.
     UpdateBandwidthMode(BandwidthMode),
-    /// Local ICE candidate from PeerConnection
+    /// Local ICE candidates added or removed from PeerConnection
     /// Source: PeerConnection
-    /// Action: Send ICE candidate over signaling.
-    LocalIceCandidate(signaling::IceCandidate),
+    /// Action: Send ICE candidate (addition or removal) over signaling.
+    LocalIceCandidates(Vec<signaling::IceCandidate>),
     /// ICE state changed.
     /// Source: PeerConnection
     /// Action: Bubble up to Connection and Call objects.
@@ -120,6 +121,10 @@ pub enum ConnectionEvent {
     /// Source: PeerConnection
     /// Action: Bubble up to Connection and Call objects.
     IceDisconnected,
+    /// ICE network path (selected candidate pair) changed.
+    /// Source: PeerConnection
+    /// Action: Bubble up to Connection and Call objects.
+    IceNetworkRouteChanged(NetworkRoute),
     /// Send the observer an internal error message.
     /// Source: all kinds of things that can go wrong internally
     /// Action: Terminate the call.
@@ -176,10 +181,11 @@ impl fmt::Display for ConnectionEvent {
                 "UpdateBandwidthMode, mode: {:?}",
                 mode
             ),
-            ConnectionEvent::LocalIceCandidate(_) => "LocalIceCandidate".to_string(),
+            ConnectionEvent::LocalIceCandidates(_) => "LocalIceCandidates".to_string(),
             ConnectionEvent::IceConnected => "IceConnected".to_string(),
             ConnectionEvent::IceFailed => "IceConnectionFailed".to_string(),
             ConnectionEvent::IceDisconnected => "IceDisconnected".to_string(),
+            ConnectionEvent::IceNetworkRouteChanged(network_route) => format!("IceNetworkRouteChanged, network_route: {:?})", network_route),
             ConnectionEvent::InternalError(e) => format!("InternalError: {}", e),
             ConnectionEvent::ReceivedIncomingMedia(stream) => {
                 format!("ReceivedIncomingMedia, stream: {:}", stream)
@@ -421,12 +427,13 @@ where
             ConnectionEvent::UpdateBandwidthMode(mode) => {
                 self.handle_update_bandwidth_mode(connection, state, mode)
             }
-            ConnectionEvent::LocalIceCandidate(candidate) => {
-                self.handle_local_ice_candidate(connection, state, candidate)
+            ConnectionEvent::LocalIceCandidates(candidates) => {
+                self.handle_local_ice_candidates(connection, state, candidates)
             }
             ConnectionEvent::IceConnected => self.handle_ice_connected(connection, state),
             ConnectionEvent::IceFailed => self.handle_ice_failed(connection, state),
             ConnectionEvent::IceDisconnected => self.handle_ice_disconnected(connection, state),
+            ConnectionEvent::IceNetworkRouteChanged(network_route) => self.handle_ice_network_route_changed(connection, network_route),
             ConnectionEvent::InternalError(error) => self.handle_internal_error(connection, error),
             ConnectionEvent::ReceivedIncomingMedia(stream) => {
                 self.handle_received_incoming_media(connection, state, stream)
@@ -646,7 +653,7 @@ where
             | ConnectionState::ReconnectingAfterAccepted
             | ConnectionState::ConnectedBeforeAccepted
             | ConnectionState::ConnectedAndAccepted => {
-                connection.add_remote_ice_candidates(&ice.candidates_added)?
+                connection.handle_received_ice(ice)?;
             }
             _ => self.unexpected_state(state, "RemoteIceCandidate"),
         }
@@ -762,11 +769,11 @@ where
         Ok(())
     }
 
-    fn handle_local_ice_candidate(
+    fn handle_local_ice_candidates(
         &mut self,
         connection: Connection<T>,
         state: ConnectionState,
-        candidate: signaling::IceCandidate,
+        candidates: Vec<signaling::IceCandidate>,
     ) -> Result<()> {
         ringbench!(
             RingBench::WebRtc,
@@ -788,7 +795,7 @@ where
                     if connection.terminating()? {
                         return Ok(());
                     }
-                    connection.buffer_local_ice_candidate(candidate)
+                    connection.buffer_local_ice_candidates(candidates)
                 })
                 .map_err(move |err| {
                     err_connection.inject_internal_error(err, "IceFuture failed");
@@ -879,6 +886,15 @@ where
             }
             _ => self.unexpected_state(state, "IceDisconnected"),
         };
+        Ok(())
+    }
+
+    fn handle_ice_network_route_changed(
+        &mut self,
+        connection: Connection<T>,
+        network_route: NetworkRoute,
+    ) -> Result<()> {
+        self.notify_observer(connection, ConnectionObserverEvent::IceNetworkRouteChanged(network_route));
         Ok(())
     }
 

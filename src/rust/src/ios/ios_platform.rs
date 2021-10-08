@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::common::{
     ApplicationEvent,
@@ -41,9 +42,10 @@ use crate::ios::api::call_manager_interface::{
 };
 use crate::ios::error::IosError;
 use crate::ios::ios_media_stream::IosMediaStream;
+use crate::webrtc;
 use crate::webrtc::media::{MediaStream, VideoTrack};
 use crate::webrtc::peer_connection::{PeerConnection, RffiPeerConnection};
-use crate::webrtc::peer_connection_observer::PeerConnectionObserver;
+use crate::webrtc::peer_connection_observer::{NetworkRoute, PeerConnectionObserver};
 
 /// Concrete type for iOS AppIncomingMedia objects.
 impl PlatformItem for IosMediaStream {}
@@ -149,12 +151,14 @@ impl Platform for IosPlatform {
 
         // Retrieve the underlying PeerConnection object from the
         // application owned RTCPeerConnection object.
-        let rffi_peer_connection = app_connection_interface.pc as *const RffiPeerConnection;
+        let rffi_peer_connection = webrtc::Arc::from_borrowed_ptr(app_connection_interface.pc as *const RffiPeerConnection);
         if rffi_peer_connection.is_null() {
             return Err(IosError::ExtractNativePeerConnection.into());
         }
 
-        let peer_connection = PeerConnection::unowned(rffi_peer_connection, pc_observer.rffi());
+        // Note: We have to make sure the PeerConnectionFactory outlives this PC because we're not getting
+        // any help from the type system when passing in a None for the PeerConnectionFactory here.
+        let peer_connection = PeerConnection::new(rffi_peer_connection, pc_observer.rffi(), None);
 
         connection.set_peer_connection(peer_connection)?;
 
@@ -191,6 +195,15 @@ impl Platform for IosPlatform {
         info!("on_event(): {}", event);
 
         (self.app_interface.onEvent)(self.app_interface.object, remote_peer.ptr, event as i32);
+
+        Ok(())
+    }
+
+
+    fn on_network_route_changed(&self, remote_peer: &Self::AppRemotePeer, network_route: NetworkRoute) -> Result<()> {
+        info!("on_network_route_changed(): {:?}", network_route);
+
+       (self.app_interface.onNetworkRouteChanged)(self.app_interface.object, remote_peer.ptr, network_route.local_adapter_type as i32);
 
         Ok(())
     }
@@ -264,13 +277,13 @@ impl Platform for IosPlatform {
             call_id, receiver_device_id, broadcast
         );
 
-        if send.ice.candidates_added.is_empty() {
+        if send.ice.candidates.is_empty() {
             return Ok(());
         }
 
         let mut app_ice_candidates: Vec<AppByteSlice> = Vec::new();
 
-        for candidate in &send.ice.candidates_added {
+        for candidate in &send.ice.candidates {
             let app_ice_candidate = app_slice_from_bytes(Some(&candidate.opaque));
             app_ice_candidates.push(app_ice_candidate);
         }
@@ -478,6 +491,11 @@ impl Platform for IosPlatform {
         Ok(result)
     }
 
+    fn on_offer_expired(&self, remote_peer: &Self::AppRemotePeer, _age: Duration) -> Result<()> {
+        // iOS already keeps track of the offer timestamp, so no need to pass the age through.
+        self.on_event(remote_peer, ApplicationEvent::ReceivedOfferExpired)
+    }
+
     fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer) -> Result<()> {
         info!("on_call_concluded():");
 
@@ -564,6 +582,19 @@ impl Platform for IosPlatform {
         );
     }
 
+    fn handle_network_route_changed(
+        &self,
+        client_id: group_call::ClientId,
+        network_route: NetworkRoute,
+    ) {
+        info!("handle_network_route_changed(): {:?}", network_route);
+        (self.app_interface.handleNetworkRouteChanged)(
+            self.app_interface.object,
+            client_id,
+            network_route.local_adapter_type as i32,
+        );
+    }
+
     fn handle_join_state_changed(
         &self,
         client_id: group_call::ClientId,
@@ -607,6 +638,9 @@ impl Platform for IosPlatform {
                 ),
                 addedTime:         remote_device_state.added_time_as_unix_millis(),
                 speakerTime:       remote_device_state.speaker_time_as_unix_millis(),
+                forwardingVideo:   app_option_from_bool(
+                    remote_device_state.forwarding_video,
+                ),
             };
 
             app_remote_device_states.push(app_remote_device_state);

@@ -46,9 +46,10 @@ use crate::error::RingRtcError;
 use crate::protobuf;
 use crate::webrtc::media::{AudioTrack, MediaStream, VideoTrack};
 use crate::webrtc::peer_connection_factory::PeerConnectionFactory;
+use crate::webrtc::peer_connection_observer::NetworkRoute;
 
-const TIME_OUT_PERIOD: Duration = Duration::from_secs(120);
-pub const MAX_MESSAGE_AGE: Duration = Duration::from_secs(120);
+const TIME_OUT_PERIOD: Duration = Duration::from_secs(60);
+pub const MAX_MESSAGE_AGE: Duration = Duration::from_secs(60);
 
 /// Spawns a task on the worker runtime thread to handle an API
 /// request with error handling.
@@ -1100,27 +1101,25 @@ where
 
     /// Handle message_send_failure() API from application.
     fn handle_message_send_failure(&mut self, call_id: CallId) -> Result<()> {
-        // Get the last sent message type and see if it was for Ice.
-        let mut last_sent_message_ice = false;
-        if let Ok(message_queue) = self.message_queue.lock() {
-            if message_queue.last_sent_message_type == Some(signaling::MessageType::Ice) {
-                last_sent_message_ice = true
-            }
-        }
+        let mut is_active_call = false;
+        let mut should_handle = true;
 
-        let mut handle_active_call = false;
         if let Ok(active_call) = self.active_call() {
             if active_call.call_id() == call_id {
-                handle_active_call = true;
+                is_active_call = true;
                 if let Ok(state) = active_call.state() {
                     match state {
                         CallState::ConnectedWithDataChannelBeforeAccepted
                         | CallState::ConnectedAndAccepted
                         | CallState::ReconnectingAfterAccepted => {
-                            // We are in some connected state, ignore if the failed message
-                            // was an Ice message.
-                            if last_sent_message_ice {
-                                handle_active_call = false;
+                            // Get the last sent message type and see if it was for ICE.
+                            // Since we are in a connected state, don't handle it if so.
+                            if let Ok(message_queue) = self.message_queue.lock() {
+                                if message_queue.last_sent_message_type
+                                    == Some(signaling::MessageType::Ice)
+                                {
+                                    should_handle = false
+                                }
                             }
                         }
                         _ => {}
@@ -1129,38 +1128,40 @@ where
             }
         }
 
-        if handle_active_call {
-            info!(
-                "handle_message_send_failure(): id: {}, concluding active call",
-                call_id
-            );
+        if should_handle {
+            if is_active_call {
+                info!(
+                    "handle_message_send_failure(): id: {}, concluding active call",
+                    call_id
+                );
 
-            let _ = self.terminate_active_call(true, ApplicationEvent::EndedSignalingFailure);
-        } else {
-            // See if the associated call is in the call map.
-            let mut call = None;
-            {
-                if let Ok(call_map) = self.call_by_call_id.lock() {
-                    if let Some(v) = call_map.get(&call_id) {
-                        call = Some(v.clone());
-                    };
+                let _ = self.terminate_active_call(true, ApplicationEvent::EndedSignalingFailure);
+            } else {
+                // See if the associated call is in the call map.
+                let mut call = None;
+                {
+                    if let Ok(call_map) = self.call_by_call_id.lock() {
+                        if let Some(v) = call_map.get(&call_id) {
+                            call = Some(v.clone());
+                        };
+                    }
                 }
-            }
 
-            match call {
-                Some(call) => {
-                    info!(
-                        "handle_message_send_failure(): id: {}, concluding call",
-                        call_id
-                    );
-                    self.terminate_call(
-                        call,
-                        Some(signaling::Hangup::Normal),
-                        Some(ApplicationEvent::EndedSignalingFailure),
-                    )?;
-                }
-                None => {
-                    info!("handle_message_send_failure(): no matching call found");
+                match call {
+                    Some(call) => {
+                        info!(
+                            "handle_message_send_failure(): id: {}, concluding call",
+                            call_id
+                        );
+                        self.terminate_call(
+                            call,
+                            Some(signaling::Hangup::Normal),
+                            Some(ApplicationEvent::EndedSignalingFailure),
+                        )?;
+                    }
+                    None => {
+                        info!("handle_message_send_failure(): no matching call found");
+                    }
                 }
             }
         }
@@ -1214,7 +1215,7 @@ where
 
         if received.age > MAX_MESSAGE_AGE {
             ringbenchx!(RingBench::Cm, RingBench::App, "offer expired");
-            self.notify_application(&remote_peer, ApplicationEvent::ReceivedOfferExpired)?;
+            self.notify_offer_expired(&remote_peer, incoming_call_id, received.age)?;
             // Notify application we are completely done with this remote.
             self.notify_call_concluded(&remote_peer, incoming_call_id)?;
             return Ok(());
@@ -1432,7 +1433,7 @@ where
             RingBench::Cm,
             format!(
                 "received_ice_candidates({})\t{}\t{}",
-                received.ice.candidates_added.len(),
+                received.ice.candidates.len(),
                 call_id,
                 received.sender_device_id,
             )
@@ -2065,6 +2066,25 @@ where
         platform.on_event(remote_peer, event)
     }
 
+    /// Notify application that the network route changed
+    pub(super) fn notify_network_route_changed(
+        &self,
+        remote_peer: &<T as Platform>::AppRemotePeer,
+        network_route: NetworkRoute,
+    ) -> Result<()> {
+        ringbench!(
+            RingBench::Cm,
+            RingBench::App,
+            format!(
+                "network_route_changed()\tnetwork_route: {:?}",
+                network_route
+            )
+        );
+
+        let platform = self.platform.lock()?;
+        platform.on_network_route_changed(remote_peer, network_route)
+    }
+
     /// Create a new connection to a remote device
     pub(super) fn create_connection(
         &self,
@@ -2131,6 +2151,23 @@ where
             info!("remote_hangup(): ignoring for inactive call");
             Ok(())
         }
+    }
+
+    /// Notify application that the call is concluded.
+    pub(super) fn notify_offer_expired(
+        &self,
+        remote_peer: &<T as Platform>::AppRemotePeer,
+        _call_id: CallId,
+        age: Duration,
+    ) -> Result<()> {
+        ringbench!(
+            RingBench::Cm,
+            RingBench::App,
+            format!("offer_expired()\t{}", _call_id)
+        );
+
+        let platform = self.platform.lock()?;
+        platform.on_offer_expired(remote_peer, age)
     }
 
     /// Notify application that the call is concluded.
@@ -2306,7 +2343,7 @@ where
                         Some(connection.remote_device_id())
                     },
                     ice:                signaling::Ice {
-                        candidates_added: local_candidates,
+                        candidates: local_candidates,
                     },
                 },
             )?;
@@ -2369,6 +2406,15 @@ where
             client_id,
             connection_state
         );
+    }
+
+    fn handle_network_route_changed(
+        &self,
+        client_id: group_call::ClientId,
+        network_route: NetworkRoute,
+    ) {
+        info!("handle_network_route_changed():");
+        platform_handler!(self, handle_network_route_changed, client_id, network_route);
     }
 
     fn handle_join_state_changed(
@@ -2705,10 +2751,11 @@ where
 
     pub fn set_bandwidth_mode(
         &mut self,
-        _client_id: group_call::ClientId,
-        _bandwidth_mode: BandwidthMode,
+        client_id: group_call::ClientId,
+        bandwidth_mode: BandwidthMode,
     ) {
-        // TODO: Respect bandwidth mode for both send and receive
+        info!("set_bandwidth_mode(): id: {}", client_id);
+        group_call_api_handler!(self, client_id, set_bandwidth_mode, bandwidth_mode);
     }
 
     pub fn request_video(

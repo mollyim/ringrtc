@@ -27,9 +27,11 @@ use crate::core::connection::Connection;
 use crate::core::util::{ptr_as_box, ptr_as_mut};
 use crate::core::{group_call, signaling};
 use crate::error::RingRtcError;
+use crate::webrtc;
 use crate::webrtc::media;
 use crate::webrtc::peer_connection::PeerConnection;
 use crate::webrtc::peer_connection_observer::PeerConnectionObserver;
+use crate::webrtc::peer_connection_factory::{self as pcf, AudioDeviceModule, PeerConnectionFactory};
 
 /// Public type for Android CallManager
 pub type AndroidCallManager = CallManager<AndroidPlatform>;
@@ -112,14 +114,17 @@ pub fn create_peer_connection(
         return Err(AndroidError::CreateJniPeerConnection.into());
     }
 
-    // Retrieve the underlying PeerConnection object from the
-    // JNI OwnedPeerConnection object.
-    let rffi_pc = unsafe { Rust_getPeerConnectionFromJniOwnedPeerConnection(jni_owned_pc) };
+    let rffi_pc = webrtc::Arc::from_borrowed_ptr(unsafe { Rust_borrowPeerConnectionFromJniOwnedPeerConnection(jni_owned_pc) });
     if rffi_pc.is_null() {
         return Err(AndroidError::ExtractNativePeerConnection.into());
     }
 
-    let peer_connection = PeerConnection::unowned(rffi_pc, pc_observer.rffi());
+    // Note: We have to make sure the PeerConnectionFactory outlives this PC because we're not getting
+    // any help from the type system when passing in a None for the PeerConnectionFactory here.
+    // We can't "webrtc::Arc::from_borrowed_ptr(peer_connection_factory" here because
+    // peer_connection_factory is actually a OwnedFactoryAndThreads, not a PeerConnectionFactory.
+    // We'd need to unwrap it with something like Rust_borrowPeerConnectionFromJniOwnedPeerConnection.
+    let peer_connection = PeerConnection::new(rffi_pc, pc_observer.rffi(), None);
 
     connection.set_peer_connection(peer_connection)?;
 
@@ -354,7 +359,7 @@ pub fn received_ice(
         call_id,
         signaling::ReceivedIce {
             ice: signaling::Ice {
-                candidates_added: ice_candidates,
+                candidates: ice_candidates,
             },
             sender_device_id,
         },
@@ -630,14 +635,24 @@ pub fn create_group_call_client(
     let outgoing_video_track =
         media::VideoTrack::unowned(native_video_track as *const media::RffiVideoTrack);
 
+    let peer_connection_factory = PeerConnectionFactory::new(pcf::Config{
+        adm: Some(create_audio_device_module(env)?), 
+        ..Default::default()
+    })?;
+
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.create_group_call_client(
         group_id,
         sfu_url,
-        None,
+        Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
     )
+}
+
+fn create_audio_device_module(env: &JNIEnv) -> Result<AudioDeviceModule> {
+    let owned_adm = jni_call_static_method(env, "org/signal/ringrtc/CallManager", "createAudioDeviceModuleOwnedPointer", "()J", &[])?.j()? as *const u8;
+    Ok(AudioDeviceModule::owned(owned_adm))
 }
 
 pub fn delete_group_call_client(

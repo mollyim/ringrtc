@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use crate::webrtc;
 use crate::webrtc::peer_connection_factory::RffiIceServer;
 use crate::webrtc::sim::media::{
     RffiAudioTrack,
@@ -20,14 +21,20 @@ use std::ptr::copy_nonoverlapping;
 
 pub type RffiPeerConnectionFactory = u32;
 
+impl webrtc::RefCounted for RffiPeerConnectionFactory {}
+
 pub static FAKE_PEER_CONNECTION_FACTORY: RffiPeerConnectionFactory = 10;
 
 pub type RffiCertificate = u32;
 
 pub static FAKE_CERTIFICATE: RffiCertificate = 11;
 
+pub type RffiAudioDeviceModule = u32;
+
 #[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_createPeerConnectionFactory(
+    _adm: *const RffiAudioDeviceModule,
+    _use_new_audio_device_module: bool,
     _use_injectable_network: bool,
 ) -> *const RffiPeerConnectionFactory {
     info!("Rust_createPeerConnectionFactory()");

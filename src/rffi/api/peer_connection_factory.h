@@ -20,6 +20,7 @@ namespace webrtc {
   class PeerConnectionFactoryInterface;
   class AudioSourceInterface;
   class AudioTrackInterface;
+  class AudioDeviceModule;
 
   // This little indirection is needed so that we can have something
   // that owns the signaling thread (and other threads).
@@ -51,16 +52,24 @@ typedef struct {
   size_t urls_size;
 } RffiIceServer;
 
+// Returns an owned pointer that should be used with webrtc::Arc::from_owned_ptr().
 // Technically creates a PeerConnectionFactoryOwner, but if you only use the
 // functions below, that won't matter to you.
 // You can create more than one, but you should probably only have one unless
 // you want to test separate endpoints that are as independent as possible.
-RUSTEXPORT webrtc::PeerConnectionFactoryOwner* Rust_createPeerConnectionFactory(bool use_injectable_network);
+// If non-null, the ADM is a borrowed pointer to a ref-counted object
+// and Rust_createPeerConnectionFactory will increment the pointer.
+// If the ADM is null, a default one will be created.
+// But you probably want a specific one for Android or iOS.
+RUSTEXPORT webrtc::PeerConnectionFactoryOwner* Rust_createPeerConnectionFactory(
+  webrtc::AudioDeviceModule* adm, 
+  bool use_new_audio_device_module, 
+  bool use_injectable_network);
 RUSTEXPORT webrtc::rffi::InjectableNetwork* Rust_getInjectableNetwork(
     webrtc::PeerConnectionFactoryOwner*);
 
-// Creates a PeerConnection using a fairly small set of controls.  It assumes you
-// want all the normal stuff like
+// Creates a PeerConnection, returning an owned ptr
+// (should be consumed with webrtc::Arc::from_owned_ptr).
 RUSTEXPORT webrtc::PeerConnectionInterface* Rust_createPeerConnection(
   webrtc::PeerConnectionFactoryOwner*,
   webrtc::rffi::PeerConnectionObserverRffi*,

@@ -9,7 +9,7 @@ use std::{
     iter::FromIterator,
     mem::size_of,
     net::SocketAddr,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -26,16 +26,17 @@ use crate::{
         units::DataRate,
         Result,
     },
-    core::{call_mutex::CallMutex, crypto as frame_crypto, signaling},
+    core::{call_mutex::CallMutex, crypto as frame_crypto, signaling, bandwidth_mode::BandwidthMode},
     error::RingRtcError,
     protobuf,
     webrtc::{
         data_channel::DataChannel,
         media::{AudioTrack, VideoTrack},
         peer_connection::{PeerConnection, SendRates},
-        peer_connection_factory::{Certificate, IceServer, PeerConnectionFactory},
+        peer_connection_factory::{self as pcf, Certificate, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
             IceConnectionState,
+            NetworkRoute,
             PeerConnectionObserver,
             PeerConnectionObserverTrait,
         },
@@ -184,6 +185,7 @@ pub enum RemoteDevicesChangedReason {
     MediaKeyReceived(DemuxId),
     SpeakerTimeChanged(DemuxId),
     HeartbeatStateChanged(DemuxId),
+    ForwardeVideosChanged,
 }
 
 // The callbacks from the Call to the Observer of the call.
@@ -214,6 +216,11 @@ pub trait Observer {
         &self,
         client_id: ClientId,
         connection_state: ConnectionState,
+    );
+    fn handle_network_route_changed(
+        &self,
+        client_id: ClientId,
+        network_route: NetworkRoute,
     );
     fn handle_join_state_changed(&self, client_id: ClientId, join_state: JoinState);
     fn handle_send_rates_changed(&self, _client_id: ClientId, _send_rates: SendRates) {}
@@ -452,6 +459,7 @@ pub struct RemoteDeviceState {
     // Sorting using this value will give a history of who spoke.
     pub speaker_time:        Option<SystemTime>,
     pub leaving_received:    bool,
+    pub forwarding_video:     Option<bool>,
 }
 
 fn as_unix_millis(t: Option<SystemTime>) -> u64 {
@@ -486,6 +494,7 @@ impl RemoteDeviceState {
             added_time,
             speaker_time: None,
             leaving_received: false,
+            forwarding_video: None,
         }
     }
 
@@ -590,6 +599,12 @@ impl Deref for RemoteDevices {
     }
 }
 
+impl DerefMut for RemoteDevices {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl Default for RemoteDevices {
     fn default() -> Self {
         Self(Default::default())
@@ -657,6 +672,8 @@ struct State {
     next_stats_time: Option<Instant>,
     stats_observer:  Box<StatsObserver>,
 
+    next_membership_proof_request_time: Option<Instant>,
+
     // We have to put this inside the actor state also because
     // we change the keys from within the actor.
     frame_crypto_context: Arc<CallMutex<frame_crypto::Context>>,
@@ -689,6 +706,8 @@ struct State {
     speaker_rtp_timestamp:                        Option<rtp::Timestamp>,
 
     send_rates:               SendRates,
+    max_receive_rate: Option<DataRate>,
+    forwarding_video_demux_ids: HashSet<DemuxId>,
 
     /// A ring sent to the whole group when the call was created.
     ///
@@ -740,12 +759,15 @@ impl RemoteDevices {
     }
 }
 
-// The time between ticks to do periodic things like
-// Request updated membership list from the SfuClient
-const TICK_INTERVAL_SECS: u64 = 1;
+// The time between ticks to do periodic things like request updated
+// membership list from the SfuClient
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 // The stats period, how often to get and log them.
-const STATS_INTERVAL_SECS: u64 = 10;
+const STATS_INTERVAL: Duration = Duration::from_secs(10);
+
+// How often to request an updated membership proof (24 hours).
+const MEMBERSHIP_PROOF_REQUEST_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl Client {
     #[allow(clippy::too_many_arguments)]
@@ -778,7 +800,7 @@ impl Client {
 
                 let peer_connection_factory = match peer_connection_factory {
                     None => {
-                        match PeerConnectionFactory::new(false /* use_injectable network */) {
+                        match PeerConnectionFactory::new(pcf::Config::default()) {
                             Ok(v) => v,
                             Err(err) => {
                                 observer.handle_ended(
@@ -856,6 +878,8 @@ impl Client {
                     next_stats_time: None,
                     stats_observer: create_stats_observer(),
 
+                    next_membership_proof_request_time: None,
+
                     frame_crypto_context,
                     pending_media_receive_keys: Vec::new(),
                     media_send_key_rotation_state: KeyRotationState::Applied,
@@ -865,6 +889,9 @@ impl Client {
                     speaker_rtp_timestamp: None,
 
                     send_rates: SendRates::default(),
+                    max_receive_rate: None,
+                    forwarding_video_demux_ids: HashSet::default(),
+
                     cancellable_initial_ring: None,
 
                     actor,
@@ -904,7 +931,14 @@ impl Client {
                 let _ = state
                     .peer_connection
                     .get_stats(state.stats_observer.as_ref());
-                state.next_stats_time = Some(now + Duration::from_secs(STATS_INTERVAL_SECS));
+                state.next_stats_time = Some(now + STATS_INTERVAL);
+            }
+        }
+
+        if let Some(next_membership_proof_request_time) = state.next_membership_proof_request_time {
+            if now >= next_membership_proof_request_time {
+                state.observer.request_membership_proof(state.client_id);
+                state.next_membership_proof_request_time = Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
             }
         }
 
@@ -913,7 +947,7 @@ impl Client {
 
         state
             .actor
-            .send_delayed(Duration::from_secs(TICK_INTERVAL_SECS), move |state| {
+            .send_delayed(TICK_INTERVAL, move |state| {
                 Self::tick(state)
             });
     }
@@ -954,7 +988,7 @@ impl Client {
             RemoteDevicesRequestState::Updated { at: update_time } => now >= update_time + max_age,
             RemoteDevicesRequestState::Failed { at: failure_time } => {
                 // Don't hammer server during failures
-                now > failure_time + Duration::from_secs(1)
+                now > failure_time + Duration::from_secs(5)
             }
         };
         if should_request_now {
@@ -1014,6 +1048,7 @@ impl Client {
 
                     // Request group membership refresh as we start polling the participant list.
                     state.observer.request_membership_proof(state.client_id);
+                    state.next_membership_proof_request_time = Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
 
                     // Request the list of all group members
                     state.observer.request_group_members(state.client_id);
@@ -1105,6 +1140,7 @@ impl Client {
                         // Request group membership refresh before joining.
                         // The Join request will then proceed once SfuClient has the token.
                         state.observer.request_membership_proof(state.client_id);
+                        state.next_membership_proof_request_time = Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
 
                         state.sfu_client.join(
                             &state.local_ice_ufrag,
@@ -1191,6 +1227,7 @@ impl Client {
                 }
                 Self::set_join_state_and_notify_observer(state, JoinState::NotJoined(None));
                 state.next_stats_time = None;
+                state.next_membership_proof_request_time = None;
             }
         }
     }
@@ -1386,6 +1423,33 @@ impl Client {
         });
     }
 
+    pub fn set_bandwidth_mode(&self, bandwidth_mode: BandwidthMode) {
+        debug!(
+            "group_call::Client(outer)::set_bandwidth_mode(client_id: {}, bandwidth_mode: {:?})",
+            self.client_id, bandwidth_mode
+        );
+        self.actor.send(move |state| {
+            debug!(
+                "group_call::Client(inner)::set_bandwidth_mode(client_id: {}), bandwidth_mode: {:?}",
+                state.client_id,
+                bandwidth_mode,
+            );
+
+            state.max_receive_rate = Some(match bandwidth_mode {
+                // Effectively force audio-only
+                BandwidthMode::VeryLow => DataRate::from_kbps(1),
+                // Effectively only allow one low quality video
+                BandwidthMode::Low => DataRate::from_kbps(500),
+                // Effectively allow a lot of video 
+                BandwidthMode::Normal => DataRate::from_kbps(20_000_000),
+            });
+            if !state.on_demand_video_request_sent_since_last_tick {
+                Self::send_video_requests_to_sfu(state);
+                state.on_demand_video_request_sent_since_last_tick = true;
+            }
+        });
+    }
+
     fn set_send_rates_inner(state: &mut State, send_rates: SendRates) {
         if state.send_rates != send_rates {
             if send_rates.max == Some(DataRate::from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS)) {
@@ -1474,10 +1538,9 @@ impl Client {
                     //         .filter(|request| request.height.unwrap() > 0)
                     //         .count() as u32,
                     // ),
-                    max: Some(1000000),
+                    max_kbps: state.max_receive_rate.map(|rate| rate.as_kbps() as u32),
                     requests,
                 }),
-                ..DeviceToSfu::default()
             }) {
                 Err(e) => {
                     warn!("Failed to encode video request: {:?}", e);
@@ -1627,7 +1690,7 @@ impl Client {
                         // the eraId.
                         Self::request_remote_devices_as_soon_as_possible(state);
                         state.next_stats_time =
-                            Some(Instant::now() + Duration::from_secs(STATS_INTERVAL_SECS));
+                            Some(Instant::now() + STATS_INTERVAL);
                     }
                     JoinState::Joined(_, _) => {
                         warn!("The SFU completed joining more than once.");
@@ -2555,8 +2618,7 @@ impl Client {
 
     fn handle_rtp_received(&self, header: rtp::Header, payload: &[u8]) {
         use protobuf::group_call::{
-            sfu_to_device::DeviceJoinedOrLeft,
-            sfu_to_device::Speaker,
+            sfu_to_device::{DeviceJoinedOrLeft, Speaker, ForwardingVideo},
             DeviceToDevice,
             SfuToDevice,
         };
@@ -2578,10 +2640,11 @@ impl Client {
                     if let Some(DeviceJoinedOrLeft { .. }) = msg.device_joined_or_left {
                         self.handle_remote_device_joined_or_left();
                     }
+                    if let Some(ForwardingVideo { demux_ids }) = &msg.forwarding_video {
+                        self.handle_forwarding_video_received(demux_ids.iter().copied().collect());
+                        handled = true;
+                    }
                     if !handled {
-                        // TODO: Handle msg.devices to trigger a remote devices request.
-                        // TODO: Handle msg.video_request to trigger a change to the resolution/bitrate we send.
-                        // TODO: Handle msg.device_connection_status to add it to state.remote_devices so the UI can draw something
                         info!("Received message from SFU over RTP data: {:?}", msg);
                     }
                 }
@@ -2683,6 +2746,20 @@ impl Client {
         })
     }
 
+    fn handle_forwarding_video_received(&self, forwarding_video_demux_ids: HashSet<DemuxId>) {
+        self.actor.send(move |state| {
+            let forwarding_video_demux_ids = forwarding_video_demux_ids.into_iter().collect();
+            if state.forwarding_video_demux_ids != forwarding_video_demux_ids {
+                info!("SFU notified that the set of forwardinge videos has changed");
+                for remote_device in state.remote_devices.iter_mut() {
+                    remote_device.forwarding_video = Some(forwarding_video_demux_ids.contains(&remote_device.demux_id));
+                }
+                state.forwarding_video_demux_ids = forwarding_video_demux_ids;
+                state.observer.handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::ForwardeVideosChanged)
+            }
+        })
+    }
+
     fn handle_heartbeat_received(
         &self,
         demux_id: DemuxId,
@@ -2704,7 +2781,7 @@ impl Client {
                         state
                             .observer
                             .handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::HeartbeatStateChanged(demux_id));
-                    } 
+                    }
                 }
             } else {
                 warn!(
@@ -2802,6 +2879,13 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
         Ok(())
     }
 
+    fn handle_ice_candidates_removed(
+        &mut self,
+        _removed_addresses: Vec<SocketAddr>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn handle_ice_connection_state_changed(
         &mut self,
         ice_connection_state: IceConnectionState,
@@ -2850,6 +2934,25 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                         warn!("Could not process ICE connection state {:?} while in group call ConnectionState {:?}", ice_connection_state, state.connection_state);
                     }
                 }
+            });
+        } else {
+            warn!("Call isn't setup yet!");
+        }
+        Ok(())
+    }
+
+    fn handle_ice_network_route_changed(&mut self, network_route: NetworkRoute) -> Result<()> {
+        debug!(
+            "group_call::Client(outer)::handle_ice_network_route_changed(client_id: {}, network_route: {:?})",
+            self.log_id(),
+            network_route
+        );
+        if let Some(client) = &self.client {
+            client.actor.send(move |state| {
+                debug!("group_call::Client(inner)::handle_ice_network_route_changed(client_id: {}, network_route: {:?})", state.client_id, network_route);
+                state
+                    .observer
+                    .handle_network_route_changed(state.client_id, network_route);
             });
         } else {
             warn!("Call isn't setup yet!");
@@ -3186,6 +3289,7 @@ mod tests {
         ended:                       Waitable<EndReason>,
         era_id:                      Option<String>,
 
+        request_membership_proof_invocation_count:      Arc<AtomicU64>,
         handle_remote_devices_changed_invocation_count: Arc<AtomicU64>,
     }
 
@@ -3215,6 +3319,7 @@ mod tests {
                 send_rates: Arc::new(CallMutex::new(None, "FakeObserver send rates")),
                 ended: Waitable::default(),
                 era_id: None,
+                request_membership_proof_invocation_count: Default::default(),
                 handle_remote_devices_changed_invocation_count: Default::default(),
             }
         }
@@ -3274,6 +3379,11 @@ mod tests {
             send_rates.clone()
         }
 
+        /// Gets the number of `request_membership_proof` since last checked.
+        fn request_membership_proof_invocation_count(&self) -> u64 {
+            self.request_membership_proof_invocation_count.swap(0, Ordering::Relaxed)
+        }
+
         /// Gets the number of `handle_remote_devices_changed` since last checked.
         fn handle_remote_devices_changed_invocation_count(&self) -> u64 {
             self.handle_remote_devices_changed_invocation_count.swap(0, Ordering::Relaxed)
@@ -3281,7 +3391,10 @@ mod tests {
     }
 
     impl Observer for FakeObserver {
-        fn request_membership_proof(&self, _client_id: ClientId) {}
+        fn request_membership_proof(&self, _client_id: ClientId) {
+            self.request_membership_proof_invocation_count.fetch_add(1, Ordering::Relaxed);
+        }
+
         fn request_group_members(&self, _client_id: ClientId) {}
         fn handle_connection_state_changed(
             &self,
@@ -3299,6 +3412,9 @@ mod tests {
                 *owned_remote_devices_at_join_time = self.remote_devices();
                 self.joined.set();
             }
+        }
+
+        fn handle_network_route_changed(&self, _client_id: ClientId, _network_route: NetworkRoute) {
         }
 
         fn handle_remote_devices_changed(
@@ -4318,15 +4434,15 @@ mod tests {
                             height:          Some(1080),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            short_device_id: Some(demux_id_to_short_device_id(3)),
                             height:          Some(80),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            short_device_id: Some(demux_id_to_short_device_id(4)),
                             height:          Some(0),
                         },
                     ],
-                    max:      Some(2),
+                    max_kbps:  None,
                 }),
                 ..DeviceToSfu::default()
             },
@@ -4364,6 +4480,93 @@ mod tests {
             .expect("Get RTP packet to SFU");
         let elapsed = Instant::now() - before;
         assert!(elapsed > Duration::from_millis(1000));
+
+        client1.client.set_bandwidth_mode(BandwidthMode::VeryLow);
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                video_request: Some(VideoRequestMessage {
+                    requests: vec![
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            height:          Some(1080),
+                        },
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            height:          Some(80),
+                        },
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            height:          Some(0),
+                        },
+                    ],
+                    max_kbps:  Some(1),
+                }),
+                ..DeviceToSfu::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+
+        client1.client.set_bandwidth_mode(BandwidthMode::Low);
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                video_request: Some(VideoRequestMessage {
+                    requests: vec![
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            height:          Some(1080),
+                        },
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            height:          Some(80),
+                        },
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            height:          Some(0),
+                        },
+                    ],
+                    max_kbps:  Some(500),
+                }),
+                ..DeviceToSfu::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+
+        client1.client.set_bandwidth_mode(BandwidthMode::Normal);
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                video_request: Some(VideoRequestMessage {
+                    requests: vec![
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            height:          Some(1080),
+                        },
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            height:          Some(80),
+                        },
+                        VideoRequestProto {
+                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            height:          Some(0),
+                        },
+                    ],
+                    max_kbps:  Some(20_000_000),
+                }),
+                ..DeviceToSfu::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
 
         client1.disconnect_and_wait_until_ended();
     }
@@ -4499,6 +4702,36 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Because it's too slow
+    fn membership_proof_requests() {
+        let client1 = TestClient::new(vec![1], 1, None);
+        client1.client.set_peek_info(Ok(PeekInfo {
+            devices:      vec![PeekDeviceInfo {
+                demux_id:        2,
+                user_id:         None,
+                short_device_id: demux_id_to_short_device_id(2),
+                long_device_id:  demux_id_to_long_device_id(2),
+            }],
+            device_count: 1,
+            max_devices:  Some(2),
+            creator:      None,
+            era_id:       None,
+        }));
+        assert_eq!(0, client1.observer.request_membership_proof_invocation_count());
+
+        // Expect a request for connect and join.
+        client1.connect_join_and_wait_until_joined();
+        assert_eq!(2, client1.observer.request_membership_proof_invocation_count());
+
+        // TODO: Make Actors use tokio so we can use fake time
+        std::thread::sleep(std::time::Duration::from_millis(2000) + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+        assert_eq!(1, client1.observer.request_membership_proof_invocation_count());
+
+        client1.disconnect_and_wait_until_ended();
+        assert_eq!(0, client1.observer.request_membership_proof_invocation_count());
+    }
+
+    #[test]
     fn speakers() {
         let client1 = TestClient::new(vec![1], 1, None);
         let client2 = TestClient::new(vec![2], 2, None);
@@ -4574,6 +4807,34 @@ mod tests {
         client1.receive_speaker(10, 3);
         assert_eq!(vec![3, 2, 4], client1.speakers());
         assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+
+        client1.disconnect_and_wait_until_ended();
+    }
+
+    #[test]
+    fn forwarding_video() {
+        let get_forwarding_videos = |client: &TestClient| -> Vec<(DemuxId, Option<bool>)> {
+            client.observer.remote_devices().iter().map(|remote| (remote.demux_id, remote.forwarding_video)).collect()
+        };
+
+        let client1 = TestClient::new(vec![1], 1, None);
+        let client2 = TestClient::new(vec![2], 2, None);
+        let client3 = TestClient::new(vec![3], 3, None);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[&client2, &client3]);
+
+
+        assert_eq!(vec![(2, None), (3, None)], get_forwarding_videos(&client1));
+
+        client1.client.handle_forwarding_video_received([2, 3].iter().copied().collect());
+        client1.wait_for_client_to_process();
+
+        assert_eq!(vec![(2, Some(true)), (3, Some(true))], get_forwarding_videos(&client1));
+
+        client1.client.handle_forwarding_video_received([2].iter().copied().collect());
+        client1.wait_for_client_to_process();
+
+        assert_eq!(vec![(2, Some(true)), (3, Some(false))], get_forwarding_videos(&client1));
 
         client1.disconnect_and_wait_until_ended();
     }
@@ -5033,7 +5294,7 @@ mod remote_devices_tests {
         let remote_devices = RemoteDevices::from_iter(vec![device_1, device_2.clone(), device_3]);
         assert_eq!(Some(&device_2), remote_devices.find_by_demux_id(device_2.demux_id));
     }
-    
+
     #[test]
     fn find_by_demux_id_mut_when_key_is_not_found() {
         let device_1 = remote_device_state(1, None);
@@ -5057,7 +5318,7 @@ mod remote_devices_tests {
         let device_state = remote_devices.find_by_demux_id_mut(device_2_demux_id).unwrap();
         assert_eq!(Some(time(300)), device_state.speaker_time);
     }
-    
+
     #[test]
     fn find_by_long_device_id_mut_when_key_is_not_found() {
         let device_1 = remote_device_state(1, None);

@@ -10,6 +10,7 @@ extern crate ringrtc;
 #[macro_use]
 extern crate log;
 
+use std::net::SocketAddr;
 use std::ptr;
 use std::thread;
 use std::time::Duration;
@@ -759,6 +760,146 @@ fn receive_remote_ice_candidate() {
 
     // TODO -- verify the ice candidate was buffered
     // TODO -- verify the ice candidate was applied to the peer_connection
+}
+
+#[test]
+fn ice_candidate_removal() {
+    test_init();
+
+    let context = connect_outbound_call();
+    let mut cm = context.cm();
+    let mut active_connection = context.active_connection();
+
+    let removed_addresses: Vec<SocketAddr> =
+        vec!["1.2.3.4:5".parse().unwrap(), "6.7.8.9:0".parse().unwrap()];
+    let force_send = true;
+    active_connection
+        .inject_local_ice_candidates_removed(removed_addresses.clone(), force_send)
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ice_candidates_sent(), 2);
+    let last_sent = context
+        .last_ice_sent()
+        .expect("ICE candidate removal was sent");
+
+    let active_call = context.active_call();
+    let call_id = active_call.call_id();
+    cm.received_ice(
+        call_id,
+        signaling::ReceivedIce {
+            ice:              last_sent.ice,
+            sender_device_id: 1 as DeviceId,
+        },
+    )
+    .expect("receive_ice");
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        removed_addresses,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .removed_ice_candidates()
+    );
+}
+
+#[test]
+fn ice_send_failures_cause_error_before_connection() {
+    test_init();
+
+    let context = start_outbound_call();
+    let mut cm = context.cm();
+    let mut active_connection = context.active_connection();
+    let active_call = context.active_call();
+
+    // The active call should be in the connecting before accepted state.
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingBeforeAccepted
+    );
+
+    // Simulate sending of an ICE candidate message and getting it 'in-flight'.
+    context.no_auto_message_sent_for_ice(true);
+
+    let ice_candidate = random_ice_candidate(&context.prng);
+    let force_send = true;
+    active_connection
+        .inject_local_ice_candidate(ice_candidate, force_send, "")
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ice_candidates_sent(), 1);
+
+    // Now indicate that the signaling mechanism failed to send the message.
+    cm.message_send_failure(active_call.call_id())
+        .expect(error_line!());
+
+    // There should be a signaling failure.
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedSignalingFailure),
+        1
+    );
+
+    // The active call should be terminated.
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::Terminated
+    );
+}
+
+#[test]
+fn ignore_ice_send_failures_after_connection() {
+    test_init();
+
+    let context = connect_outbound_call();
+    let mut cm = context.cm();
+    let mut active_connection = context.active_connection();
+    let active_call = context.active_call();
+
+    // The active call should be in the connected and accepted state.
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectedAndAccepted
+    );
+
+    // Simulate sending of an ICE candidate message and getting it 'in-flight'.
+    context.no_auto_message_sent_for_ice(true);
+
+    let ice_candidate = random_ice_candidate(&context.prng);
+    let force_send = true;
+    active_connection
+        .inject_local_ice_candidate(ice_candidate, force_send, "")
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ice_candidates_sent(), 1);
+
+    // Now indicate that the signaling mechanism failed to send the message.
+    cm.message_send_failure(active_call.call_id())
+        .expect(error_line!());
+
+    // There should not be any failures due to ICE messages not being sent
+    // after we are connected.
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedSignalingFailure),
+        0
+    );
+
+    // Check that there is still an active call.
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectedAndAccepted
+    );
 }
 
 #[test]
@@ -2022,12 +2163,12 @@ fn group_call_ring_message_age_does_not_affect_ring_expiration() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    // 90 seconds means the ring isn't expired yet...
-    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::from_secs(90))
+    // 45 seconds means the ring isn't expired yet...
+    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::from_secs(45))
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
-    // ...and adding another 90 won't make it expire, since the ages don't stack.
-    cm.age_all_outstanding_group_rings(Duration::from_secs(90));
+    // ...and adding another 45 won't make it expire, since the ages don't stack.
+    cm.age_all_outstanding_group_rings(Duration::from_secs(45));
 
     let group_call_id = context
         .create_group_call(group_id.clone())

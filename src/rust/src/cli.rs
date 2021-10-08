@@ -37,7 +37,8 @@ use ringrtc::{
         injectable_network::InjectableNetwork,
         media::{VideoFrame, VideoSink, VideoSource},
         network::NetworkInterfaceType,
-        peer_connection_factory::{Certificate, IceServer, PeerConnectionFactory},
+        peer_connection_factory::{self as pcf, Certificate, IceServer, PeerConnectionFactory},
+        peer_connection_observer::NetworkRoute,
     },
 };
 use std::{collections::HashMap, thread, time::Duration};
@@ -250,9 +251,10 @@ impl CallEndpoint {
                 // Option<CallManager> thing that we have to set later.
                 let endpoint = Self::from_actor(peer_id.clone(), device_id, actor.clone());
 
-                // Set up packet flow
-                let use_injectable_network = true;
-                let pcf = PeerConnectionFactory::new(use_injectable_network)?;
+                let pcf = PeerConnectionFactory::new(pcf::Config {
+                    use_injectable_network: true, // Set up packet flow
+                    ..Default::default()
+                })?;
                 info!(
                     "Audio playout devices: {:?}",
                     pcf.get_audio_playout_devices()
@@ -573,6 +575,18 @@ impl CallStateHandler for CallEndpoint {
                     .expect("proceed with outgoing call");
             }
         });
+        Ok(())
+    }
+
+    fn handle_network_route(
+        &self,
+        remote_peer_id: &str,
+        network_route: NetworkRoute,
+    ) -> Result<()> {
+        info!(
+            "Network route changed for {} => {}: {:?}",
+            self.peer_id, remote_peer_id, network_route
+        );
         Ok(())
     }
 

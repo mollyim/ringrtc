@@ -503,6 +503,22 @@ public final class GroupCall {
 
     /**
      *
+     * Callback from RingRTC with details about a network route change.
+     *
+     */
+    void handleNetworkRouteChanged(NetworkRoute networkRoute) {
+        Log.i(TAG, "handleNetworkRouteChanged():");
+
+        LocalDeviceState localDeviceState = new LocalDeviceState(this.localDeviceState);
+        localDeviceState.networkRoute = networkRoute;
+
+        this.localDeviceState = localDeviceState;
+
+        this.observer.onLocalDeviceStateChanged(this);
+    }
+
+    /**
+     *
      * Callback from RingRTC when the remote device states have changed.
      * Called via the CallManager.
      *
@@ -710,12 +726,14 @@ public final class GroupCall {
         JoinState       joinState;
         boolean         audioMuted;
         boolean         videoMuted;
+        NetworkRoute    networkRoute;
 
         public LocalDeviceState() {
             this.connectionState = ConnectionState.NOT_CONNECTED;
             this.joinState = JoinState.NOT_JOINED;
             this.audioMuted = true;
             this.videoMuted = true;
+            this.networkRoute = new NetworkRoute();
         }
 
         public LocalDeviceState(@NonNull LocalDeviceState localDeviceState) {
@@ -723,6 +741,7 @@ public final class GroupCall {
             this.joinState = localDeviceState.joinState;
             this.audioMuted = localDeviceState.audioMuted;
             this.videoMuted = localDeviceState.videoMuted;
+            this.networkRoute = localDeviceState.networkRoute;
         }
 
         public ConnectionState getConnectionState() {
@@ -739,6 +758,10 @@ public final class GroupCall {
 
         public boolean getVideoMuted() {
             return videoMuted;
+        }
+
+        public NetworkRoute getNetworkRoute() {
+            return networkRoute;
         }
     }
 
@@ -762,6 +785,7 @@ public final class GroupCall {
         @Nullable Boolean    sharingScreen;
         long                 addedTime;   // unix millis
         long                 speakerTime; // unix millis; 0 if was never the speaker
+        @Nullable Boolean    forwardingVideo;
 
         @Nullable VideoTrack videoTrack;
 
@@ -773,7 +797,8 @@ public final class GroupCall {
                                  @Nullable Boolean presenting,
                                  @Nullable Boolean sharingScreen,
                                            long    addedTime,
-                                           long    speakerTime) {
+                                           long    speakerTime,
+                                 @Nullable Boolean forwardingVideo) {
             this.demuxId = demuxId;
             this.userIdByteArray = userIdByteArray;
             this.mediaKeysReceived = mediaKeysReceived;
@@ -784,6 +809,7 @@ public final class GroupCall {
             this.sharingScreen = sharingScreen;
             this.addedTime = addedTime;
             this.speakerTime = speakerTime;
+            this.forwardingVideo = forwardingVideo;
         }
 
         public long getDemuxId() {
@@ -822,6 +848,10 @@ public final class GroupCall {
 
         public long getSpeakerTime() {
             return speakerTime;
+        }
+
+        public @Nullable Boolean getForwardingVideo() {
+            return forwardingVideo;
         }
 
         public @Nullable VideoTrack getVideoTrack() {

@@ -1,5 +1,51 @@
 # Changelog
 
+## v2.13.1
+
+- Desktop: Add support for auto-ended call timestamps
+
+- Desktop: Formatting and other updates
+
+- Android: Fix signature for new argument
+
+## v2.13.0
+
+- Desktop: Option to use new or default audio device module on Windows
+
+- Reference signalapp/webrtc@4389i
+  - Support new Windows ADM
+
+- Desktop: Support glare scenarios
+
+- Request updated membership proof for group calls at least once a day
+
+- Request bitrate constraints for group calls according to BandwidthMode
+
+- Fix PeerConnectionFactory leaks
+
+- iOS: Remove dependency on PromiseKit
+
+- Android: Enable a Hardware AEC blocklist and fix a memory leak
+
+- Android: Native PeerConnectionFactory uses AndroidNetworkMonitor and JavaAudioDeviceModule
+
+## v2.12.0
+
+- Enable ICE continual gathering
+
+- Add signaling for the removal of ICE candidates
+
+- Add notifications for network route changes
+
+- Adjust ringing timeout to 60 seconds
+
+- iOS: Fixes to address resource leaks
+
+- Reference signalapp/webrtc@4389h
+  - iOS: AudioSession adjustments for volume issues
+
+- Update builds and documentation
+
 ## v2.11.1
 
 - Update Group Ringing feature

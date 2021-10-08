@@ -4,11 +4,12 @@
 //
 
 //! WebRTC Peer Connection
-use std::fmt;
+use std::{fmt, mem::drop};
 
 use crate::common::Result;
 use crate::core::util::CppObject;
 use crate::error::RingRtcError;
+use crate::webrtc;
 #[cfg(feature = "simnet")]
 use crate::webrtc::injectable_network::InjectableNetwork;
 use crate::webrtc::media::{AudioTrack, VideoSource, VideoTrack};
@@ -31,8 +32,11 @@ use crate::webrtc::sim::peer_connection_factory as pcf;
 #[cfg(feature = "sim")]
 use crate::webrtc::sim::ref_count;
 
-#[cfg(target_os = "windows")]
+pub use pcf::RffiPeerConnectionFactory;
+
+#[cfg(target_os = "windows")] // For the default ADM.
 const DEFAULT_COMMUNICATION_DEVICE_INDEX: u16 = 0xFFFF;
+
 const ADM_MAX_DEVICE_NAME_SIZE: usize = 128;
 const ADM_MAX_DEVICE_UUID_SIZE: usize = 128;
 
@@ -165,6 +169,7 @@ pub struct AudioDevice {
     pub i18n_key:  String,
 }
 
+#[cfg(target_os = "windows")] // For the default ADM.
 impl AudioDevice {
     fn default() -> AudioDevice {
         AudioDevice {
@@ -175,15 +180,39 @@ impl AudioDevice {
     }
 }
 
+/// Rust wrapper around WebRTC C++ AudioDeviceModule object.
+#[derive(Debug)]
+pub struct AudioDeviceModule {
+    /// Pointer to C++ AudioDeviceModule.
+    rffi: *const pcf::RffiAudioDeviceModule,
+}
+
+impl AudioDeviceModule {
+    pub fn owned(ptr: *const u8) -> Self {
+        let rffi = ptr as *const pcf::RffiAudioDeviceModule;
+        Self { rffi, }
+    }
+}
+
+impl Drop for AudioDeviceModule {
+    fn drop(&mut self) {
+        debug!("AudioDeviceModule::drop()");
+        if !self.rffi.is_null() {
+            ref_count::release_ref(self.rffi as CppObject);
+        }
+    }
+}
+
 /// Rust wrapper around WebRTC C++ PeerConnectionFactory object.
+#[derive(Clone)]
 pub struct PeerConnectionFactory {
-    /// Pointer to C++ PeerConnectionFactory.
-    rffi: *const pcf::RffiPeerConnectionFactory,
+    rffi: webrtc::Arc<RffiPeerConnectionFactory>,
+    use_new_audio_device_module: bool,
 }
 
 impl fmt::Display for PeerConnectionFactory {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PeerConnectionFactory: {:p}", self.rffi)
+        write!(f, "PeerConnectionFactory: {:p}", self.rffi.as_borrowed_ptr())
     }
 }
 
@@ -193,33 +222,52 @@ impl fmt::Debug for PeerConnectionFactory {
     }
 }
 
-impl Drop for PeerConnectionFactory {
-    fn drop(&mut self) {
-        debug!("PeerConnectionFactory::drop()");
-        if !self.rffi.is_null() {
-            ref_count::release_ref(self.rffi as CppObject);
-        }
-    }
-}
 
-unsafe impl Send for PeerConnectionFactory {}
-unsafe impl Sync for PeerConnectionFactory {}
+#[derive(Default)]
+pub struct Config {
+    pub adm: Option<AudioDeviceModule>,
+    // This only takes affect if adm == None
+    pub use_new_audio_device_module: bool,
+    pub use_injectable_network: bool,
+}
 
 impl PeerConnectionFactory {
     /// Create a new Rust PeerConnectionFactory object from a WebRTC C++
     /// PeerConnectionFactory object.
-    pub fn new(use_injectable_network: bool) -> Result<Self> {
+    pub fn new(config: Config) -> Result<Self> {
         debug!("PeerConnectionFactory::new()");
-        let rffi = unsafe { pcf::Rust_createPeerConnectionFactory(use_injectable_network) };
+
+        let (rffi, use_new_audio_device_module) = {
+            let use_new_audio_device_module = config.use_new_audio_device_module;
+            let adm_rffi = config.adm.as_ref().map_or_else(std::ptr::null, |adm| adm.rffi);
+            let rffi = webrtc::Arc::from_owned_ptr(unsafe {
+                 pcf::Rust_createPeerConnectionFactory(
+                     adm_rffi, 
+                     config.use_new_audio_device_module,
+                     config.use_injectable_network) 
+            });
+            // This is actually to keep the adm around so that adm_rffi is still valid
+            // until after the call to Rust_createPeerConnectionFactory
+            drop(config);
+
+            #[cfg(target_os = "windows")]
+            if use_new_audio_device_module {
+                info!("PeerConnectionFactory::new(): Using the new ADM for Windows");
+            } else {
+                info!("PeerConnectionFactory::new(): Using the default ADM for Windows");
+            }
+
+            (rffi, use_new_audio_device_module)
+        };
         if rffi.is_null() {
             return Err(RingRtcError::CreatePeerConnectionFactory.into());
         }
-        Ok(Self { rffi })
+        Ok(Self { rffi, use_new_audio_device_module })
     }
 
     #[cfg(feature = "simnet")]
     pub fn injectable_network(&self) -> Option<InjectableNetwork> {
-        let rffi = unsafe { pcf::Rust_getInjectableNetwork(self.rffi) };
+        let rffi = unsafe { pcf::Rust_getInjectableNetwork(self.rffi.as_borrowed_ptr()) };
         if rffi.is_null() {
             return None;
         }
@@ -239,12 +287,12 @@ impl PeerConnectionFactory {
         enable_rtp_data_channel: bool,
     ) -> Result<PeerConnection> {
         debug!(
-            "PeerConnectionFactory::create_peer_connection() {}",
-            self.rffi as u64
+            "PeerConnectionFactory::create_peer_connection() {:p}",
+            self.rffi.as_borrowed_ptr()
         );
-        let rffi = unsafe {
+        let rffi = webrtc::Arc::from_owned_ptr(unsafe {
             pcf::Rust_createPeerConnection(
-                self.rffi,
+                self.rffi.as_borrowed_ptr(),
                 observer.rffi(),
                 certificate.rffi(),
                 hide_ip,
@@ -256,20 +304,20 @@ impl PeerConnectionFactory {
                 enable_dtls,
                 enable_rtp_data_channel,
             )
-        };
+        });
         debug!(
-            "PeerConnectionFactory::create_peer_connection() finished: {}",
-            rffi as u64
+            "PeerConnectionFactory::create_peer_connection() finished: {:p}",
+            rffi.as_borrowed_ptr()
         );
         if rffi.is_null() {
             return Err(RingRtcError::CreatePeerConnection.into());
         }
-        Ok(PeerConnection::owned(rffi, observer.rffi()))
+        Ok(PeerConnection::new(rffi, observer.rffi(), Some(self.rffi.clone())))
     }
 
     pub fn create_outgoing_audio_track(&self) -> Result<AudioTrack> {
         debug!("PeerConnectionFactory::create_outgoing_audio_track()");
-        let rffi = unsafe { pcf::Rust_createAudioTrack(self.rffi) };
+        let rffi = unsafe { pcf::Rust_createAudioTrack(self.rffi.as_borrowed_ptr()) };
         if rffi.is_null() {
             return Err(RingRtcError::CreateAudioTrack.into());
         }
@@ -278,7 +326,7 @@ impl PeerConnectionFactory {
 
     pub fn create_outgoing_video_source(&self) -> Result<VideoSource> {
         debug!("PeerConnectionFactory::create_outgoing_video_source()");
-        let rffi = unsafe { pcf::Rust_createVideoSource(self.rffi) };
+        let rffi = unsafe { pcf::Rust_createVideoSource(self.rffi.as_borrowed_ptr()) };
         if rffi.is_null() {
             return Err(RingRtcError::CreateVideoSource.into());
         }
@@ -292,7 +340,7 @@ impl PeerConnectionFactory {
         outgoing_video_source: &VideoSource,
     ) -> Result<VideoTrack> {
         debug!("PeerConnectionFactory::create_outgoing_video_track()");
-        let rffi = unsafe { pcf::Rust_createVideoTrack(self.rffi, outgoing_video_source.rffi()) };
+        let rffi = unsafe { pcf::Rust_createVideoTrack(self.rffi.as_borrowed_ptr(), outgoing_video_source.rffi()) };
         if rffi.is_null() {
             return Err(RingRtcError::CreateVideoTrack.into());
         }
@@ -304,7 +352,7 @@ impl PeerConnectionFactory {
             let name = CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_NAME_SIZE]).into_raw();
             let unique_id =
                 CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_UUID_SIZE]).into_raw();
-            let rc = pcf::Rust_getAudioPlayoutDeviceName(self.rffi, index, name, unique_id);
+            let rc = pcf::Rust_getAudioPlayoutDeviceName(self.rffi.as_borrowed_ptr(), index, name, unique_id);
             // Take back ownership of the raw pointers before checking for errors.
             let name = CString::from_raw(name);
             let unique_id = CString::from_raw(unique_id);
@@ -324,18 +372,32 @@ impl PeerConnectionFactory {
     }
 
     pub fn get_audio_playout_devices(&self) -> Result<Vec<AudioDevice>> {
-        debug!("PeerConnectionFactory::get_audio_playout_devices");
-        let device_count = unsafe { pcf::Rust_getAudioPlayoutDevices(self.rffi) };
-        let mut devices = Vec::<AudioDevice>::new();
-
+        let device_count = unsafe { pcf::Rust_getAudioPlayoutDevices(self.rffi.as_borrowed_ptr()) };
         if device_count < 0 {
             error!("getAudioPlayoutDevices() returned {}", device_count);
             return Err(RingRtcError::QueryAudioDevices.into());
         }
         let device_count = device_count as u16;
-        if cfg!(target_os = "windows") {
+        let mut devices = Vec::<AudioDevice>::new();
+
+        #[cfg(target_os = "windows")]
+        let device_count = if self.use_new_audio_device_module {
+            // For the new ADM, if there is at least one real device, add slots
+            // for the "default" and "default communications" device. When setting,
+            // the new ADM already has them, but doesn't include them in the count.
+            if device_count > 0 {
+                device_count + 2
+            } else {
+                0
+            }
+        } else {
+            // For the default ADM, add a slot for the "default" device.
             devices.push(AudioDevice::default());
-        }
+            device_count
+        };
+
+        info!("PeerConnectionFactory::get_audio_playout_devices(): device_count: {}", device_count);
+
         for i in 0..device_count {
             match self.get_audio_playout_device(i) {
                 Ok(dev) => devices.push(dev),
@@ -356,10 +418,24 @@ impl PeerConnectionFactory {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        if self.use_new_audio_device_module {
+            // For the new ADM, swap the first two devices, so that the
+            // "default communications" device is first and the "default"
+            // device is second. The UI treats the first index as the
+            // default, which for VoIP we prefer communications devices.
+            devices.swap(0, 1);
+
+            // Also, give both of those artificial slots unique ids so that
+            // the UI can manage them correctly.
+            devices[0].unique_id.push_str("-0");
+            devices[1].unique_id.push_str("-1");
+        }
+
         Ok(devices)
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "windows")] // For the default ADM.
     fn get_default_playout_device_index(&self) -> Result<u16> {
         let default_device = self.get_audio_playout_device(DEFAULT_COMMUNICATION_DEVICE_INDEX)?;
         let all_devices = self.get_audio_playout_devices()?;
@@ -372,27 +448,33 @@ impl PeerConnectionFactory {
     }
 
     pub fn set_audio_playout_device(&self, index: u16) -> Result<()> {
-        info!(
-            "PeerConnectionFactory::set_audio_playout_device({:?})",
-            index
-        );
         #[cfg(target_os = "windows")]
-        let index = if index == 0 {
-            if let Ok(default_device) = self.get_default_playout_device_index() {
-                info!(
-                    "Picking default communication device (index {})",
-                    default_device
-                );
-                default_device
-            } else {
-                0
+        let index = if self.use_new_audio_device_module {
+            // For the new ADM, swap the first two devices back to ordinal if
+            // either are selected.
+            match index {
+                0 => 1,
+                1 => 0,
+                _ => index,
             }
         } else {
-            // Account for device 0 being the synthetic "Default"
-            index - 1
+            // For the default ADM, if the default device is selected, find the
+            // actual device index it represents.
+            if index == 0 {
+                if let Ok(default_device) = self.get_default_playout_device_index() {
+                    default_device
+                } else {
+                    0
+                }
+            } else {
+                // Account for device 0 being the synthetic "Default"
+                index - 1
+            }
         };
 
-        let ok = unsafe { pcf::Rust_setAudioPlayoutDevice(self.rffi, index) };
+        info!("PeerConnectionFactory::set_audio_playout_device({})", index);
+
+        let ok = unsafe { pcf::Rust_setAudioPlayoutDevice(self.rffi.as_borrowed_ptr(), index) };
         if ok {
             Ok(())
         } else {
@@ -406,7 +488,7 @@ impl PeerConnectionFactory {
             let name = CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_NAME_SIZE]).into_raw();
             let unique_id =
                 CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_UUID_SIZE]).into_raw();
-            let rc = pcf::Rust_getAudioRecordingDeviceName(self.rffi, index, name, unique_id);
+            let rc = pcf::Rust_getAudioRecordingDeviceName(self.rffi.as_borrowed_ptr(), index, name, unique_id);
             // Take back ownership of the raw pointers before checking for errors.
             let name = CString::from_raw(name);
             let unique_id = CString::from_raw(unique_id);
@@ -426,18 +508,32 @@ impl PeerConnectionFactory {
     }
 
     pub fn get_audio_recording_devices(&self) -> Result<Vec<AudioDevice>> {
-        debug!("PeerConnectionFactory::get_audio_recording_devices");
-        let device_count = unsafe { pcf::Rust_getAudioRecordingDevices(self.rffi) };
-        let mut devices = Vec::<AudioDevice>::new();
-
+        let device_count = unsafe { pcf::Rust_getAudioRecordingDevices(self.rffi.as_borrowed_ptr()) };
         if device_count < 0 {
             error!("getAudioRecordingDevices() returned {}", device_count);
             return Err(RingRtcError::QueryAudioDevices.into());
         }
         let device_count = device_count as u16;
-        if cfg!(target_os = "windows") {
+        let mut devices = Vec::<AudioDevice>::new();
+
+        #[cfg(target_os = "windows")]
+        let device_count = if self.use_new_audio_device_module {
+            // For the new ADM, if there is at least one real device, add slots
+            // for the "default" and "default communications" device. When setting,
+            // the new ADM already has them, but doesn't include them in the count.
+            if device_count > 0 {
+                device_count + 2
+            } else {
+                0
+            }
+        } else {
+            // For the default ADM, add a slot for the "default" device.
             devices.push(AudioDevice::default());
-        }
+            device_count
+        };
+
+        info!("PeerConnectionFactory::get_audio_recording_devices(): device_count: {}", device_count);
+
         for i in 0..device_count {
             match self.get_audio_recording_device(i) {
                 Ok(dev) => devices.push(dev),
@@ -457,10 +553,25 @@ impl PeerConnectionFactory {
                 devices[i].unique_id = format!("{}-{}", devices[i].name, same_name_count);
             }
         }
+
+        #[cfg(target_os = "windows")]
+        if self.use_new_audio_device_module {
+            // For the new ADM, swap the first two devices, so that the
+            // "default communications" device is first and the "default"
+            // device is second. The UI treats the first index as the
+            // default, which for VoIP we prefer communications devices.
+            devices.swap(0, 1);
+
+            // Also, give both of those artificial slots unique ids so that
+            // the UI can manage them correctly.
+            devices[0].unique_id.push_str("-0");
+            devices[1].unique_id.push_str("-1");
+        }
+
         Ok(devices)
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "windows")] // For the default ADM.
     fn get_default_recording_device_index(&self) -> Result<u16> {
         let default_device = self.get_audio_recording_device(DEFAULT_COMMUNICATION_DEVICE_INDEX)?;
         let all_devices = self.get_audio_recording_devices()?;
@@ -473,42 +584,38 @@ impl PeerConnectionFactory {
     }
 
     pub fn set_audio_recording_device(&self, index: u16) -> Result<()> {
-        info!(
-            "PeerConnectionFactory::set_audio_recording_device({:?})",
-            index
-        );
         #[cfg(target_os = "windows")]
-        let index = if index == 0 {
-            if let Ok(default_device) = self.get_default_recording_device_index() {
-                info!(
-                    "Picking default communication device (index {})",
-                    default_device
-                );
-                default_device
-            } else {
-                0
+        let index = if self.use_new_audio_device_module {
+            // For the new ADM, swap the first two devices back to ordinal if
+            // either are selected.
+            match index {
+                0 => 1,
+                1 => 0,
+                _ => index,
             }
         } else {
-            // Account for device 0 being the synthetic "Default"
-            index - 1
+            // For the default ADM, if the default device is selected, find the
+            // actual device index it represents.
+            if index == 0 {
+                if let Ok(default_device) = self.get_default_recording_device_index() {
+                    default_device
+                } else {
+                    0
+                }
+            } else {
+                // Account for device 0 being the synthetic "Default"
+                index - 1
+            }
         };
 
-        let ok = unsafe { pcf::Rust_setAudioRecordingDevice(self.rffi, index) };
+        info!("PeerConnectionFactory::set_audio_recording_device({})", index);
+
+        let ok = unsafe { pcf::Rust_setAudioRecordingDevice(self.rffi.as_borrowed_ptr(), index) };
         if ok {
             Ok(())
         } else {
             error!("setAudioRecordingDevice({}) failed", index);
             Err(RingRtcError::SetAudioDevice.into())
         }
-    }
-}
-
-impl Clone for PeerConnectionFactory {
-    fn clone(&self) -> Self {
-        info!("PeerConnectionFactory::clone() {}", self.rffi as u64);
-        if !self.rffi.is_null() {
-            ref_count::add_ref(self.rffi as CppObject);
-        }
-        Self { rffi: self.rffi }
     }
 }

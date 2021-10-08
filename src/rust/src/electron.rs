@@ -39,11 +39,13 @@ use crate::native::{
 };
 use crate::webrtc::media::{AudioTrack, VideoFrame, VideoSink, VideoSource, VideoTrack};
 use crate::webrtc::peer_connection_factory::{
+    self as pcf,
     AudioDevice,
     Certificate,
     IceServer,
     PeerConnectionFactory,
 };
+use crate::webrtc::peer_connection_observer::NetworkRoute;
 
 use neon::prelude::*;
 
@@ -130,6 +132,8 @@ pub enum Event {
         headers:    HashMap<String, String>,
         body:       Option<Vec<u8>>,
     },
+    // The network route changed for a 1:1 call
+    NetworkRouteChange(PeerId, NetworkRoute),
 }
 
 impl SignalingSender for Sender<Event> {
@@ -181,6 +185,18 @@ impl SignalingSender for Sender<Event> {
 impl CallStateHandler for Sender<Event> {
     fn handle_call_state(&self, remote_peer_id: &str, call_state: CallState) -> Result<()> {
         self.send(Event::CallState(remote_peer_id.to_string(), call_state))?;
+        Ok(())
+    }
+
+    fn handle_network_route(
+        &self,
+        remote_peer_id: &str,
+        network_route: NetworkRoute,
+    ) -> Result<()> {
+        self.send(Event::NetworkRouteChange(
+            remote_peer_id.to_string(),
+            network_route,
+        ))?;
         Ok(())
     }
 
@@ -295,11 +311,13 @@ pub struct CallEndpoint {
 }
 
 impl CallEndpoint {
-    fn new() -> Result<Self> {
+    fn new(use_new_audio_device_module: bool) -> Result<Self> {
         // Relevant for both group calls and 1:1 calls
         let (events_sender, events_receiver) = channel::<Event>();
-        let use_injectable_network = false;
-        let peer_connection_factory = PeerConnectionFactory::new(use_injectable_network)?;
+        let peer_connection_factory = PeerConnectionFactory::new(pcf::Config {
+            use_new_audio_device_module,
+            ..Default::default()
+        })?;
         let outgoing_audio_track = peer_connection_factory.create_outgoing_audio_track()?;
         outgoing_audio_track.set_enabled(false);
         let outgoing_video_source = peer_connection_factory.create_outgoing_video_source()?;
@@ -413,7 +431,10 @@ impl Finalize for CallEndpoint {}
 
 #[allow(non_snake_case)]
 fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
-    if ENABLE_LOGGING {
+    let first_time = cx.argument::<JsBoolean>(0)?.value(&mut cx);
+    let use_new_audio_device_module = cx.argument::<JsBoolean>(1)?.value(&mut cx);
+
+    if ENABLE_LOGGING && first_time {
         log::set_logger(&LOG).expect("set logger");
 
         #[cfg(debug_assertions)]
@@ -431,8 +452,8 @@ fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
     }
 
     debug!("JsCallManager()");
-    let endpoint =
-        CallEndpoint::new().or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    let endpoint = CallEndpoint::new(use_new_audio_device_module)
+        .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.boxed(RefCell::new(endpoint)).upcast())
 }
 
@@ -761,9 +782,7 @@ fn receivedIceCandidates(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.received_ice(
             call_id,
             signaling::ReceivedIce {
-                ice: signaling::Ice {
-                    candidates_added: candidates,
-                },
+                ice: signaling::Ice { candidates },
                 sender_device_id,
             },
         )?;
@@ -1560,9 +1579,8 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                         )
                     }
                     signaling::Message::Ice(ice) => {
-                        let js_candidates =
-                            JsArray::new(&mut cx, ice.candidates_added.len() as u32);
-                        for (i, candidate) in ice.candidates_added.iter().enumerate() {
+                        let js_candidates = JsArray::new(&mut cx, ice.candidates.len() as u32);
+                        for (i, candidate) in ice.candidates.iter().enumerate() {
                             let opaque: neon::handle::Handle<JsValue> = {
                                 let mut js_opaque = cx.buffer(candidate.opaque.len() as u32)?;
                                 cx.borrow_mut(&mut js_opaque, |handle| {
@@ -1671,7 +1689,7 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                     EndReason::Declined => "Declined",
                     EndReason::Busy => "Busy",
                     EndReason::Glare => "Glare",
-                    EndReason::ReceivedOfferExpired => "ReceivedOfferExpired",
+                    EndReason::ReceivedOfferExpired { .. } => "ReceivedOfferExpired",
                     EndReason::ReceivedOfferWhileActive => "ReceivedOfferWhileActive",
                     EndReason::ReceivedOfferWithGlare => "ReceivedOfferWithGlare",
                     EndReason::SignalingFailure => "SignalingFailure",
@@ -1683,7 +1701,15 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                     EndReason::BusyOnAnotherDevice => "BusyOnAnotherDevice",
                     EndReason::CallerIsNotMultiring => "CallerIsNotMultiring",
                 };
-                let args = vec![cx.string(peer_id), cx.string(reason_string)];
+                let age = match reason {
+                    EndReason::ReceivedOfferExpired { age } => age,
+                    _ => Duration::ZERO,
+                };
+                let args = vec![
+                    cx.string(peer_id).upcast::<JsValue>(),
+                    cx.string(reason_string).upcast(),
+                    cx.number(age.as_secs_f64()).upcast(),
+                ];
                 let method = *observer
                     .get(&mut cx, method_name)?
                     .downcast::<JsFunction, _>(&mut cx)
@@ -1710,6 +1736,19 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                     .get(&mut cx, method_name)?
                     .downcast::<JsFunction, _>(&mut cx)
                     .expect("onCallState is a function");
+                method.call(&mut cx, observer, args)?;
+            }
+
+            Event::NetworkRouteChange(peer_id, network_route) => {
+                let method_name = "onNetworkRouteChanged";
+                let args = [
+                    cx.string(peer_id).upcast::<JsValue>(),
+                    cx.number(network_route.local_adapter_type as i32).upcast(),
+                ];
+                let method = *observer
+                    .get(&mut cx, method_name)?
+                    .downcast::<JsFunction, _>(&mut cx)
+                    .expect("onNetworkRouteChanged is a function");
                 method.call(&mut cx, observer, args)?;
             }
 
@@ -1853,6 +1892,21 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                 method.call(&mut cx, observer, args)?;
             }
 
+            Event::GroupUpdate(GroupUpdate::NetworkRouteChanged(client_id, network_route)) => {
+                let method_name = "handleNetworkRouteChanged";
+
+                let args = [
+                    cx.number(client_id).upcast::<JsValue>(),
+                    cx.number(network_route.local_adapter_type as i32).upcast(),
+                ];
+                let error_message = format!("{} is a function", method_name);
+                let method = *observer
+                    .get(&mut cx, method_name)?
+                    .downcast::<JsFunction, _>(&mut cx)
+                    .expect(&error_message);
+                method.call(&mut cx, observer, args)?;
+            }
+
             Event::GroupUpdate(GroupUpdate::JoinStateChanged(client_id, join_state)) => {
                 let method_name = "handleJoinStateChanged";
 
@@ -1916,6 +1970,11 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                                 .to_string(),
                         )
                         .upcast();
+                    let forwarding_video: neon::handle::Handle<JsValue> =
+                        match remote_device_state.forwarding_video {
+                            None => cx.undefined().upcast(),
+                            Some(forwarding_video) => cx.boolean(forwarding_video).upcast(),
+                        };
 
                     let js_remote_device_state = cx.empty_object();
                     js_remote_device_state.set(&mut cx, "demuxId", demux_id)?;
@@ -1931,6 +1990,7 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                     js_remote_device_state.set(&mut cx, "sharingScreen", sharing_screen)?;
                     js_remote_device_state.set(&mut cx, "addedTime", added_time)?;
                     js_remote_device_state.set(&mut cx, "speakerTime", speaker_time)?;
+                    js_remote_device_state.set(&mut cx, "forwardingVideo", forwarding_video)?;
 
                     js_remote_device_states.set(&mut cx, i as u32, js_remote_device_state)?;
                 }
@@ -2119,7 +2179,8 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(cx.undefined().upcast())
 }
 
-register_module!(mut cx, {
+#[neon::main]
+fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("createCallEndpoint", createCallEndpoint)?;
     let js_property_key = cx.string(CALL_ENDPOINT_PROPERTY_KEY);
     cx.export_value("callEndpointPropertyKey", js_property_key)?;
@@ -2177,4 +2238,4 @@ register_module!(mut cx, {
     cx.export_function("cm_setAudioOutput", setAudioOutput)?;
     cx.export_function("cm_poll", poll)?;
     Ok(())
-});
+}
