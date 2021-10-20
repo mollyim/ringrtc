@@ -17,6 +17,7 @@ import org.webrtc.AudioTrack;
 import org.webrtc.ContextUtils;
 import org.webrtc.DefaultVideoDecoderFactory;
 import org.webrtc.DefaultVideoEncoderFactory;
+import org.webrtc.SoftwareVideoDecoderFactory;
 import org.webrtc.SoftwareVideoEncoderFactory;
 import org.webrtc.EglBase;
 import org.webrtc.Logging.Severity;
@@ -132,8 +133,12 @@ public class CallManager {
     }
   }
 
-  private PeerConnectionFactory createPeerConnectionFactory(@NonNull EglBase eglBase) {
-    Set<String> HARDWARE_ENCODING_BLACKLIST = new HashSet<String>() {{
+  /// Creates a PeerConnectionFactory appropriate for our use of WebRTC.
+  ///
+  /// If `eglBase` is present, hardware codecs will be used unless they are known to be broken
+  /// in some way. Otherwise, we'll fall back to software codecs.
+  private PeerConnectionFactory createPeerConnectionFactory(@Nullable EglBase eglBase) {
+    Set<String> HARDWARE_ENCODING_BLOCKLIST = new HashSet<String>() {{
       // Samsung S6 with Exynos 7420 SoC
       add("SM-G920F");
       add("SM-G920FD");
@@ -167,14 +172,18 @@ public class CallManager {
     }};
 
     VideoEncoderFactory encoderFactory;
-
-    if (HARDWARE_ENCODING_BLACKLIST.contains(Build.MODEL)) {
+    if (eglBase == null || HARDWARE_ENCODING_BLOCKLIST.contains(Build.MODEL)) {
       encoderFactory = new SoftwareVideoEncoderFactory();
     } else {
       encoderFactory = new DefaultVideoEncoderFactory(eglBase.getEglBaseContext(), true, true);
     }
 
-    VideoDecoderFactory decoderFactory = new DefaultVideoDecoderFactory(eglBase.getEglBaseContext());
+    VideoDecoderFactory decoderFactory;
+    if (eglBase == null) {
+      decoderFactory = new SoftwareVideoDecoderFactory();
+    } else {
+      decoderFactory = new DefaultVideoDecoderFactory(eglBase.getEglBaseContext());
+    }
 
     // This is a workaround to what appears to a bug in WebRTC.
     // If you don't call setAudioDeviceModule, then the default ADM created by WebRTC will not
@@ -189,15 +198,6 @@ public class CallManager {
             .createPeerConnectionFactory();
     adm.release();
     return factory;
-  }
-
-  // Returns an AndroidAudioDeviceModule with 1 reference owned by the caller.
-  public static long createAudioDeviceModuleOwnedPointer() {
-    AudioDeviceModule adm = createAudioDeviceModule();
-    // The Java ADM keeps the pointer to the native ADM, and thus owns one reference to the native ADM.
-    // But the only thing it does with that pointer is release a ref to it if we call adm.release().
-    // But we don't call adm.release(), so we effectively take ownership of that reference.
-    return adm.getNativeAudioDeviceModulePointer();
   }
 
   static JavaAudioDeviceModule createAudioDeviceModule() {
@@ -913,7 +913,7 @@ public class CallManager {
 
     if (this.groupFactory == null) {
       // The first GroupCall object will create a factory that will be re-used.
-      this.groupFactory = this.createPeerConnectionFactory(eglBase);
+      this.groupFactory = this.createPeerConnectionFactory(null);
       if (this.groupFactory == null) {
         Log.e(TAG, "createPeerConnectionFactory failed");
         return null;

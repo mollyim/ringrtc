@@ -5,7 +5,7 @@
 
 [package]
 name = "ringrtc"
-version = "2.13.2"
+version = "2.13.3"
 authors = ["Curt Brune <curt@signal.org>", "Jim Gustafson <jim@signal.org>", "Peter Thatcher <peter@signal.org>", "Vladimir Skuratovich <vlad@signal.org>", "Jordan Rose <jrose@signal.org>"]
 edition = "2018"
 description = "A Rust interface for WebRTC"
@@ -18,6 +18,11 @@ crate_type = ["cdylib", "staticlib", "lib"]
 name = "cli"
 path = "src/cli.rs"
 required-features = ["native", "simnet"]
+
+[[bin]]
+name = "gctc"
+path = "src/gctc.rs"
+required-features = ["native", "http"]
 
 [dependencies]
 aes-ctr           = { version = "0.6.0"  }
@@ -55,6 +60,11 @@ neon = { version = "0.7.1", optional = true, default-features = false, features 
 # Optional, needed to check Android-specific code when not targeting Android
 jni = { version = "0.17.0", optional = true, default-features = false }
 
+# Optional, needed by the "http" feature
+ureq = { version = "1.5.2", optional = true }
+rustls = { version = "0.19.1", optional = true, features = ["dangerous_configuration"] }
+webpki = { version = "0.21", optional = true }
+
 [dependencies.x25519-dalek]
 version = "1.1"
 
@@ -65,6 +75,7 @@ sim = ["simplelog", "rand_chacha", "tokio/test-util"]
 electron = ["neon", "native"]
 native = []  # We have this so we can more easily disable things only native clients need
 simnet = []  # We have this so we can more easily disable things only simulated native client need
+http = ["ureq", "rustls", "webpki"]
 check-all = ["electron", "jni"]
 
 [[bin]]

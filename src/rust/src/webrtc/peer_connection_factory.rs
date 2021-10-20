@@ -4,7 +4,10 @@
 //
 
 //! WebRTC Peer Connection
-use std::{fmt, mem::drop};
+
+use std::ffi::CString;
+use std::fmt;
+use std::os::raw::c_char;
 
 use crate::common::Result;
 use crate::core::util::CppObject;
@@ -18,8 +21,6 @@ use crate::webrtc::peer_connection_observer::{
     PeerConnectionObserver,
     PeerConnectionObserverTrait,
 };
-use std::ffi::CString;
-use std::os::raw::c_char;
 
 #[cfg(not(feature = "sim"))]
 use crate::webrtc::ffi::peer_connection_factory as pcf;
@@ -32,12 +33,14 @@ use crate::webrtc::sim::peer_connection_factory as pcf;
 #[cfg(feature = "sim")]
 use crate::webrtc::sim::ref_count;
 
-pub use pcf::RffiPeerConnectionFactory;
+pub use pcf::{RffiPeerConnectionFactoryInterface, RffiPeerConnectionFactoryOwner};
 
 #[cfg(target_os = "windows")] // For the default ADM.
 const DEFAULT_COMMUNICATION_DEVICE_INDEX: u16 = 0xFFFF;
 
+#[cfg(feature = "native")]
 const ADM_MAX_DEVICE_NAME_SIZE: usize = 128;
+#[cfg(feature = "native")]
 const ADM_MAX_DEVICE_UUID_SIZE: usize = 128;
 
 /// Rust wrapper around WebRTC C++ RTCCertificate object.
@@ -183,30 +186,19 @@ impl AudioDevice {
 /// Rust wrapper around WebRTC C++ AudioDeviceModule object.
 #[derive(Debug)]
 pub struct AudioDeviceModule {
-    /// Pointer to C++ AudioDeviceModule.
-    rffi: *const pcf::RffiAudioDeviceModule,
+    rffi: webrtc::Arc<pcf::RffiAudioDeviceModule>,
 }
 
 impl AudioDeviceModule {
-    pub fn owned(ptr: *const u8) -> Self {
-        let rffi = ptr as *const pcf::RffiAudioDeviceModule;
+    pub fn new(rffi: webrtc::Arc<pcf::RffiAudioDeviceModule>) -> Self {
         Self { rffi, }
-    }
-}
-
-impl Drop for AudioDeviceModule {
-    fn drop(&mut self) {
-        debug!("AudioDeviceModule::drop()");
-        if !self.rffi.is_null() {
-            ref_count::release_ref(self.rffi as CppObject);
-        }
     }
 }
 
 /// Rust wrapper around WebRTC C++ PeerConnectionFactory object.
 #[derive(Clone)]
 pub struct PeerConnectionFactory {
-    rffi: webrtc::Arc<RffiPeerConnectionFactory>,
+    rffi: webrtc::Arc<RffiPeerConnectionFactoryOwner>,
     use_new_audio_device_module: bool,
 }
 
@@ -225,8 +217,6 @@ impl fmt::Debug for PeerConnectionFactory {
 
 #[derive(Default)]
 pub struct Config {
-    pub adm: Option<AudioDeviceModule>,
-    // This only takes affect if adm == None
     pub use_new_audio_device_module: bool,
     pub use_injectable_network: bool,
 }
@@ -239,16 +229,11 @@ impl PeerConnectionFactory {
 
         let (rffi, use_new_audio_device_module) = {
             let use_new_audio_device_module = config.use_new_audio_device_module;
-            let adm_rffi = config.adm.as_ref().map_or_else(std::ptr::null, |adm| adm.rffi);
             let rffi = webrtc::Arc::from_owned_ptr(unsafe {
                  pcf::Rust_createPeerConnectionFactory(
-                     adm_rffi, 
                      config.use_new_audio_device_module,
                      config.use_injectable_network) 
             });
-            // This is actually to keep the adm around so that adm_rffi is still valid
-            // until after the call to Rust_createPeerConnectionFactory
-            drop(config);
 
             #[cfg(target_os = "windows")]
             if use_new_audio_device_module {
@@ -263,6 +248,20 @@ impl PeerConnectionFactory {
             return Err(RingRtcError::CreatePeerConnectionFactory.into());
         }
         Ok(Self { rffi, use_new_audio_device_module })
+    }
+
+    /// Wrap an existing C++ PeerConnectionFactory (not a PeerConnectionFactoryOwner).
+    ///
+    /// # Safety
+    ///
+    /// `native` must point to a C++ PeerConnectionFactory.
+    pub unsafe fn from_native_factory(
+        native: *const RffiPeerConnectionFactoryInterface
+    ) -> Self {
+        let rffi = webrtc::Arc::from_owned_ptr(
+            pcf::Rust_createPeerConnectionFactoryWrapper(native)
+        );
+        Self { rffi, use_new_audio_device_module: false }
     }
 
     #[cfg(feature = "simnet")]
@@ -347,6 +346,7 @@ impl PeerConnectionFactory {
         Ok(VideoTrack::owned(rffi))
     }
 
+    #[cfg(feature = "native")]
     fn get_audio_playout_device(&self, index: u16) -> Result<AudioDevice> {
         let (name, unique_id, rc) = unsafe {
             let name = CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_NAME_SIZE]).into_raw();
@@ -371,6 +371,7 @@ impl PeerConnectionFactory {
         })
     }
 
+    #[cfg(feature = "native")]
     pub fn get_audio_playout_devices(&self) -> Result<Vec<AudioDevice>> {
         let device_count = unsafe { pcf::Rust_getAudioPlayoutDevices(self.rffi.as_borrowed_ptr()) };
         if device_count < 0 {
@@ -419,7 +420,7 @@ impl PeerConnectionFactory {
         }
 
         #[cfg(target_os = "windows")]
-        if self.use_new_audio_device_module {
+        if self.use_new_audio_device_module && devices.len() > 1 {
             // For the new ADM, swap the first two devices, so that the
             // "default communications" device is first and the "default"
             // device is second. The UI treats the first index as the
@@ -435,7 +436,7 @@ impl PeerConnectionFactory {
         Ok(devices)
     }
 
-    #[cfg(target_os = "windows")] // For the default ADM.
+    #[cfg(all(feature = "native", target_os = "windows"))] // For the default ADM.
     fn get_default_playout_device_index(&self) -> Result<u16> {
         let default_device = self.get_audio_playout_device(DEFAULT_COMMUNICATION_DEVICE_INDEX)?;
         let all_devices = self.get_audio_playout_devices()?;
@@ -447,6 +448,7 @@ impl PeerConnectionFactory {
         }
     }
 
+    #[cfg(feature = "native")]
     pub fn set_audio_playout_device(&self, index: u16) -> Result<()> {
         #[cfg(target_os = "windows")]
         let index = if self.use_new_audio_device_module {
@@ -483,6 +485,7 @@ impl PeerConnectionFactory {
         }
     }
 
+    #[cfg(feature = "native")]
     fn get_audio_recording_device(&self, index: u16) -> Result<AudioDevice> {
         let (name, unique_id, rc) = unsafe {
             let name = CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_NAME_SIZE]).into_raw();
@@ -507,6 +510,7 @@ impl PeerConnectionFactory {
         })
     }
 
+    #[cfg(feature = "native")]
     pub fn get_audio_recording_devices(&self) -> Result<Vec<AudioDevice>> {
         let device_count = unsafe { pcf::Rust_getAudioRecordingDevices(self.rffi.as_borrowed_ptr()) };
         if device_count < 0 {
@@ -555,7 +559,7 @@ impl PeerConnectionFactory {
         }
 
         #[cfg(target_os = "windows")]
-        if self.use_new_audio_device_module {
+        if self.use_new_audio_device_module && devices.len() > 1 {
             // For the new ADM, swap the first two devices, so that the
             // "default communications" device is first and the "default"
             // device is second. The UI treats the first index as the
@@ -571,7 +575,7 @@ impl PeerConnectionFactory {
         Ok(devices)
     }
 
-    #[cfg(target_os = "windows")] // For the default ADM.
+    #[cfg(all(feature = "native", target_os = "windows"))] // For the default ADM.
     fn get_default_recording_device_index(&self) -> Result<u16> {
         let default_device = self.get_audio_recording_device(DEFAULT_COMMUNICATION_DEVICE_INDEX)?;
         let all_devices = self.get_audio_recording_devices()?;
@@ -583,6 +587,7 @@ impl PeerConnectionFactory {
         }
     }
 
+    #[cfg(feature = "native")]
     pub fn set_audio_recording_device(&self, index: u16) -> Result<()> {
         #[cfg(target_os = "windows")]
         let index = if self.use_new_audio_device_module {
