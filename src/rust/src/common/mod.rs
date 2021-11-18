@@ -10,8 +10,8 @@ pub mod units;
 
 use std::fmt;
 
-/// Common Result type, using `failure::Error` for Error.
-pub type Result<T> = std::result::Result<T, failure::Error>;
+/// Common Result type, using `anyhow::Error` for Error.
+pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 /// Unique call identification number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -354,7 +354,7 @@ impl fmt::Display for HttpMethod {
 /// A response to an HTTP request.
 pub struct HttpResponse {
     pub status_code: u16,
-    pub body:        Vec<u8>,
+    pub body: Vec<u8>,
 }
 
 // Benchmarking component list.

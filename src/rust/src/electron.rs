@@ -5,20 +5,15 @@
 
 use lazy_static::lazy_static;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::{
-    CallId,
-    CallMediaType,
-    DeviceId,
-    FeatureLevel,
-    HttpMethod,
-    HttpResponse,
-    Result,
+    CallId, CallMediaType, DeviceId, FeatureLevel, HttpMethod, HttpResponse, Result,
 };
 use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call_manager::CallManager;
@@ -26,24 +21,12 @@ use crate::core::group_call;
 use crate::core::group_call::{GroupId, SignalingMessageUrgency, UserId};
 use crate::core::signaling;
 use crate::native::{
-    CallState,
-    CallStateHandler,
-    EndReason,
-    GroupUpdate,
-    GroupUpdateHandler,
-    HttpClient,
-    NativeCallContext,
-    NativePlatform,
-    PeerId,
-    SignalingSender,
+    CallState, CallStateHandler, EndReason, GroupUpdate, GroupUpdateHandler, HttpClient,
+    NativeCallContext, NativePlatform, PeerId, SignalingSender,
 };
 use crate::webrtc::media::{AudioTrack, VideoFrame, VideoSink, VideoSource, VideoTrack};
 use crate::webrtc::peer_connection_factory::{
-    self as pcf,
-    AudioDevice,
-    Certificate,
-    IceServer,
-    PeerConnectionFactory,
+    self as pcf, AudioDevice, Certificate, IceServer, PeerConnectionFactory,
 };
 use crate::webrtc::peer_connection_observer::NetworkRoute;
 
@@ -53,18 +36,20 @@ const ENABLE_LOGGING: bool = true;
 
 /// A structure for packing the contents of log messages.
 pub struct LogMessage {
-    level:   i8,
-    file:    String,
-    line:    u32,
+    level: i8,
+    file: String,
+    line: u32,
     message: String,
 }
 
-// We store the log messages in a queue to be given to JavaScript when it polls so
+// We store the log messages in a queue to be given to JavaScript when it processes events so
 // it can show the messages in the console.
-// I'd like to use a channel, but they seem difficult to create statically.
+// We could report these as Events, but then logging during event processing would cause
+// the event handler to be rescheduled over and over.
 static LOG: Log = Log;
 lazy_static! {
-    static ref LOG_MESSAGES: Mutex<VecDeque<LogMessage>> = Mutex::new(VecDeque::new());
+    static ref LOG_MESSAGES: Mutex<Vec<LogMessage>> = Mutex::new(Vec::new());
+    static ref CURRENT_EVENT_REPORTER: Mutex<Option<EventReporter>> = Mutex::new(None);
 }
 
 struct Log;
@@ -77,22 +62,39 @@ impl log::Log for Log {
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
             let message = LogMessage {
-                level:   record.level() as i8,
-                file:    record.file().unwrap().to_string(),
-                line:    record.line().unwrap(),
-                message: format!("{}", record.args()),
+                level: record.level() as i8,
+                file: record.file().unwrap().to_string(),
+                line: record.line().unwrap(),
+                message: record.args().to_string(),
             };
 
-            let mut messages = LOG_MESSAGES.lock().expect("lock log messages");
-            messages.push_back(message);
+            match CURRENT_EVENT_REPORTER.lock() {
+                Ok(reporter) => {
+                    if let Some(ref reporter) = *reporter {
+                        {
+                            let mut messages = LOG_MESSAGES.lock().expect("lock log messages");
+                            messages.push(message);
+                        }
+                        reporter.report()
+                    }
+                }
+                Err(e) => {
+                    // The reporter panicked previously. At this point it might not be safe to log.
+                    eprintln!("error: could not log to JavaScript: {}", e);
+                    eprintln!(
+                        "note: message contents: {}:{}: {}",
+                        message.file, message.line, message.message
+                    );
+                }
+            }
         }
     }
 
     fn flush(&self) {}
 }
 
-// When JavaScripts polls, we want everything to go through a common queue that
-// combines all the things we want to "push" (through polling) to it.
+// When JavaScript processes events, we want everything to go through a common queue that
+// combines all the things we want to "push" to it.
 // (Well, everything except log messages.  See above as to why).
 pub enum Event {
     // The JavaScript should send the following signaling message to the given
@@ -103,15 +105,15 @@ pub enum Event {
     // given recipient UUID.
     SendCallMessage {
         recipient_uuid: UserId,
-        message:        Vec<u8>,
-        urgency:        group_call::SignalingMessageUrgency,
+        message: Vec<u8>,
+        urgency: group_call::SignalingMessageUrgency,
     },
     // The JavaScript should send the following opaque call message to all
     // other members of the given group
     SendCallMessageToGroup {
         group_id: GroupId,
-        message:  Vec<u8>,
-        urgency:  group_call::SignalingMessageUrgency,
+        message: Vec<u8>,
+        urgency: group_call::SignalingMessageUrgency,
     },
     // The call with the given remote PeerId has changed state.
     // We assume only one call per remote PeerId at a time.
@@ -127,16 +129,42 @@ pub enum Event {
     // JavaScript should initiate an HTTP request.
     SendHttpRequest {
         request_id: u32,
-        url:        String,
-        method:     HttpMethod,
-        headers:    HashMap<String, String>,
-        body:       Option<Vec<u8>>,
+        url: String,
+        method: HttpMethod,
+        headers: HashMap<String, String>,
+        body: Option<Vec<u8>>,
     },
     // The network route changed for a 1:1 call
     NetworkRouteChange(PeerId, NetworkRoute),
 }
 
-impl SignalingSender for Sender<Event> {
+/// Wraps a [`std::sync::mpsc::Sender`] with a callback to report new events.
+#[derive(Clone)]
+struct EventReporter {
+    sender: Sender<Event>,
+    report: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl EventReporter {
+    fn new(sender: Sender<Event>, report: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            sender,
+            report: Arc::new(report),
+        }
+    }
+
+    fn send(&self, event: Event) -> Result<()> {
+        self.sender.send(event)?;
+        self.report();
+        Ok(())
+    }
+
+    fn report(&self) {
+        (self.report)();
+    }
+}
+
+impl SignalingSender for EventReporter {
     fn send_signaling(
         &self,
         recipient_id: &str,
@@ -182,7 +210,7 @@ impl SignalingSender for Sender<Event> {
     }
 }
 
-impl CallStateHandler for Sender<Event> {
+impl CallStateHandler for EventReporter {
     fn handle_call_state(&self, remote_peer_id: &str, call_state: CallState) -> Result<()> {
         self.send(Event::CallState(remote_peer_id.to_string(), call_state))?;
         Ok(())
@@ -214,7 +242,7 @@ impl CallStateHandler for Sender<Event> {
     }
 }
 
-impl HttpClient for Sender<Event> {
+impl HttpClient for EventReporter {
     fn send_http_request(
         &self,
         request_id: u32,
@@ -234,7 +262,7 @@ impl HttpClient for Sender<Event> {
     }
 }
 
-impl GroupUpdateHandler for Sender<Event> {
+impl GroupUpdateHandler for EventReporter {
     fn handle_group_update(&self, update: GroupUpdate) -> Result<()> {
         self.send(Event::GroupUpdate(update))?;
         Ok(())
@@ -248,7 +276,7 @@ pub struct OneFrameBuffer {
 
 struct OneFrameBufferState {
     enabled: bool,
-    frame:   Option<VideoFrame>,
+    frame: Option<VideoFrame>,
 }
 
 impl VideoSink for OneFrameBuffer {
@@ -292,26 +320,37 @@ impl OneFrameBuffer {
 pub struct CallEndpoint {
     call_manager: CallManager<NativePlatform>,
 
-    events_receiver:                          Receiver<Event>,
+    events_receiver: Receiver<Event>,
     // This is what we use to control mute/not.
     // It should probably be per-call, but for now it's easier to have only one.
-    outgoing_audio_track:                     AudioTrack,
+    outgoing_audio_track: AudioTrack,
     // This is what we use to push video frames out.
-    outgoing_video_source:                    VideoSource,
+    outgoing_video_source: VideoSource,
     // We only keep this around so we can pass it to PeerConnectionFactory::create_peer_connection
     // via the NativeCallContext.
-    outgoing_video_track:                     VideoTrack,
+    outgoing_video_track: VideoTrack,
     // Pulled out by receiveVideoFrame for direct/1:1 calls
-    incoming_video_buffer:                    OneFrameBuffer,
+    incoming_video_buffer: OneFrameBuffer,
     // Pulled out by receiveGroupCalLVideoFrame for group calls
     incoming_video_buffer_by_remote_demux_id:
         HashMap<(group_call::ClientId, group_call::DemuxId), Box<OneFrameBuffer>>,
 
     peer_connection_factory: PeerConnectionFactory,
+
+    // NOTE: This creates a reference cycle, since the JS-side NativeCallManager has a reference
+    // to the CallEndpoint box. Since we use the NativeCallManager as a singleton, though, this
+    // isn't a problem in practice (except maybe for tests).
+    // If Neon ever adds a Weak type, we should use that instead.
+    // See https://github.com/neon-bindings/neon/issues/674.
+    js_object: Arc<Root<JsObject>>,
 }
 
 impl CallEndpoint {
-    fn new(use_new_audio_device_module: bool) -> Result<Self> {
+    fn new<'a>(
+        cx: &mut impl Context<'a>,
+        js_object: Handle<'a, JsObject>,
+        use_new_audio_device_module: bool,
+    ) -> Result<Self> {
         // Relevant for both group calls and 1:1 calls
         let (events_sender, events_receiver) = channel::<Event>();
         let peer_connection_factory = PeerConnectionFactory::new(pcf::Config {
@@ -325,16 +364,60 @@ impl CallEndpoint {
             peer_connection_factory.create_outgoing_video_track(&outgoing_video_source)?;
         outgoing_video_track.set_enabled(false);
 
+        let event_reported = Arc::new(AtomicBool::new(false));
+        let js_object = Arc::new(Root::new(cx, &*js_object));
+        let js_object_weak = Arc::downgrade(&js_object);
+        let mut js_channel = cx.channel();
+        js_channel.unref(cx); // Don't keep Node alive just for this channel.
+        let event_reporter = EventReporter::new(events_sender, move || {
+            // First check to see if an event has been reported recently.
+            // We aren't using this for synchronizing any other memory state,
+            // so Relaxed is good enough.
+            if event_reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+
+            // Then signal the event through the JavaScript channel.
+            // Ignore any failures; maybe we're resetting the CallEndpoint,
+            // or in the process of quitting the app.
+            if let Some(js_object) = js_object_weak.upgrade() {
+                let event_reported_for_callback = event_reported.clone();
+                let _ = js_channel.try_send(move |mut cx| {
+                    // We aren't using this for synchronizing any other memory state,
+                    // so Relaxed is good enough.
+                    // But we have to do it before the items are actually processed,
+                    // because otherwise a new event could come in *during* the processing.
+                    event_reported_for_callback.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                    let observer = js_object.as_ref().to_inner(&mut cx);
+                    let method_name = "processEvents";
+                    let method = *observer
+                        .get(&mut cx, method_name)?
+                        .downcast::<JsFunction, _>(&mut cx)
+                        .expect("processEvents is a function");
+                    method.call(&mut cx, observer, Vec::<Handle<JsValue>>::new())?;
+                    Ok(())
+                });
+            }
+        });
+
+        {
+            let event_reporter_for_logging = &mut *CURRENT_EVENT_REPORTER
+                .lock()
+                .expect("lock event reporter for logging");
+            *event_reporter_for_logging = Some(event_reporter.clone());
+        }
+
         // Only relevant for 1:1 calls
-        let signaling_sender = Box::new(events_sender.clone());
+        let signaling_sender = Box::new(event_reporter.clone());
         let should_assume_messages_sent = false; // Use async notification from app to send next message.
-        let state_handler = Box::new(events_sender.clone());
+        let state_handler = Box::new(event_reporter.clone());
         let incoming_video_buffer = OneFrameBuffer::new(false /* enabled */);
         let incoming_video_sink = Box::new(incoming_video_buffer.clone());
 
         // Only relevant for group calls
-        let http_client = Box::new(events_sender.clone());
-        let group_handler = Box::new(events_sender);
+        let http_client = Box::new(event_reporter.clone());
+        let group_handler = Box::new(event_reporter);
         let incoming_video_buffer_by_remote_demux_id = HashMap::new();
 
         let platform = NativePlatform::new(
@@ -357,6 +440,7 @@ impl CallEndpoint {
             incoming_video_buffer,
             incoming_video_buffer_by_remote_demux_id,
             peer_connection_factory,
+            js_object,
         })
     }
 }
@@ -425,35 +509,38 @@ fn with_call_endpoint<T>(cx: &mut FunctionContext, body: impl FnOnce(&mut CallEn
     body(&mut *endpoint)
 }
 
-// CallEndpoint doesn't need any custom finalization on the JavaScript side;
-// the default implementation (just Drop it) is sufficient.
-impl Finalize for CallEndpoint {}
+impl Finalize for CallEndpoint {
+    fn finalize<'a, C: Context<'a>>(self, cx: &mut C) {
+        self.js_object.finalize(cx)
+    }
+}
 
 #[allow(non_snake_case)]
 fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let first_time = cx.argument::<JsBoolean>(0)?.value(&mut cx);
+    let js_call_manager = cx.argument::<JsObject>(0)?;
     let use_new_audio_device_module = cx.argument::<JsBoolean>(1)?.value(&mut cx);
 
-    if ENABLE_LOGGING && first_time {
-        log::set_logger(&LOG).expect("set logger");
+    if ENABLE_LOGGING {
+        let is_first_time_initializing_logger = log::set_logger(&LOG).is_ok();
+        if is_first_time_initializing_logger {
+            #[cfg(debug_assertions)]
+            log::set_max_level(log::LevelFilter::Debug);
 
-        #[cfg(debug_assertions)]
-        log::set_max_level(log::LevelFilter::Debug);
+            #[cfg(not(debug_assertions))]
+            log::set_max_level(log::LevelFilter::Info);
 
-        #[cfg(not(debug_assertions))]
-        log::set_max_level(log::LevelFilter::Info);
+            // Show WebRTC logs via application Logger while debugging.
+            #[cfg(debug_assertions)]
+            crate::webrtc::logging::set_logger(log::LevelFilter::Debug);
 
-        // Show WebRTC logs via application Logger while debugging.
-        #[cfg(debug_assertions)]
-        crate::webrtc::logging::set_logger(log::LevelFilter::Debug);
-
-        #[cfg(not(debug_assertions))]
-        crate::webrtc::logging::set_logger(log::LevelFilter::Off);
+            #[cfg(not(debug_assertions))]
+            crate::webrtc::logging::set_logger(log::LevelFilter::Off);
+        }
     }
 
     debug!("JsCallManager()");
-    let endpoint = CallEndpoint::new(use_new_audio_device_module)
-        .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    let endpoint = CallEndpoint::new(&mut cx, js_call_manager, use_new_audio_device_module)
+        .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.boxed(RefCell::new(endpoint)).upcast())
 }
 
@@ -468,7 +555,7 @@ fn setSelfUuid(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.set_self_uuid(uuid)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -499,7 +586,7 @@ fn createOutgoingCall(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(create_id_arg(&mut cx, call_id.as_u64()))
 }
 
@@ -535,7 +622,7 @@ fn cancelGroupRing(mut cx: FunctionContext) -> JsResult<JsValue> {
             .cancel_group_ring(group_id, ring_id.into(), reason)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -581,7 +668,7 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -594,7 +681,7 @@ fn accept(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.accept_call(call_id)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -607,7 +694,7 @@ fn ignore(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.drop_call(call_id)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -619,7 +706,7 @@ fn hangup(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.hangup()?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -632,7 +719,7 @@ fn signalingMessageSent(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.message_sent(call_id)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -645,7 +732,7 @@ fn signalingMessageSendFailed(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.message_send_failure(call_id)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -659,7 +746,7 @@ fn updateBandwidthMode(mut cx: FunctionContext) -> JsResult<JsValue> {
         active_connection.update_bandwidth_mode(BandwidthMode::from_i32(bandwidth_mode))?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -711,7 +798,7 @@ fn receivedOffer(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -750,7 +837,7 @@ fn receivedAnswer(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -788,7 +875,7 @@ fn receivedIceCandidates(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -831,7 +918,7 @@ fn receivedHangup(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -851,7 +938,7 @@ fn receivedBusy(mut cx: FunctionContext) -> JsResult<JsValue> {
             .received_busy(call_id, signaling::ReceivedBusy { sender_device_id })?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -875,7 +962,7 @@ fn receivedCallMessage(mut cx: FunctionContext) -> JsResult<JsValue> {
         )?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -893,7 +980,7 @@ fn receivedHttpResponse(mut cx: FunctionContext) -> JsResult<JsValue> {
             .received_http_response(request_id, Some(response))?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -912,7 +999,7 @@ fn httpRequestFailed(mut cx: FunctionContext) -> JsResult<JsValue> {
             .received_http_response(request_id, None)?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -925,7 +1012,7 @@ fn setOutgoingAudioEnabled(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.outgoing_audio_track.set_enabled(enabled);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -943,7 +1030,7 @@ fn setOutgoingVideoEnabled(mut cx: FunctionContext) -> JsResult<JsValue> {
         })?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -966,7 +1053,7 @@ fn setOutgoingVideoIsScreenShare(mut cx: FunctionContext) -> JsResult<JsValue> {
         })?;
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -983,7 +1070,7 @@ fn sendVideoFrame(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.outgoing_video_source.push_frame(frame);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1072,7 +1159,7 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
 
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.number(client_id).upcast())
 }
 
@@ -1084,7 +1171,7 @@ fn deleteGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.delete_group_call_client(client_id);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1096,7 +1183,7 @@ fn connect(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.connect(client_id);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1109,7 +1196,7 @@ fn join(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.join(client_id);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1125,7 +1212,7 @@ fn leave(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.leave(client_id);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1141,7 +1228,7 @@ fn disconnect(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.disconnect(client_id);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1157,7 +1244,7 @@ fn setOutgoingAudioMuted(mut cx: FunctionContext) -> JsResult<JsValue> {
             .set_outgoing_audio_muted(client_id, muted);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1173,7 +1260,7 @@ fn setOutgoingVideoMuted(mut cx: FunctionContext) -> JsResult<JsValue> {
             .set_outgoing_video_muted(client_id, muted);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1186,7 +1273,7 @@ fn setPresenting(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.set_presenting(client_id, presenting);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1204,7 +1291,7 @@ fn setOutgoingGroupCallVideoIsScreenShare(mut cx: FunctionContext) -> JsResult<J
             .set_sharing_screen(client_id, is_screenshare);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1225,7 +1312,7 @@ fn groupRing(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.group_ring(client_id, recipient);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1237,7 +1324,7 @@ fn resendMediaKeys(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.resend_media_keys(client_id);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1252,7 +1339,7 @@ fn setBandwidthMode(mut cx: FunctionContext) -> JsResult<JsValue> {
             .set_bandwidth_mode(client_id, BandwidthMode::from_i32(bandwidth_mode));
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1313,7 +1400,7 @@ fn requestVideo(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.request_video(client_id, resolutions);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1360,7 +1447,7 @@ fn setGroupMembers(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.set_group_members(client_id, members);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1380,7 +1467,7 @@ fn setMembershipProof(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.set_membership_proof(client_id, proof);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1434,7 +1521,7 @@ fn peekGroupCall(mut cx: FunctionContext) -> JsResult<JsValue> {
             .peek_group_call(request_id, sfu_url, membership_proof, members);
         Ok(())
     })
-    .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
 }
 
@@ -1521,8 +1608,11 @@ fn setAudioOutput(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
-fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let observer = cx.argument::<JsObject>(0)?;
+fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let this = cx.this();
+    let observer = this
+        .get(&mut cx, "observer")?
+        .downcast_or_throw::<JsObject, _>(&mut cx)?;
 
     let log_entries = std::mem::take(&mut *LOG_MESSAGES.lock().expect("lock log messages"));
     for log_entry in log_entries {
@@ -2025,7 +2115,7 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                         .insert((client_id, remote_demux_id), incoming_video_sink);
                     Ok(())
                 })
-                .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+                .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
             }
 
             Event::GroupUpdate(GroupUpdate::PeekChanged {
@@ -2144,7 +2234,7 @@ fn poll(mut cx: FunctionContext) -> JsResult<JsValue> {
                     );
                     Ok(())
                 })
-                .or_else(|err: failure::Error| cx.throw_error(format!("{}", err)))?;
+                .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
                 let error_message = format!("{} is a function", method_name);
                 let method = *observer
                     .get(&mut cx, method_name)?
@@ -2236,6 +2326,6 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_setAudioInput", setAudioInput)?;
     cx.export_function("cm_getAudioOutputs", getAudioOutputs)?;
     cx.export_function("cm_setAudioOutput", setAudioOutput)?;
-    cx.export_function("cm_poll", poll)?;
+    cx.export_function("cm_processEvents", processEvents)?;
     Ok(())
 }

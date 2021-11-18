@@ -128,7 +128,7 @@ pub enum ConnectionEvent {
     /// Send the observer an internal error message.
     /// Source: all kinds of things that can go wrong internally
     /// Action: Terminate the call.
-    InternalError(failure::Error),
+    InternalError(anyhow::Error),
     /// Receive incoming media from PeerConnection
     /// Source: PeerConnection (OnAddStream)
     /// Action: remember the MediaStream so we can "connect" to it after the call is accepted
@@ -163,7 +163,11 @@ impl fmt::Display for ConnectionEvent {
                     id, status, sequence_number
                 )
             }
-            ConnectionEvent::ReceivedReceiverStatusViaDataChannel(id, max_bitrate, sequence_number) => {
+            ConnectionEvent::ReceivedReceiverStatusViaDataChannel(
+                id,
+                max_bitrate,
+                sequence_number,
+            ) => {
                 format!(
                     "ReceivedReceiverStatusViaDataChannel, call_id: {}, max_bitrate: {:?}, seqnum: {:?}",
                     id, max_bitrate, sequence_number
@@ -173,19 +177,20 @@ impl fmt::Display for ConnectionEvent {
             ConnectionEvent::SendHangupViaDataChannel(hangup) => {
                 format!("SendHangupViaDataChannel, hangup: {}", hangup)
             }
-            ConnectionEvent::UpdateSenderStatus(status) => format!(
-                "UpdateSenderStatus, status: {:?}",
-                status
-            ),
-            ConnectionEvent::UpdateBandwidthMode(mode) => format!(
-                "UpdateBandwidthMode, mode: {:?}",
-                mode
-            ),
+            ConnectionEvent::UpdateSenderStatus(status) => {
+                format!("UpdateSenderStatus, status: {:?}", status)
+            }
+            ConnectionEvent::UpdateBandwidthMode(mode) => {
+                format!("UpdateBandwidthMode, mode: {:?}", mode)
+            }
             ConnectionEvent::LocalIceCandidates(_) => "LocalIceCandidates".to_string(),
             ConnectionEvent::IceConnected => "IceConnected".to_string(),
             ConnectionEvent::IceFailed => "IceConnectionFailed".to_string(),
             ConnectionEvent::IceDisconnected => "IceDisconnected".to_string(),
-            ConnectionEvent::IceNetworkRouteChanged(network_route) => format!("IceNetworkRouteChanged, network_route: {:?})", network_route),
+            ConnectionEvent::IceNetworkRouteChanged(network_route) => format!(
+                "IceNetworkRouteChanged, network_route: {:?})",
+                network_route
+            ),
             ConnectionEvent::InternalError(e) => format!("InternalError: {}", e),
             ConnectionEvent::ReceivedIncomingMedia(stream) => {
                 format!("ReceivedIncomingMedia, stream: {:}", stream)
@@ -433,7 +438,9 @@ where
             ConnectionEvent::IceConnected => self.handle_ice_connected(connection, state),
             ConnectionEvent::IceFailed => self.handle_ice_failed(connection, state),
             ConnectionEvent::IceDisconnected => self.handle_ice_disconnected(connection, state),
-            ConnectionEvent::IceNetworkRouteChanged(network_route) => self.handle_ice_network_route_changed(connection, network_route),
+            ConnectionEvent::IceNetworkRouteChanged(network_route) => {
+                self.handle_ice_network_route_changed(connection, network_route)
+            }
             ConnectionEvent::InternalError(error) => self.handle_internal_error(connection, error),
             ConnectionEvent::ReceivedIncomingMedia(stream) => {
                 self.handle_received_incoming_media(connection, state, stream)
@@ -504,7 +511,11 @@ where
         match state {
             ConnectionState::ConnectingBeforeAccepted
             | ConnectionState::ConnectedBeforeAccepted => {
-                ringbench!(RingBench::WebRtc, RingBench::Conn, format!("dc(accepted)\t{}", connection.connection_id()));
+                ringbench!(
+                    RingBench::WebRtc,
+                    RingBench::Conn,
+                    format!("dc(accepted)\t{}", connection.connection_id())
+                );
                 connection.set_state(ConnectionState::ConnectedAndAccepted)?;
                 self.notify_observer(
                     connection,
@@ -894,14 +905,17 @@ where
         connection: Connection<T>,
         network_route: NetworkRoute,
     ) -> Result<()> {
-        self.notify_observer(connection, ConnectionObserverEvent::IceNetworkRouteChanged(network_route));
+        self.notify_observer(
+            connection,
+            ConnectionObserverEvent::IceNetworkRouteChanged(network_route),
+        );
         Ok(())
     }
 
     fn handle_internal_error(
         &mut self,
         connection: Connection<T>,
-        error: failure::Error,
+        error: anyhow::Error,
     ) -> Result<()> {
         let notify_error_future = lazy(move |_| {
             if connection.terminating()? {

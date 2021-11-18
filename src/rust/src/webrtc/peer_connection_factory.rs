@@ -5,6 +5,8 @@
 
 //! WebRTC Peer Connection
 
+#[cfg(feature = "native")]
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::fmt;
 use std::os::raw::c_char;
@@ -18,8 +20,7 @@ use crate::webrtc::injectable_network::InjectableNetwork;
 use crate::webrtc::media::{AudioTrack, VideoSource, VideoTrack};
 use crate::webrtc::peer_connection::PeerConnection;
 use crate::webrtc::peer_connection_observer::{
-    PeerConnectionObserver,
-    PeerConnectionObserverTrait,
+    PeerConnectionObserver, PeerConnectionObserverTrait,
 };
 
 #[cfg(not(feature = "sim"))]
@@ -108,9 +109,9 @@ unsafe impl Sync for Certificate {}
 
 #[repr(C)]
 pub struct RffiIceServer {
-    pub username:  *const c_char,
-    pub password:  *const c_char,
-    pub urls:      *const *const c_char,
+    pub username: *const c_char,
+    pub password: *const c_char,
+    pub urls: *const *const c_char,
     pub urls_size: usize,
 }
 
@@ -119,7 +120,7 @@ pub struct IceServer {
     username: CString,
     password: CString,
     // To own the strings
-    urls:     Vec<CString>,
+    _urls: Vec<CString>,
     // To hand the strings to C
     url_ptrs: Vec<*const c_char>,
 }
@@ -137,7 +138,7 @@ impl IceServer {
         Self {
             username: CString::new(username).expect("CString of username"),
             password: CString::new(password).expect("CString of password"),
-            urls,
+            _urls: urls,
             url_ptrs,
         }
     }
@@ -153,9 +154,9 @@ impl IceServer {
 
     pub fn rffi(&self) -> RffiIceServer {
         RffiIceServer {
-            username:  self.username.as_ptr(),
-            password:  self.password.as_ptr(),
-            urls:      self.url_ptrs.as_ptr(),
+            username: self.username.as_ptr(),
+            password: self.password.as_ptr(),
+            urls: self.url_ptrs.as_ptr(),
             urls_size: self.url_ptrs.len(),
         }
     }
@@ -165,55 +166,31 @@ impl IceServer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioDevice {
     /// Name of the device
-    pub name:      String,
+    pub name: String,
     /// Unique ID - truly unique on Windows, best effort on other platforms.
     pub unique_id: String,
     /// If the name requires translation, the translated string identifier.
-    pub i18n_key:  String,
+    pub i18n_key: String,
 }
 
 #[cfg(target_os = "windows")] // For the default ADM.
 impl AudioDevice {
     fn default() -> AudioDevice {
         AudioDevice {
-            name:      "Default".to_string(),
+            name: "Default".to_string(),
             unique_id: "Default".to_string(),
-            i18n_key:  "default_communication_device".to_string(),
+            i18n_key: "default_communication_device".to_string(),
         }
     }
 }
 
-/// Rust wrapper around WebRTC C++ AudioDeviceModule object.
-#[derive(Debug)]
-pub struct AudioDeviceModule {
-    rffi: webrtc::Arc<pcf::RffiAudioDeviceModule>,
-}
-
-impl AudioDeviceModule {
-    pub fn new(rffi: webrtc::Arc<pcf::RffiAudioDeviceModule>) -> Self {
-        Self { rffi, }
-    }
-}
-
 /// Rust wrapper around WebRTC C++ PeerConnectionFactory object.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // use_new_audio_device_module is currently used only for Windows builds.
 pub struct PeerConnectionFactory {
     rffi: webrtc::Arc<RffiPeerConnectionFactoryOwner>,
     use_new_audio_device_module: bool,
 }
-
-impl fmt::Display for PeerConnectionFactory {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PeerConnectionFactory: {:p}", self.rffi.as_borrowed_ptr())
-    }
-}
-
-impl fmt::Debug for PeerConnectionFactory {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
 
 #[derive(Default)]
 pub struct Config {
@@ -229,11 +206,12 @@ impl PeerConnectionFactory {
 
         let (rffi, use_new_audio_device_module) = {
             let use_new_audio_device_module = config.use_new_audio_device_module;
-            let rffi = webrtc::Arc::from_owned_ptr(unsafe {
-                 pcf::Rust_createPeerConnectionFactory(
-                     config.use_new_audio_device_module,
-                     config.use_injectable_network) 
-            });
+            let rffi = unsafe {
+                webrtc::Arc::from_owned(pcf::Rust_createPeerConnectionFactory(
+                    config.use_new_audio_device_module,
+                    config.use_injectable_network,
+                ))
+            };
 
             #[cfg(target_os = "windows")]
             if use_new_audio_device_module {
@@ -247,7 +225,10 @@ impl PeerConnectionFactory {
         if rffi.is_null() {
             return Err(RingRtcError::CreatePeerConnectionFactory.into());
         }
-        Ok(Self { rffi, use_new_audio_device_module })
+        Ok(Self {
+            rffi,
+            use_new_audio_device_module,
+        })
     }
 
     /// Wrap an existing C++ PeerConnectionFactory (not a PeerConnectionFactoryOwner).
@@ -256,12 +237,15 @@ impl PeerConnectionFactory {
     ///
     /// `native` must point to a C++ PeerConnectionFactory.
     pub unsafe fn from_native_factory(
-        native: *const RffiPeerConnectionFactoryInterface
+        native: webrtc::Arc<RffiPeerConnectionFactoryInterface>,
     ) -> Self {
-        let rffi = webrtc::Arc::from_owned_ptr(
-            pcf::Rust_createPeerConnectionFactoryWrapper(native)
-        );
-        Self { rffi, use_new_audio_device_module: false }
+        let rffi = webrtc::Arc::from_owned(pcf::Rust_createPeerConnectionFactoryWrapper(
+            native.as_borrowed(),
+        ));
+        Self {
+            rffi,
+            use_new_audio_device_module: false,
+        }
     }
 
     #[cfg(feature = "simnet")]
@@ -286,10 +270,10 @@ impl PeerConnectionFactory {
         enable_rtp_data_channel: bool,
     ) -> Result<PeerConnection> {
         debug!(
-            "PeerConnectionFactory::create_peer_connection() {:p}",
-            self.rffi.as_borrowed_ptr()
+            "PeerConnectionFactory::create_peer_connection() {:?}",
+            self.rffi
         );
-        let rffi = webrtc::Arc::from_owned_ptr(unsafe {
+        let rffi = webrtc::Arc::from_owned(unsafe {
             pcf::Rust_createPeerConnection(
                 self.rffi.as_borrowed_ptr(),
                 observer.rffi(),
@@ -305,22 +289,26 @@ impl PeerConnectionFactory {
             )
         });
         debug!(
-            "PeerConnectionFactory::create_peer_connection() finished: {:p}",
-            rffi.as_borrowed_ptr()
+            "PeerConnectionFactory::create_peer_connection() finished: {:?}",
+            rffi
         );
         if rffi.is_null() {
             return Err(RingRtcError::CreatePeerConnection.into());
         }
-        Ok(PeerConnection::new(rffi, observer.rffi(), Some(self.rffi.clone())))
+        Ok(PeerConnection::new(
+            rffi,
+            observer.rffi(),
+            Some(self.rffi.clone()),
+        ))
     }
 
     pub fn create_outgoing_audio_track(&self) -> Result<AudioTrack> {
         debug!("PeerConnectionFactory::create_outgoing_audio_track()");
-        let rffi = unsafe { pcf::Rust_createAudioTrack(self.rffi.as_borrowed_ptr()) };
+        let rffi = unsafe { pcf::Rust_createAudioTrack(self.rffi.as_borrowed()) };
         if rffi.is_null() {
             return Err(RingRtcError::CreateAudioTrack.into());
         }
-        Ok(AudioTrack::owned(rffi))
+        Ok(AudioTrack::owned(rffi.as_ptr()))
     }
 
     pub fn create_outgoing_video_source(&self) -> Result<VideoSource> {
@@ -339,7 +327,9 @@ impl PeerConnectionFactory {
         outgoing_video_source: &VideoSource,
     ) -> Result<VideoTrack> {
         debug!("PeerConnectionFactory::create_outgoing_video_track()");
-        let rffi = unsafe { pcf::Rust_createVideoTrack(self.rffi.as_borrowed_ptr(), outgoing_video_source.rffi()) };
+        let rffi = unsafe {
+            pcf::Rust_createVideoTrack(self.rffi.as_borrowed_ptr(), outgoing_video_source.rffi())
+        };
         if rffi.is_null() {
             return Err(RingRtcError::CreateVideoTrack.into());
         }
@@ -348,22 +338,28 @@ impl PeerConnectionFactory {
 
     #[cfg(feature = "native")]
     fn get_audio_playout_device(&self, index: u16) -> Result<AudioDevice> {
-        let (name, unique_id, rc) = unsafe {
-            let name = CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_NAME_SIZE]).into_raw();
-            let unique_id =
-                CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_UUID_SIZE]).into_raw();
-            let rc = pcf::Rust_getAudioPlayoutDeviceName(self.rffi.as_borrowed_ptr(), index, name, unique_id);
-            // Take back ownership of the raw pointers before checking for errors.
-            let name = CString::from_raw(name);
-            let unique_id = CString::from_raw(unique_id);
-            (name, unique_id, rc)
+        let mut name_buf = [0; ADM_MAX_DEVICE_NAME_SIZE];
+        let mut unique_id_buf = [0; ADM_MAX_DEVICE_UUID_SIZE];
+        let rc = unsafe {
+            pcf::Rust_getAudioPlayoutDeviceName(
+                self.rffi.as_borrowed_ptr(),
+                index,
+                name_buf.as_mut_ptr(),
+                unique_id_buf.as_mut_ptr(),
+            )
         };
         if rc != 0 {
             error!("getAudioPlayoutDeviceName({}) failed: {}", index, rc);
             return Err(RingRtcError::QueryAudioDevices.into());
         }
-        let name = name.into_string()?;
-        let unique_id = unique_id.into_string()?;
+        // SAFETY: the buffer pointers will be valid until the end of the scope,
+        // and they should contain valid C strings if the return code indicated success.
+        let name = unsafe { CStr::from_ptr(name_buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        let unique_id = unsafe { CStr::from_ptr(unique_id_buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
         Ok(AudioDevice {
             name,
             unique_id,
@@ -397,7 +393,10 @@ impl PeerConnectionFactory {
             device_count
         };
 
-        info!("PeerConnectionFactory::get_audio_playout_devices(): device_count: {}", device_count);
+        info!(
+            "PeerConnectionFactory::get_audio_playout_devices(): device_count: {}",
+            device_count
+        );
 
         for i in 0..device_count {
             match self.get_audio_playout_device(i) {
@@ -487,22 +486,28 @@ impl PeerConnectionFactory {
 
     #[cfg(feature = "native")]
     fn get_audio_recording_device(&self, index: u16) -> Result<AudioDevice> {
-        let (name, unique_id, rc) = unsafe {
-            let name = CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_NAME_SIZE]).into_raw();
-            let unique_id =
-                CString::from_vec_unchecked(vec![0u8; ADM_MAX_DEVICE_UUID_SIZE]).into_raw();
-            let rc = pcf::Rust_getAudioRecordingDeviceName(self.rffi.as_borrowed_ptr(), index, name, unique_id);
-            // Take back ownership of the raw pointers before checking for errors.
-            let name = CString::from_raw(name);
-            let unique_id = CString::from_raw(unique_id);
-            (name, unique_id, rc)
+        let mut name_buf = [0; ADM_MAX_DEVICE_NAME_SIZE];
+        let mut unique_id_buf = [0; ADM_MAX_DEVICE_UUID_SIZE];
+        let rc = unsafe {
+            pcf::Rust_getAudioRecordingDeviceName(
+                self.rffi.as_borrowed_ptr(),
+                index,
+                name_buf.as_mut_ptr(),
+                unique_id_buf.as_mut_ptr(),
+            )
         };
         if rc != 0 {
             error!("getAudioRecordingDeviceName({}) failed: {}", index, rc);
             return Err(RingRtcError::QueryAudioDevices.into());
         }
-        let name = name.into_string()?;
-        let unique_id = unique_id.into_string()?;
+        // SAFETY: the buffer pointers will be valid until the end of the scope,
+        // and they should contain valid C strings if the return code indicated success.
+        let name = unsafe { CStr::from_ptr(name_buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        let unique_id = unsafe { CStr::from_ptr(unique_id_buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
         Ok(AudioDevice {
             name,
             unique_id,
@@ -512,7 +517,8 @@ impl PeerConnectionFactory {
 
     #[cfg(feature = "native")]
     pub fn get_audio_recording_devices(&self) -> Result<Vec<AudioDevice>> {
-        let device_count = unsafe { pcf::Rust_getAudioRecordingDevices(self.rffi.as_borrowed_ptr()) };
+        let device_count =
+            unsafe { pcf::Rust_getAudioRecordingDevices(self.rffi.as_borrowed_ptr()) };
         if device_count < 0 {
             error!("getAudioRecordingDevices() returned {}", device_count);
             return Err(RingRtcError::QueryAudioDevices.into());
@@ -536,7 +542,10 @@ impl PeerConnectionFactory {
             device_count
         };
 
-        info!("PeerConnectionFactory::get_audio_recording_devices(): device_count: {}", device_count);
+        info!(
+            "PeerConnectionFactory::get_audio_recording_devices(): device_count: {}",
+            device_count
+        );
 
         for i in 0..device_count {
             match self.get_audio_recording_device(i) {
@@ -613,7 +622,10 @@ impl PeerConnectionFactory {
             }
         };
 
-        info!("PeerConnectionFactory::set_audio_recording_device({})", index);
+        info!(
+            "PeerConnectionFactory::set_audio_recording_device({})",
+            index
+        );
 
         let ok = unsafe { pcf::Rust_setAudioRecordingDevice(self.rffi.as_borrowed_ptr(), index) };
         if ok {

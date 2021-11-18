@@ -12,12 +12,9 @@ use std::env;
 use std::time::{Duration, SystemTime};
 
 use lazy_static::lazy_static;
-use log::LevelFilter;
 use rand::distributions::{Distribution, Standard};
 use rand::{Rng, SeedableRng};
-
 use rand_chacha::ChaCha20Rng;
-use simplelog::{Config, ConfigBuilder, SimpleLogger};
 
 use ringrtc::common::{ApplicationEvent, CallMediaType, DeviceId, FeatureLevel};
 use ringrtc::core::call::Call;
@@ -79,26 +76,14 @@ lazy_static! {
 }
 
 pub fn test_init() {
-    let (log_level, config) = if env::var("DEBUG_TESTS").is_ok() {
-        (
-            LevelFilter::Info,
-            ConfigBuilder::new()
-                .set_thread_level(LevelFilter::Info)
-                .set_target_level(LevelFilter::Info)
-                .set_location_level(LevelFilter::Info)
-                .build(),
-        )
-    } else {
-        (LevelFilter::Error, Config::default())
-    };
-
-    let _ = SimpleLogger::init(log_level, config);
+    let _ = env_logger::try_init();
+    env::set_var("INCOMING_GROUP_CALL_RING_SECS", "1");
 }
 
 pub struct TestContext {
-    platform:     SimPlatform,
+    platform: SimPlatform,
     call_manager: CallManager<SimPlatform>,
-    pub prng:     Prng,
+    pub prng: Prng,
 }
 
 impl Drop for TestContext {
@@ -142,7 +127,7 @@ impl TestContext {
         let active_call = self.call_manager.active_call().unwrap();
         match active_call.active_connection() {
             Ok(v) => v,
-            Err(_) => active_call.get_connection(1 as DeviceId).unwrap(),
+            Err(_) => active_call.get_connection(1).unwrap(),
         }
     }
 
@@ -259,9 +244,9 @@ impl TestContext {
     pub fn create_group_call(
         &self,
         group_id: group_call::GroupId,
-    ) -> Result<group_call::ClientId, failure::Error> {
+    ) -> Result<group_call::ClientId, anyhow::Error> {
         self.cm().create_group_call_client(
-            group_id.clone(),
+            group_id,
             "".to_owned(),
             None,
             ringrtc::webrtc::media::AudioTrack::unowned(std::ptr::null()),
@@ -275,11 +260,11 @@ pub fn random_received_offer(_prng: &Prng, age: Duration) -> signaling::Received
     let offer = signaling::Offer::from_v4(
         CallMediaType::Audio,
         protobuf::signaling::ConnectionParametersV4 {
-            public_key:           Some(local_public_key),
-            ice_ufrag:            None,
-            ice_pwd:              None,
+            public_key: Some(local_public_key),
+            ice_ufrag: None,
+            ice_pwd: None,
             receive_video_codecs: vec![],
-            max_bitrate_bps:      None,
+            max_bitrate_bps: None,
         },
     )
     .unwrap();
@@ -287,9 +272,9 @@ pub fn random_received_offer(_prng: &Prng, age: Duration) -> signaling::Received
     signaling::ReceivedOffer {
         offer,
         age,
-        sender_device_id: 1 as DeviceId,
+        sender_device_id: 1,
         sender_device_feature_level: FeatureLevel::MultiRing,
-        receiver_device_id: 1 as DeviceId,
+        receiver_device_id: 1,
         receiver_device_is_primary: true,
         sender_identity_key: Vec::new(),
         receiver_identity_key: Vec::new(),
@@ -304,11 +289,11 @@ pub fn random_received_answer(
 ) -> signaling::ReceivedAnswer {
     let local_public_key = rand::thread_rng().gen::<[u8; 32]>().to_vec();
     let answer = signaling::Answer::from_v4(protobuf::signaling::ConnectionParametersV4 {
-        public_key:           Some(local_public_key),
-        ice_ufrag:            None,
-        ice_pwd:              None,
+        public_key: Some(local_public_key),
+        ice_ufrag: None,
+        ice_pwd: None,
         receive_video_codecs: vec![],
-        max_bitrate_bps:      None,
+        max_bitrate_bps: None,
     })
     .unwrap();
     signaling::ReceivedAnswer {
@@ -321,7 +306,7 @@ pub fn random_received_answer(
 }
 
 pub fn random_ice_candidate(prng: &Prng) -> signaling::IceCandidate {
-    let sdp = format!("ICE-CANDIDATE-{}", prng.gen::<u16>()).to_owned();
+    let sdp = format!("ICE-CANDIDATE-{}", prng.gen::<u16>());
     // V1 and V2 are the same for ICE candidates
     let ice_candidate = signaling::IceCandidate::from_v3_sdp(sdp).unwrap();
     signaling::IceCandidate::new(ice_candidate.opaque)
@@ -330,9 +315,9 @@ pub fn random_ice_candidate(prng: &Prng) -> signaling::IceCandidate {
 pub fn random_received_ice_candidate(prng: &Prng) -> signaling::ReceivedIce {
     let candidate = random_ice_candidate(prng);
     signaling::ReceivedIce {
-        ice:              signaling::Ice {
+        ice: signaling::Ice {
             candidates: vec![candidate],
         },
-        sender_device_id: 1 as DeviceId,
+        sender_device_id: 1,
     }
 }

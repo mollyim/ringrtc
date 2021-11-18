@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.13.6
+
+- Use SetAudioPlayout() function for group calls
+
+## v2.13.5
+
+- Improve how WebRTC pointer is tracked across FFI
+
+- Update Rust
+
+- Update dependencies
+
+- Update builds
+
+## v2.13.4
+
+- Electron: Use Neon's Channel to avoid polling for events/logs
+
+- Desktop: Allow logger to be initialized multiple times
+
+- Enable the use of the SetAudioPlayout() function to start playout after accept
+
+- Reference signalapp/webrtc@4389k
+  - Initialize ADM playout before starting
+
 ## v2.13.3
 
 - iOS & Android: Pass PeerConnectionFactory down to Rust for group calls

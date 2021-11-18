@@ -18,7 +18,7 @@ use crate::webrtc::media::MediaStream;
 /// Rust wrapper around application stream interface and RTCMediaStream object.
 pub struct IosMediaStream {
     app_media_stream_interface: AppMediaStreamInterface,
-    app_media_stream:           *mut c_void,
+    app_media_stream: *mut c_void,
 }
 
 unsafe impl Sync for IosMediaStream {}
@@ -72,7 +72,7 @@ impl IosMediaStream {
     /// Return a reference to the Application RTCMediaStream object.
     pub fn get_ref(&self) -> Result<*const c_void> {
         //        let app_call_connection = self.app_call_connection.as_ref()
-        //            .ok_or::<failure::Error>(RingRtcError::CallConnectionMemberNotSet("app_call_connection".to_string()).into())?;
+        //            .ok_or::<anyhow::Error>(RingRtcError::CallConnectionMemberNotSet("app_call_connection".to_string()).into())?;
         Ok(self.app_media_stream)
     }
 }

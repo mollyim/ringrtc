@@ -6,11 +6,7 @@
 use crate::webrtc;
 use crate::webrtc::peer_connection_factory::RffiIceServer;
 use crate::webrtc::sim::media::{
-    RffiAudioTrack,
-    RffiVideoSource,
-    RffiVideoTrack,
-    FAKE_AUDIO_TRACK,
-    FAKE_VIDEO_SOURCE,
+    RffiAudioTrack, RffiVideoSource, RffiVideoTrack, FAKE_AUDIO_TRACK, FAKE_VIDEO_SOURCE,
     FAKE_VIDEO_TRACK,
 };
 use crate::webrtc::sim::peer_connection::RffiPeerConnection;
@@ -37,15 +33,15 @@ pub type RffiAudioDeviceModule = u32;
 pub unsafe fn Rust_createPeerConnectionFactory(
     _use_new_audio_device_module: bool,
     _use_injectable_network: bool,
-) -> *const RffiPeerConnectionFactoryOwner {
+) -> webrtc::ptr::OwnedRc<RffiPeerConnectionFactoryOwner> {
     info!("Rust_createPeerConnectionFactory()");
-    &FAKE_PEER_CONNECTION_FACTORY
+    webrtc::ptr::OwnedRc::from_ptr(&FAKE_PEER_CONNECTION_FACTORY)
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_createPeerConnectionFactoryWrapper(
-    _interface: *const RffiPeerConnectionFactoryInterface,
-) -> *const RffiPeerConnectionFactoryOwner {
+    _interface: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryInterface>,
+) -> webrtc::ptr::OwnedRc<RffiPeerConnectionFactoryOwner> {
     panic!("no interface to wrap in sim!")
 }
 
@@ -60,17 +56,17 @@ pub unsafe fn Rust_createPeerConnection(
     _outgoing_video_track: *const RffiVideoTrack,
     _enable_dtls: bool,
     _enable_rtp_data_channel: bool,
-) -> *const RffiPeerConnection {
+) -> webrtc::ptr::OwnedRc<RffiPeerConnection> {
     info!("Rust_createPeerConnection()");
-    Box::leak(Box::new(RffiPeerConnection::new()))
+    webrtc::ptr::OwnedRc::from_ptr(Box::leak(Box::new(RffiPeerConnection::new())))
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_createAudioTrack(
-    _factory: *const RffiPeerConnectionFactoryOwner,
-) -> *const RffiAudioTrack {
+    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
+) -> webrtc::ptr::OwnedRc<RffiAudioTrack> {
     info!("Rust_createVideoSource()");
-    &FAKE_AUDIO_TRACK
+    webrtc::ptr::OwnedRc::from_ptr(&FAKE_AUDIO_TRACK)
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]

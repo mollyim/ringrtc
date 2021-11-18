@@ -14,7 +14,7 @@ use std::ptr;
 use std::time::Duration;
 
 use prost::Message;
-use ringrtc::common::{ApplicationEvent, CallId, CallState, ConnectionState, DeviceId};
+use ringrtc::common::{ApplicationEvent, CallId, CallState, ConnectionState};
 use ringrtc::core::bandwidth_mode::BandwidthMode;
 use ringrtc::core::call_manager::MAX_MESSAGE_AGE;
 use ringrtc::core::group_call;
@@ -43,7 +43,7 @@ fn start_inbound_call() -> TestContext {
     let context = TestContext::new();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     cm.received_offer(
         remote_peer,
@@ -54,7 +54,7 @@ fn start_inbound_call() -> TestContext {
 
     cm.synchronize().expect(error_line!());
 
-    assert_eq!(cm.active_call().is_ok(), true);
+    assert!(cm.active_call().is_ok());
     assert_eq!(context.start_outgoing_count(), 0);
     assert_eq!(context.start_incoming_count(), 1);
 
@@ -66,16 +66,14 @@ fn start_inbound_call() -> TestContext {
 
     cm.proceed(
         active_call.call_id(),
-        format!("CONTEXT-{}", context.prng.gen::<u16>()).to_owned(),
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
         BandwidthMode::Normal,
     )
     .expect(error_line!());
 
     cm.synchronize().expect(error_line!());
 
-    let connection = active_call
-        .get_connection(1 as DeviceId)
-        .expect(error_line!());
+    let connection = active_call.get_connection(1).expect(error_line!());
 
     cm.received_ice(
         active_call.call_id(),
@@ -96,6 +94,7 @@ fn start_inbound_call() -> TestContext {
     );
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.ended_count(), 0);
+    assert!(cm.busy());
 
     context
 }
@@ -153,13 +152,10 @@ fn connect_inbound_call() -> TestContext {
     assert_eq!(context.event_count(ApplicationEvent::LocalRinging), 1);
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.ended_count(), 0);
-    assert_eq!(
-        false,
-        active_connection
-            .app_connection()
-            .unwrap()
-            .outgoing_audio_enabled(),
-    );
+    assert!(!active_connection
+        .app_connection()
+        .unwrap()
+        .outgoing_audio_enabled(),);
 
     info!("test: add media stream");
     active_connection
@@ -183,13 +179,11 @@ fn connect_inbound_call() -> TestContext {
     assert_eq!(context.stream_count(), 1);
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.ended_count(), 0);
-    assert_eq!(
-        true,
-        active_connection
-            .app_connection()
-            .unwrap()
-            .outgoing_audio_enabled(),
-    );
+    assert!(active_connection
+        .app_connection()
+        .unwrap()
+        .outgoing_audio_enabled());
+    assert!(cm.busy());
 
     context
 }
@@ -212,8 +206,8 @@ fn inbound_call_hangup_accepted() {
     cm.received_hangup(
         active_call.call_id(),
         signaling::ReceivedHangup {
-            sender_device_id: 1 as DeviceId,
-            hangup:           signaling::Hangup::AcceptedOnAnotherDevice(2 as DeviceId),
+            sender_device_id: 1,
+            hangup: signaling::Hangup::AcceptedOnAnotherDevice(2),
         },
     )
     .expect(error_line!());
@@ -225,6 +219,7 @@ fn inbound_call_hangup_accepted() {
         context.event_count(ApplicationEvent::EndedRemoteHangupAccepted),
         1
     );
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -238,8 +233,8 @@ fn inbound_call_hangup_declined() {
     cm.received_hangup(
         active_call.call_id(),
         signaling::ReceivedHangup {
-            sender_device_id: 1 as DeviceId,
-            hangup:           signaling::Hangup::DeclinedOnAnotherDevice(2 as DeviceId),
+            sender_device_id: 1,
+            hangup: signaling::Hangup::DeclinedOnAnotherDevice(2),
         },
     )
     .expect(error_line!());
@@ -251,6 +246,7 @@ fn inbound_call_hangup_declined() {
         context.event_count(ApplicationEvent::EndedRemoteHangupDeclined),
         1
     );
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -264,8 +260,8 @@ fn inbound_call_hangup_busy() {
     cm.received_hangup(
         active_call.call_id(),
         signaling::ReceivedHangup {
-            sender_device_id: 1 as DeviceId,
-            hangup:           signaling::Hangup::BusyOnAnotherDevice(2 as DeviceId),
+            sender_device_id: 1,
+            hangup: signaling::Hangup::BusyOnAnotherDevice(2),
         },
     )
     .expect(error_line!());
@@ -277,6 +273,7 @@ fn inbound_call_hangup_busy() {
         context.event_count(ApplicationEvent::EndedRemoteHangupBusy),
         1
     );
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -286,7 +283,7 @@ fn start_inbound_call_with_error() {
     let context = TestContext::new();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     cm.received_offer(
         remote_peer,
@@ -297,7 +294,7 @@ fn start_inbound_call_with_error() {
 
     cm.synchronize().expect(error_line!());
 
-    assert_eq!(cm.active_call().is_ok(), true);
+    assert!(cm.active_call().is_ok());
     assert_eq!(context.start_outgoing_count(), 0);
     assert_eq!(context.start_incoming_count(), 1);
 
@@ -312,7 +309,7 @@ fn start_inbound_call_with_error() {
 
     cm.proceed(
         active_call.call_id(),
-        format!("CONTEXT-{}", context.prng.gen::<u16>()).to_owned(),
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
         BandwidthMode::Normal,
     )
     .expect(error_line!());
@@ -321,9 +318,7 @@ fn start_inbound_call_with_error() {
 
     context.force_internal_fault(false);
 
-    let connection = active_call
-        .get_connection(1 as DeviceId)
-        .expect(error_line!());
+    let connection = active_call.get_connection(1).expect(error_line!());
 
     assert_eq!(
         connection.state().expect(error_line!()),
@@ -339,6 +334,7 @@ fn start_inbound_call_with_error() {
         active_call.state().expect(error_line!()),
         CallState::Terminated
     );
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -348,7 +344,7 @@ fn receive_offer_while_active() {
     let context = connect_inbound_call();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     cm.received_offer(
         remote_peer,
@@ -366,6 +362,7 @@ fn receive_offer_while_active() {
     );
     assert_eq!(context.busys_sent(), 1);
     assert_eq!(context.call_concluded_count(), 1);
+    assert!(cm.busy());
 }
 
 #[test]
@@ -375,7 +372,7 @@ fn receive_expired_offer() {
     let context = TestContext::new();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     let age = Duration::from_secs(86400); // one whole day
     cm.received_offer(
@@ -389,6 +386,7 @@ fn receive_expired_offer() {
 
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.offer_expired_count(), 1);
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -398,7 +396,7 @@ fn receive_offer_before_age_limit() {
     let context = TestContext::new();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     let age = MAX_MESSAGE_AGE - Duration::from_secs(1);
     cm.received_offer(
@@ -412,6 +410,7 @@ fn receive_offer_before_age_limit() {
 
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.offer_expired_count(), 0);
+    assert!(cm.busy());
 }
 
 #[test]
@@ -421,7 +420,7 @@ fn receive_offer_at_age_limit() {
     let context = TestContext::new();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     let age = MAX_MESSAGE_AGE;
     cm.received_offer(
@@ -435,6 +434,7 @@ fn receive_offer_at_age_limit() {
 
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.offer_expired_count(), 0);
+    assert!(cm.busy());
 }
 
 #[test]
@@ -444,7 +444,7 @@ fn receive_expired_offer_after_age_limit() {
     let context = TestContext::new();
     let mut cm = context.cm();
 
-    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>()).to_owned();
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
     let call_id = CallId::new(context.prng.gen::<u64>());
     let age = MAX_MESSAGE_AGE + Duration::from_secs(1);
     cm.received_offer(
@@ -458,6 +458,7 @@ fn receive_expired_offer_after_age_limit() {
 
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.offer_expired_count(), 1);
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -474,8 +475,8 @@ fn group_call_ring() {
     let message = protobuf::signaling::CallMessage {
         ring_intention: Some(protobuf::signaling::call_message::RingIntention {
             group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
         }),
         ..Default::default()
     };
@@ -506,6 +507,8 @@ fn group_call_ring() {
         }
         _ => panic!("unexpected ring updates: {:?}", ring_updates),
     }
+
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -522,8 +525,8 @@ fn group_call_ring_expired() {
     let message = protobuf::signaling::CallMessage {
         ring_intention: Some(protobuf::signaling::call_message::RingIntention {
             group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
         }),
         ..Default::default()
     };
@@ -560,6 +563,8 @@ fn group_call_ring_expired() {
         }
         _ => panic!("unexpected ring updates: {:?}", ring_updates),
     }
+
+    assert!(!cm.busy());
 }
 
 #[test]
@@ -579,8 +584,8 @@ fn group_call_ring_busy_in_direct_call() {
     let message = protobuf::signaling::CallMessage {
         ring_intention: Some(protobuf::signaling::call_message::RingIntention {
             group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
         }),
         ..Default::default()
     };
@@ -629,8 +634,8 @@ fn group_call_ring_busy_in_direct_call() {
                 protobuf::signaling::CallMessage {
                     ring_response: Some(protobuf::signaling::call_message::RingResponse {
                         group_id: Some(group_id),
-                        ring_id:  Some(ring_id.into()),
-                        r#type:   Some(
+                        ring_id: Some(ring_id.into()),
+                        r#type: Some(
                             protobuf::signaling::call_message::ring_response::Type::Busy.into()
                         ),
                     }),
@@ -641,6 +646,8 @@ fn group_call_ring_busy_in_direct_call() {
         }
         _ => panic!("unexpected messages: {:?}", messages),
     }
+
+    assert!(cm.busy());
 }
 
 #[test]
@@ -660,6 +667,7 @@ fn group_call_ring_busy_in_group_call() {
         .expect(error_line!());
     cm.join(group_call_id);
     cm.synchronize().expect(error_line!());
+    assert!(cm.busy());
 
     let group_id = vec![1, 1, 1];
     let sender = vec![1, 2, 3];
@@ -668,8 +676,8 @@ fn group_call_ring_busy_in_group_call() {
     let message = protobuf::signaling::CallMessage {
         ring_intention: Some(protobuf::signaling::call_message::RingIntention {
             group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
         }),
         ..Default::default()
     };
@@ -718,8 +726,8 @@ fn group_call_ring_busy_in_group_call() {
                 protobuf::signaling::CallMessage {
                     ring_response: Some(protobuf::signaling::call_message::RingResponse {
                         group_id: Some(group_id),
-                        ring_id:  Some(ring_id.into()),
-                        r#type:   Some(
+                        ring_id: Some(ring_id.into()),
+                        r#type: Some(
                             protobuf::signaling::call_message::ring_response::Type::Busy.into()
                         ),
                     }),
@@ -730,6 +738,8 @@ fn group_call_ring_busy_in_group_call() {
         }
         _ => panic!("unexpected messages: {:?}", messages),
     }
+
+    assert!(cm.busy());
 }
 
 #[test]
@@ -746,8 +756,8 @@ fn group_call_ring_responses() {
     let message = protobuf::signaling::CallMessage {
         ring_response: Some(protobuf::signaling::call_message::RingResponse {
             group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_response::Type::Declined.into()),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_response::Type::Declined.into()),
         }),
         ..Default::default()
     };
@@ -800,9 +810,9 @@ fn group_call_ring_responses() {
     // We should ignore "ringing" messages regardless.
     let message = protobuf::signaling::CallMessage {
         ring_response: Some(protobuf::signaling::call_message::RingResponse {
-            group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_response::Type::Ringing.into()),
+            group_id: Some(group_id),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_response::Type::Ringing.into()),
         }),
         ..Default::default()
     };
@@ -811,7 +821,7 @@ fn group_call_ring_responses() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::ZERO)
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
 
@@ -839,8 +849,8 @@ fn group_call_ring_timeout() {
     let message = protobuf::signaling::CallMessage {
         ring_intention: Some(protobuf::signaling::call_message::RingIntention {
             group_id: Some(group_id.clone()),
-            ring_id:  Some(ring_id.into()),
-            r#type:   Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
+            ring_id: Some(ring_id.into()),
+            r#type: Some(protobuf::signaling::call_message::ring_intention::Type::Ring.into()),
         }),
         ..Default::default()
     };
@@ -871,15 +881,11 @@ fn group_call_ring_timeout() {
         }
         _ => panic!("unexpected ring updates: {:?}", ring_updates),
     }
+    assert!(!cm.busy());
 
-    // It would be nice to test that the timer *hasn't* gone off after 30 seconds
-    // and *has* gone off at, say, 5 minutes, but sadly a Tokio runtime that's *only*
-    // waiting on timers will will auto-advance time as soon as you pause the clock.
-    // So we'll just make sure the timer was scheduled at all.
-    let clock_guard = cm.pause_clock().expect(error_line!());
+    // We set the timeout to 1 second for testing, so we only need to sleep a bit longer than that.
+    std::thread::sleep(Duration::from_millis(1_200));
     cm.synchronize().expect(error_line!());
-    std::thread::sleep(Duration::from_millis(100)); // Yield to the runtime.
-    drop(clock_guard);
 
     let ring_updates = cm
         .platform()

@@ -26,7 +26,9 @@ use crate::{
         units::DataRate,
         Result,
     },
-    core::{call_mutex::CallMutex, crypto as frame_crypto, signaling, bandwidth_mode::BandwidthMode},
+    core::{
+        bandwidth_mode::BandwidthMode, call_mutex::CallMutex, crypto as frame_crypto, signaling,
+    },
     error::RingRtcError,
     protobuf,
     webrtc::{
@@ -35,10 +37,7 @@ use crate::{
         peer_connection::{PeerConnection, SendRates},
         peer_connection_factory::{self as pcf, Certificate, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
-            IceConnectionState,
-            NetworkRoute,
-            PeerConnectionObserver,
-            PeerConnectionObserverTrait,
+            IceConnectionState, NetworkRoute, PeerConnectionObserver, PeerConnectionObserverTrait,
         },
         rtp,
         sdp_observer::{create_ssd_observer, SessionDescription},
@@ -217,11 +216,7 @@ pub trait Observer {
         client_id: ClientId,
         connection_state: ConnectionState,
     );
-    fn handle_network_route_changed(
-        &self,
-        client_id: ClientId,
-        network_route: NetworkRoute,
-    );
+    fn handle_network_route_changed(&self, client_id: ClientId, network_route: NetworkRoute);
     fn handle_join_state_changed(&self, client_id: ClientId, join_state: JoinState);
     fn handle_send_rates_changed(&self, _client_id: ClientId, _send_rates: SendRates) {}
 
@@ -338,9 +333,9 @@ pub enum JoinState {
 // The info about SFU needed in order to connect to it.
 #[derive(Clone, Debug)]
 pub struct SfuInfo {
-    pub udp_addresses:    Vec<SocketAddr>,
-    pub ice_ufrag:        String,
-    pub ice_pwd:          String,
+    pub udp_addresses: Vec<SocketAddr>,
+    pub ice_ufrag: String,
+    pub ice_pwd: String,
     pub dtls_fingerprint: DtlsFingerprint,
 }
 
@@ -348,26 +343,26 @@ pub struct SfuInfo {
 #[derive(Clone, Debug, Default)]
 pub struct PeekInfo {
     /// Currently joined devices
-    pub devices:      Vec<PeekDeviceInfo>,
+    pub devices: Vec<PeekDeviceInfo>,
     /// The user who created the call
-    pub creator:      Option<UserId>,
+    pub creator: Option<UserId>,
     /// The "era" of this group call; changes every time the last partipant leaves and someone else joins again.
-    pub era_id:       Option<String>,
+    pub era_id: Option<String>,
     /// The maximum number of devices that can join this group call.
-    pub max_devices:  Option<u32>,
+    pub max_devices: Option<u32>,
     /// The number of devices currently joined (including local device/user).
     pub device_count: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct PeekDeviceInfo {
-    pub demux_id:        DemuxId,
-    pub user_id:         Option<UserId>,
+    pub demux_id: DemuxId,
+    pub user_id: Option<UserId>,
     // These are basically the same as DemuxIds,
     // but the SFU uses one sometimes and the other
     // other times.
     pub short_device_id: u64,
-    pub long_device_id:  String,
+    pub long_device_id: String,
 }
 
 #[repr(C)]
@@ -416,24 +411,24 @@ pub trait SfuClient {
 // Associates a group member's UUID with their UUID ciphertext
 #[derive(Clone, Debug)]
 pub struct GroupMemberInfo {
-    pub user_id:            UserId,
+    pub user_id: UserId,
     pub user_id_ciphertext: UserIdCiphertext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct HeartbeatState {
-    pub audio_muted:    Option<bool>,
-    pub video_muted:    Option<bool>,
-    pub presenting:     Option<bool>,
+    pub audio_muted: Option<bool>,
+    pub video_muted: Option<bool>,
+    pub presenting: Option<bool>,
     pub sharing_screen: Option<bool>,
 }
 
 impl From<protobuf::group_call::device_to_device::Heartbeat> for HeartbeatState {
     fn from(proto: protobuf::group_call::device_to_device::Heartbeat) -> Self {
         Self {
-            audio_muted:    proto.audio_muted,
-            video_muted:    proto.video_muted,
-            presenting:     proto.presenting,
+            audio_muted: proto.audio_muted,
+            video_muted: proto.video_muted,
+            presenting: proto.presenting,
             sharing_screen: proto.sharing_screen,
         }
     }
@@ -442,24 +437,24 @@ impl From<protobuf::group_call::device_to_device::Heartbeat> for HeartbeatState 
 // The info about remote devices received from the SFU
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteDeviceState {
-    pub demux_id:            DemuxId,
-    pub user_id:             UserId,
-    short_device_id:         u64,
-    long_device_id:          String,
+    pub demux_id: DemuxId,
+    pub user_id: UserId,
+    short_device_id: u64,
+    long_device_id: String,
     pub media_keys_received: bool,
-    pub heartbeat_state:     HeartbeatState,
+    pub heartbeat_state: HeartbeatState,
     // The latest timestamp we received from an update to
     // heartbeat_state.
     heartbeat_rtp_timestamp: Option<rtp::Timestamp>,
     // The time at which this device was added to the list of devices.
     // A combination of (added_timestamp, demux_id) can be used for a stable
     // sort of remote devices for a grid layout.
-    pub added_time:          SystemTime,
+    pub added_time: SystemTime,
     // The most recent time at which this device became the primary speaker
     // Sorting using this value will give a history of who spoke.
-    pub speaker_time:        Option<SystemTime>,
-    pub leaving_received:    bool,
-    pub forwarding_video:     Option<bool>,
+    pub speaker_time: Option<SystemTime>,
+    pub leaving_received: bool,
+    pub forwarding_video: Option<bool>,
 }
 
 fn as_unix_millis(t: Option<SystemTime>) -> u64 {
@@ -511,9 +506,9 @@ impl RemoteDeviceState {
 /// video for different remote dem
 #[derive(Clone, Debug)]
 pub struct VideoRequest {
-    pub demux_id:  DemuxId,
-    pub width:     u16,
-    pub height:    u16,
+    pub demux_id: DemuxId,
+    pub width: u16,
+    pub height: u16,
     // If not specified, it means unrestrained framerate.
     pub framerate: Option<u16>,
 }
@@ -549,7 +544,7 @@ enum KeyRotationState {
     Applied,
     // A key has been generated but not yet applied.
     Pending {
-        secret:                 frame_crypto::Secret,
+        secret: frame_crypto::Secret,
         // Once it has been applied, another rotation needs to take place because
         // a user left the call while rotation was pending.
         needs_another_rotation: bool,
@@ -564,9 +559,9 @@ enum RemoteDevicesRequestState {
     WaitingForMembershipProof,
     NeverRequested,
     Requested {
-        // While waiting, something happend that makes us think we should ask again.
+        // While waiting, something happened that makes us think we should ask again.
         should_request_again: bool,
-        at:                   Instant,
+        at: Instant,
     },
     Updated {
         at: Instant,
@@ -580,15 +575,16 @@ enum RemoteDevicesRequestState {
 #[derive(Clone)]
 pub struct Client {
     // A value used for logging and passing into the Observer.
-    client_id:            ClientId,
-    pub group_id:         GroupId,
+    client_id: ClientId,
+    pub group_id: GroupId,
     // We have to leave this outside of the actor state
     // because WebRTC calls back to the PeerConnectionObserver
     // synchronously.
     frame_crypto_context: Arc<CallMutex<frame_crypto::Context>>,
-    actor:                Actor<State>,
+    actor: Actor<State>,
 }
 
+#[derive(Default)]
 struct RemoteDevices(Vec<RemoteDeviceState>);
 
 impl Deref for RemoteDevices {
@@ -605,14 +601,8 @@ impl DerefMut for RemoteDevices {
     }
 }
 
-impl Default for RemoteDevices {
-    fn default() -> Self {
-        Self(Default::default())
-    }
-}
-
 impl FromIterator<RemoteDeviceState> for RemoteDevices {
-    fn from_iter<T: IntoIterator<Item=RemoteDeviceState>>(iter: T) -> Self {
+    fn from_iter<T: IntoIterator<Item = RemoteDeviceState>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
     }
 }
@@ -629,24 +619,24 @@ impl IntoIterator for RemoteDevices {
 /// The state inside the Actor
 struct State {
     // Things passed in that never change
-    client_id:  ClientId,
-    group_id:   GroupId,
+    client_id: ClientId,
+    group_id: GroupId,
     sfu_client: Box<dyn SfuClient>,
-    observer:   Box<dyn Observer>,
+    observer: Box<dyn Observer>,
 
     // Shared state with the CallManager that might change
-    busy:      Arc<CallMutex<bool>>,
+    busy: Arc<CallMutex<bool>>,
     self_uuid: Arc<CallMutex<Option<UserId>>>,
 
     // State that changes regularly and is sent to the observer
     connection_state: ConnectionState,
-    join_state:       JoinState,
-    remote_devices:   RemoteDevices,
+    join_state: JoinState,
+    remote_devices: RemoteDevices,
 
     // Things to control peeking
     remote_devices_request_state: RemoteDevicesRequestState,
-    last_peek_info:               Option<PeekInfo>,
-    known_members:                HashSet<UserId>,
+    last_peek_info: Option<PeekInfo>,
+    known_members: HashSet<UserId>,
 
     // Derived from remote_devices but stored so we can fire
     // Observer::handle_peek_changed only when it changes
@@ -658,19 +648,19 @@ struct State {
     outgoing_heartbeat_state: HeartbeatState,
 
     // Things for controlling the PeerConnection
-    local_ice_ufrag:                  String,
-    local_ice_pwd:                    String,
-    local_dtls_fingerprint:           DtlsFingerprint,
-    sfu_info:                         Option<SfuInfo>,
-    peer_connection:                  PeerConnection,
-    peer_connection_observer_impl:    Box<PeerConnectionObserverImpl>,
-    rtp_data_to_sfu_next_seqnum:      u32,
+    local_ice_ufrag: String,
+    local_ice_pwd: String,
+    local_dtls_fingerprint: DtlsFingerprint,
+    sfu_info: Option<SfuInfo>,
+    peer_connection: PeerConnection,
+    peer_connection_observer_impl: Box<PeerConnectionObserverImpl>,
+    rtp_data_to_sfu_next_seqnum: u32,
     rtp_data_through_sfu_next_seqnum: u32,
 
     // Things for getting statistics from the PeerConnection
     // Stats gathering happens only when joined
     next_stats_time: Option<Instant>,
-    stats_observer:  Box<StatsObserver>,
+    stats_observer: Box<StatsObserver>,
 
     next_membership_proof_request_time: Option<Instant>,
 
@@ -701,11 +691,11 @@ struct State {
     // but also limit how often they are sent "on demand".  So here's the rule:
     // once per second, you get an "on demand" one.  Any more than that and you
     // wait for the next tick.
-    video_requests:                               Option<Vec<VideoRequest>>,
+    video_requests: Option<Vec<VideoRequest>>,
     on_demand_video_request_sent_since_last_tick: bool,
-    speaker_rtp_timestamp:                        Option<rtp::Timestamp>,
+    speaker_rtp_timestamp: Option<rtp::Timestamp>,
 
-    send_rates:               SendRates,
+    send_rates: SendRates,
     max_receive_rate: Option<DataRate>,
     forwarding_video_demux_ids: HashSet<DemuxId>,
 
@@ -719,13 +709,11 @@ struct State {
 }
 
 impl RemoteDevices {
-
     /// Find the latest speaker
     fn latest_speaker_demux_id(&self) -> Option<DemuxId> {
-        let latest_speaker = self.iter()
-            .max_by_key(|a| a.speaker_time);
+        let latest_speaker = self.iter().max_by_key(|a| a.speaker_time);
         if latest_speaker?.speaker_time.is_none() {
-           None
+            None
         } else {
             latest_speaker.map(|speaker| speaker.demux_id)
         }
@@ -733,19 +721,19 @@ impl RemoteDevices {
 
     /// Find remote device state by demux id
     fn find_by_demux_id(&self, demux_id: DemuxId) -> Option<&RemoteDeviceState> {
-        self.iter()
-            .find(|device| device.demux_id == demux_id)
+        self.iter().find(|device| device.demux_id == demux_id)
     }
 
     /// Find remote device state by demux id
     fn find_by_demux_id_mut(&mut self, demux_id: DemuxId) -> Option<&mut RemoteDeviceState> {
-        self.0
-            .iter_mut()
-            .find(|device| device.demux_id == demux_id)
+        self.0.iter_mut().find(|device| device.demux_id == demux_id)
     }
 
     /// Find remote device state by the long device id
-    fn find_by_long_device_id_mut(&mut self, long_device_id: &str) -> Option<&mut RemoteDeviceState> {
+    fn find_by_long_device_id_mut(
+        &mut self,
+        long_device_id: &str,
+    ) -> Option<&mut RemoteDeviceState> {
         self.0
             .iter_mut()
             .find(|device| device.long_device_id == *long_device_id)
@@ -753,9 +741,7 @@ impl RemoteDevices {
 
     /// Returns a set containing all the demux ids in the collection
     fn demux_id_set(&self) -> HashSet<DemuxId> {
-        self.iter()
-            .map(|device| device.demux_id)
-            .collect()
+        self.iter().map(|device| device.demux_id).collect()
     }
 }
 
@@ -799,18 +785,16 @@ impl Client {
                 debug!("group_call::Client(inner)::new(client_id: {})", client_id);
 
                 let peer_connection_factory = match peer_connection_factory {
-                    None => {
-                        match PeerConnectionFactory::new(pcf::Config::default()) {
-                            Ok(v) => v,
-                            Err(err) => {
-                                observer.handle_ended(
-                                    client_id,
-                                    EndReason::FailedToCreatePeerConnectionFactory,
-                                );
-                                return Err(err);
-                            }
+                    None => match PeerConnectionFactory::new(pcf::Config::default()) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            observer.handle_ended(
+                                client_id,
+                                EndReason::FailedToCreatePeerConnectionFactory,
+                            );
+                            return Err(err);
                         }
-                    }
+                    },
                     Some(v) => v,
                 };
                 let certificate = Certificate::generate().map_err(|e| {
@@ -938,7 +922,8 @@ impl Client {
         if let Some(next_membership_proof_request_time) = state.next_membership_proof_request_time {
             if now >= next_membership_proof_request_time {
                 state.observer.request_membership_proof(state.client_id);
-                state.next_membership_proof_request_time = Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+                state.next_membership_proof_request_time =
+                    Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
             }
         }
 
@@ -947,9 +932,7 @@ impl Client {
 
         state
             .actor
-            .send_delayed(TICK_INTERVAL, move |state| {
-                Self::tick(state)
-            });
+            .send_delayed(TICK_INTERVAL, move |state| Self::tick(state));
     }
 
     fn request_remote_devices_as_soon_as_possible(state: &mut State) {
@@ -1002,7 +985,7 @@ impl Client {
             }));
             state.remote_devices_request_state = RemoteDevicesRequestState::Requested {
                 should_request_again: false,
-                at:                   Instant::now(),
+                at: Instant::now(),
             };
         } else if rerequest_if_pending {
             // We've already requested, so just wait until the next update and then request again.
@@ -1048,7 +1031,8 @@ impl Client {
 
                     // Request group membership refresh as we start polling the participant list.
                     state.observer.request_membership_proof(state.client_id);
-                    state.next_membership_proof_request_time = Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+                    state.next_membership_proof_request_time =
+                        Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
 
                     // Request the list of all group members
                     state.observer.request_group_members(state.client_id);
@@ -1162,8 +1146,8 @@ impl Client {
                 let accept_message = protobuf::signaling::CallMessage {
                     ring_response: Some(protobuf::signaling::call_message::RingResponse {
                         group_id: Some(state.group_id.clone()),
-                        ring_id:  Some(ring_id.into()),
-                        r#type:   Some(
+                        ring_id: Some(ring_id.into()),
+                        r#type: Some(
                             protobuf::signaling::call_message::ring_response::Type::Accepted.into(),
                         ),
                     }),
@@ -1249,27 +1233,26 @@ impl Client {
     pub fn ring(&self, recipient: Option<UserId>) {
         debug!(
             "group_call::Client(outer)::ring(client_id: {}, recipient: {:?})",
-            self.client_id,
-            recipient,
+            self.client_id, recipient,
         );
         self.actor.send(move |state| {
             debug!(
                 "group_call::Client(inner)::ring(client_id: {}, recipient: {:?})",
-                state.client_id,
-                recipient
+                state.client_id, recipient
             );
 
             // All ring IDs are possible except "0".
             let ring_id = RingId::from(
                 rand::rngs::OsRng
                     .gen_range(i64::MIN, i64::MAX)
-                    .wrapping_sub(i64::MAX));
+                    .wrapping_sub(i64::MAX),
+            );
             let message = protobuf::signaling::CallMessage {
                 ring_intention: Some(protobuf::signaling::call_message::RingIntention {
                     group_id: Some(state.group_id.clone()),
-                    ring_id:  Some(ring_id.into()),
-                    r#type:   Some(
-                        protobuf::signaling::call_message::ring_intention::Type::Ring.into()
+                    ring_id: Some(ring_id.into()),
+                    r#type: Some(
+                        protobuf::signaling::call_message::ring_intention::Type::Ring.into(),
                     ),
                 }),
                 ..Default::default()
@@ -1453,10 +1436,14 @@ impl Client {
     fn set_send_rates_inner(state: &mut State, send_rates: SendRates) {
         if state.send_rates != send_rates {
             if send_rates.max == Some(DataRate::from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS)) {
-                info!("Disabling outgoing media because there are no other devices.");
+                info!(
+                    "Disable audio render and outgoing media because there are no other devices."
+                );
+                state.peer_connection.set_audio_playout_enabled(false);
                 state.peer_connection.set_outgoing_media_enabled(false);
             } else {
-                info!("Enabling outgoing media because there are other devices.");
+                info!("Enable audio render and outgoing media because there are other devices.");
+                state.peer_connection.set_audio_playout_enabled(true);
                 state.peer_connection.set_outgoing_media_enabled(true);
             }
             if let Err(e) = state.peer_connection.set_send_rates(send_rates.clone()) {
@@ -1491,8 +1478,7 @@ impl Client {
     fn send_video_requests_to_sfu(state: &mut State) {
         use protobuf::group_call::{
             device_to_sfu::{
-                video_request_message::VideoRequest as VideoRequestProto,
-                VideoRequestMessage,
+                video_request_message::VideoRequest as VideoRequestProto, VideoRequestMessage,
             },
             DeviceToSfu,
         };
@@ -1513,7 +1499,7 @@ impl Client {
                                 // will request in terms of rotated video.  We assume that all video is sent over the
                                 // wire in landscape format with rotation metadata.
                                 // If it's not, we'll have a problem.
-                                height:          Some(min(request.height, request.width) as u32),
+                                height: Some(min(request.height, request.width) as u32),
                             }
                         })
                 })
@@ -1689,8 +1675,7 @@ impl Client {
                         // We just now appeared in the participants list, and possibly even updated
                         // the eraId.
                         Self::request_remote_devices_as_soon_as_possible(state);
-                        state.next_stats_time =
-                            Some(Instant::now() + STATS_INTERVAL);
+                        state.next_stats_time = Some(Instant::now() + STATS_INTERVAL);
                     }
                     JoinState::Joined(_, _) => {
                         warn!("The SFU completed joining more than once.");
@@ -1852,8 +1837,7 @@ impl Client {
         state.remote_devices_request_state =
             RemoteDevicesRequestState::Updated { at: Instant::now() };
 
-        let old_user_ids: HashSet<UserId> =
-            std::mem::take(&mut state.joined_members);
+        let old_user_ids: HashSet<UserId> = std::mem::take(&mut state.joined_members);
         let new_user_ids: HashSet<UserId> = peek_info
             .devices
             .iter()
@@ -1959,9 +1943,11 @@ impl Client {
             // handle_remote_devices_changed to ensure the observer can tell the difference
             // between "we know we have no remote devices" and "we don't know what we have yet".
             if demux_ids_changed || is_first_update {
-                state
-                    .observer
-                    .handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::DemuxIdsChanged);
+                state.observer.handle_remote_devices_changed(
+                    state.client_id,
+                    &state.remote_devices,
+                    RemoteDevicesChangedReason::DemuxIdsChanged,
+                );
             }
 
             if new_user_ids != old_user_ids {
@@ -2003,8 +1989,7 @@ impl Client {
 
             // We can't gate this behind the demux IDs changing because a forged demux ID might
             // be in there already when the non-forged one comes in.
-            let pending_receive_keys =
-                std::mem::take(&mut state.pending_media_receive_keys);
+            let pending_receive_keys = std::mem::take(&mut state.pending_media_receive_keys);
             for (user_id, demux_id, ratchet_counter, secret) in pending_receive_keys {
                 // If we the key is still pending, we'll just put this back into state.pending_media_receive_keys.
                 Self::add_media_receive_key_or_store_for_later(
@@ -2056,9 +2041,9 @@ impl Client {
             },
             // Use a higher bitrate for screen sharing
             (_, true) => SendRates {
-                min:   from_kbps(2000),
+                min: from_kbps(2000),
                 start: from_kbps(2000),
-                max:   from_kbps(5000),
+                max: from_kbps(5000),
             },
             // Send between 500kbps and 1Mbps depending on how many other devices there are.
             // The more there are, the less we will send.
@@ -2148,24 +2133,31 @@ impl Client {
                     secret,
                     needs_another_rotation: false,
                 };
-                state
-                    .actor
-                    .send_delayed(Duration::from_secs(MEDIA_SEND_KEY_ROTATION_DELAY_SECS), move |state| {
+                state.actor.send_delayed(
+                    Duration::from_secs(MEDIA_SEND_KEY_ROTATION_DELAY_SECS),
+                    move |state| {
                         info!("Applying the new send key. client_id: {}", state.client_id);
                         {
-                            let mut frame_crypto_context = state
-                                .frame_crypto_context
-                                .lock()
-                                .expect("Get lock for frame encryption context to reset media send key");
+                            let mut frame_crypto_context =
+                                state.frame_crypto_context.lock().expect(
+                                    "Get lock for frame encryption context to reset media send key",
+                                );
                             frame_crypto_context.reset_send_ratchet(secret);
                         }
 
-                        let needs_another_rotation = matches!(state.media_send_key_rotation_state, KeyRotationState::Pending{needs_another_rotation: true, ..});
+                        let needs_another_rotation = matches!(
+                            state.media_send_key_rotation_state,
+                            KeyRotationState::Pending {
+                                needs_another_rotation: true,
+                                ..
+                            }
+                        );
                         state.media_send_key_rotation_state = KeyRotationState::Applied;
                         if needs_another_rotation {
                             Self::rotate_media_send_key_and_send_to_users_not_removed(state);
                         }
-                    })
+                    },
+                )
             }
         }
     }
@@ -2210,10 +2202,7 @@ impl Client {
         ratchet_counter: frame_crypto::RatchetCounter,
         secret: frame_crypto::Secret,
     ) {
-        if let Some(device) = state
-            .remote_devices
-            .find_by_demux_id_mut(demux_id)
-        {
+        if let Some(device) = state.remote_devices.find_by_demux_id_mut(demux_id) {
             if device.user_id == user_id {
                 info!(
                     "Adding media receive key from {}. client_id: {}",
@@ -2226,9 +2215,11 @@ impl Client {
                 frame_crypto_context.add_receive_secret(demux_id, ratchet_counter, secret);
                 let had_media_keys = std::mem::replace(&mut device.media_keys_received, true);
                 if !had_media_keys {
-                    state
-                        .observer
-                        .handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::MediaKeyReceived(demux_id))
+                    state.observer.handle_remote_devices_changed(
+                        state.client_id,
+                        &state.remote_devices,
+                        RemoteDevicesChangedReason::MediaKeyReceived(demux_id),
+                    )
                 }
             } else {
                 warn!("Ignoring received media key from user because the demux ID {} doesn't make sense", demux_id);
@@ -2256,9 +2247,9 @@ impl Client {
         debug!("  recipient_id: {}", uuid_to_string(&recipient_id));
 
         let media_key = protobuf::group_call::device_to_device::MediaKey {
-            demux_id:        Some(local_demux_id),
+            demux_id: Some(local_demux_id),
             ratchet_counter: Some(ratchet_counter as u32),
-            secret:          Some(secret.to_vec()),
+            secret: Some(secret.to_vec()),
         };
         let message = protobuf::group_call::DeviceToDevice {
             group_id: Some(state.group_id.clone()),
@@ -2273,7 +2264,7 @@ impl Client {
         state.observer.send_signaling_message(
             recipient_id,
             call_message,
-            SignalingMessageUrgency::Droppable
+            SignalingMessageUrgency::Droppable,
         );
     }
 
@@ -2485,9 +2476,9 @@ impl Client {
             protobuf::group_call::DeviceToDevice {
                 heartbeat: {
                     Some(protobuf::group_call::device_to_device::Heartbeat {
-                        audio_muted:    state.outgoing_heartbeat_state.audio_muted,
-                        video_muted:    state.outgoing_heartbeat_state.video_muted,
-                        presenting:     state.outgoing_heartbeat_state.presenting,
+                        audio_muted: state.outgoing_heartbeat_state.audio_muted,
+                        video_muted: state.outgoing_heartbeat_state.video_muted,
+                        presenting: state.outgoing_heartbeat_state.presenting,
                         sharing_screen: state.outgoing_heartbeat_state.sharing_screen,
                     })
                 },
@@ -2552,9 +2543,9 @@ impl Client {
             let message = protobuf::signaling::CallMessage {
                 ring_intention: Some(protobuf::signaling::call_message::RingIntention {
                     group_id: Some(state.group_id.clone()),
-                    ring_id:  Some(ring_id.into()),
-                    r#type:   Some(
-                        protobuf::signaling::call_message::ring_intention::Type::Cancelled.into()
+                    ring_id: Some(ring_id.into()),
+                    r#type: Some(
+                        protobuf::signaling::call_message::ring_intention::Type::Cancelled.into(),
                     ),
                 }),
                 ..Default::default()
@@ -2580,10 +2571,10 @@ impl Client {
                 state.rtp_data_through_sfu_next_seqnum.wrapping_add(1);
 
             let header = rtp::Header {
-                pt:        RTP_DATA_PAYLOAD_TYPE,
-                ssrc:      local_demux_id.saturating_add(RTP_DATA_THROUGH_SFU_SSRC_OFFSET),
+                pt: RTP_DATA_PAYLOAD_TYPE,
+                ssrc: local_demux_id.saturating_add(RTP_DATA_THROUGH_SFU_SSRC_OFFSET),
                 // This has to be incremented to make sure SRTP functions properly.
-                seqnum:    seqnum as u16,
+                seqnum: seqnum as u16,
                 // Just imagine the clock is the number of heartbeat ticks :).
                 // Plus the above sequence number is too small to be useful.
                 timestamp: seqnum,
@@ -2603,10 +2594,10 @@ impl Client {
             state.rtp_data_to_sfu_next_seqnum = state.rtp_data_to_sfu_next_seqnum.wrapping_add(1);
 
             let header = rtp::Header {
-                pt:        RTP_DATA_PAYLOAD_TYPE,
-                ssrc:      RTP_DATA_TO_SFU_SSRC,
+                pt: RTP_DATA_PAYLOAD_TYPE,
+                ssrc: RTP_DATA_TO_SFU_SSRC,
                 // This has to be incremented to make sure SRTP functions properly.
-                seqnum:    seqnum as u16,
+                seqnum: seqnum as u16,
                 // Just imagine the clock is the number of messages :),
                 // Plus the above sequence number is too small to be useful.
                 timestamp: seqnum,
@@ -2618,9 +2609,8 @@ impl Client {
 
     fn handle_rtp_received(&self, header: rtp::Header, payload: &[u8]) {
         use protobuf::group_call::{
-            sfu_to_device::{DeviceJoinedOrLeft, Speaker, ForwardingVideo},
-            DeviceToDevice,
-            SfuToDevice,
+            sfu_to_device::{DeviceJoinedOrLeft, ForwardingVideo, Speaker},
+            DeviceToDevice, SfuToDevice,
         };
 
         if header.pt == RTP_DATA_PAYLOAD_TYPE {
@@ -2709,7 +2699,8 @@ impl Client {
 
             let latest_speaker_demux_id = state.remote_devices.latest_speaker_demux_id();
 
-            if let Some(speaker_device) = state.remote_devices
+            if let Some(speaker_device) = state
+                .remote_devices
                 .find_by_long_device_id_mut(&speaker_long_device_id)
             {
                 if latest_speaker_demux_id == Some(speaker_device.demux_id) {
@@ -2726,9 +2717,11 @@ impl Client {
                     speaker_device.demux_id, speaker_device.speaker_time
                 );
                 let demux_id = speaker_device.demux_id;
-                state
-                    .observer
-                    .handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::SpeakerTimeChanged(demux_id));
+                state.observer.handle_remote_devices_changed(
+                    state.client_id,
+                    &state.remote_devices,
+                    RemoteDevicesChangedReason::SpeakerTimeChanged(demux_id),
+                );
             } else {
                 debug!(
                     "Ignoring speaker change because it isn't a known remote devices: {}",
@@ -2752,10 +2745,15 @@ impl Client {
             if state.forwarding_video_demux_ids != forwarding_video_demux_ids {
                 info!("SFU notified that the set of forwardinge videos has changed");
                 for remote_device in state.remote_devices.iter_mut() {
-                    remote_device.forwarding_video = Some(forwarding_video_demux_ids.contains(&remote_device.demux_id));
+                    remote_device.forwarding_video =
+                        Some(forwarding_video_demux_ids.contains(&remote_device.demux_id));
                 }
                 state.forwarding_video_demux_ids = forwarding_video_demux_ids;
-                state.observer.handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::ForwardeVideosChanged)
+                state.observer.handle_remote_devices_changed(
+                    state.client_id,
+                    &state.remote_devices,
+                    RemoteDevicesChangedReason::ForwardeVideosChanged,
+                )
             }
         })
     }
@@ -2767,10 +2765,7 @@ impl Client {
         heartbeat: protobuf::group_call::device_to_device::Heartbeat,
     ) {
         self.actor.send(move |state| {
-            if let Some(remote_device) = state
-                .remote_devices
-                .find_by_demux_id_mut(demux_id)
-            {
+            if let Some(remote_device) = state.remote_devices.find_by_demux_id_mut(demux_id) {
                 if timestamp > remote_device.heartbeat_rtp_timestamp.unwrap_or(0) {
                     // Record this even if nothing changed.  Otherwise an old packet could override
                     // a new packet.
@@ -2778,9 +2773,11 @@ impl Client {
                     let heartbeat_state = HeartbeatState::from(heartbeat);
                     if remote_device.heartbeat_state != heartbeat_state {
                         remote_device.heartbeat_state = heartbeat_state;
-                        state
-                            .observer
-                            .handle_remote_devices_changed(state.client_id, &state.remote_devices, RemoteDevicesChangedReason::HeartbeatStateChanged(demux_id));
+                        state.observer.handle_remote_devices_changed(
+                            state.client_id,
+                            &state.remote_devices,
+                            RemoteDevicesChangedReason::HeartbeatStateChanged(demux_id),
+                        );
                     }
                 }
             } else {
@@ -2798,10 +2795,7 @@ impl Client {
             "Request devices because we just received a leaving message from demux_id = {}",
             demux_id
         );
-        if let Some(device) = state
-            .remote_devices
-            .find_by_demux_id_mut(demux_id)
-        {
+        if let Some(device) = state.remote_devices.find_by_demux_id_mut(demux_id) {
             if !device.leaving_received {
                 device.leaving_received = true;
                 Self::request_remote_devices_as_soon_as_possible(state);
@@ -2879,10 +2873,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
         Ok(())
     }
 
-    fn handle_ice_candidates_removed(
-        &mut self,
-        _removed_addresses: Vec<SocketAddr>,
-    ) -> Result<()> {
+    fn handle_ice_candidates_removed(&mut self, _removed_addresses: Vec<SocketAddr>) -> Result<()> {
         Ok(())
     }
 
@@ -3073,7 +3064,7 @@ fn random_alphanumeric(len: usize) -> String {
 
 // Should this go in some util class?
 struct Writer<'buf> {
-    buf:    &'buf mut [u8],
+    buf: &'buf mut [u8],
     offset: usize,
 }
 
@@ -3160,11 +3151,8 @@ impl<'data> Reader<'data> {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
         atomic::{self, AtomicU64},
-        Condvar,
-        mpsc,
-        Mutex,
+        mpsc, Arc, Condvar, Mutex,
     };
 
     use crate::webrtc::sim::media::FAKE_AUDIO_TRACK;
@@ -3174,9 +3162,9 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeSfuClient {
-        sfu_info:       SfuInfo,
+        sfu_info: SfuInfo,
         local_demux_id: DemuxId,
-        request_count:  Arc<AtomicU64>,
+        request_count: Arc<AtomicU64>,
     }
 
     impl FakeSfuClient {
@@ -3220,14 +3208,14 @@ mod tests {
     // TODO: Put this in common util area?
     #[derive(Clone)]
     struct Waitable<T> {
-        val:  Arc<Mutex<Option<T>>>,
+        val: Arc<Mutex<Option<T>>>,
         cvar: Arc<Condvar>,
     }
 
     impl<T> Default for Waitable<T> {
         fn default() -> Self {
             Self {
-                val:  Arc::default(),
+                val: Arc::default(),
                 cvar: Arc::default(),
             }
         }
@@ -3267,29 +3255,30 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeObserverPeekState {
         joined_members: Vec<UserId>,
-        creator:        Option<UserId>,
-        era_id:         Option<String>,
-        max_devices:    Option<u32>,
-        device_count:   u32,
+        creator: Option<UserId>,
+        era_id: Option<String>,
+        max_devices: Option<u32>,
+        device_count: u32,
     }
 
     #[derive(Clone)]
+    #[allow(dead_code)] // Ignore clippy warning for era_id due to compile error.
     struct FakeObserver {
         // For sending messages
-        user_id:                       UserId,
-        recipients:                    Arc<CallMutex<Vec<TestClient>>>,
-        outgoing_signaling_blocked:    Arc<CallMutex<bool>>,
+        user_id: UserId,
+        recipients: Arc<CallMutex<Vec<TestClient>>>,
+        outgoing_signaling_blocked: Arc<CallMutex<bool>>,
         sent_group_signaling_messages: Arc<CallMutex<Vec<protobuf::signaling::CallMessage>>>,
 
-        joined:                      Event,
-        remote_devices:              Arc<CallMutex<Vec<RemoteDeviceState>>>,
+        joined: Event,
+        remote_devices: Arc<CallMutex<Vec<RemoteDeviceState>>>,
         remote_devices_at_join_time: Arc<CallMutex<Vec<RemoteDeviceState>>>,
-        peek_state:                  Arc<CallMutex<FakeObserverPeekState>>,
-        send_rates:                  Arc<CallMutex<Option<SendRates>>>,
-        ended:                       Waitable<EndReason>,
-        era_id:                      Option<String>,
+        peek_state: Arc<CallMutex<FakeObserverPeekState>>,
+        send_rates: Arc<CallMutex<Option<SendRates>>>,
+        ended: Waitable<EndReason>,
+        era_id: Option<String>,
 
-        request_membership_proof_invocation_count:      Arc<AtomicU64>,
+        request_membership_proof_invocation_count: Arc<AtomicU64>,
         handle_remote_devices_changed_invocation_count: Arc<AtomicU64>,
     }
 
@@ -3366,7 +3355,7 @@ mod tests {
 
         fn joined_members(&self) -> Vec<UserId> {
             let peek_state = self.peek_state.lock().expect("Lock peek state to read it");
-            peek_state.joined_members.iter().cloned().collect()
+            peek_state.joined_members.to_vec()
         }
 
         fn peek_state(&self) -> FakeObserverPeekState {
@@ -3381,18 +3370,21 @@ mod tests {
 
         /// Gets the number of `request_membership_proof` since last checked.
         fn request_membership_proof_invocation_count(&self) -> u64 {
-            self.request_membership_proof_invocation_count.swap(0, Ordering::Relaxed)
+            self.request_membership_proof_invocation_count
+                .swap(0, Ordering::Relaxed)
         }
 
         /// Gets the number of `handle_remote_devices_changed` since last checked.
         fn handle_remote_devices_changed_invocation_count(&self) -> u64 {
-            self.handle_remote_devices_changed_invocation_count.swap(0, Ordering::Relaxed)
+            self.handle_remote_devices_changed_invocation_count
+                .swap(0, Ordering::Relaxed)
         }
     }
 
     impl Observer for FakeObserver {
         fn request_membership_proof(&self, _client_id: ClientId) {
-            self.request_membership_proof_invocation_count.fetch_add(1, Ordering::Relaxed);
+            self.request_membership_proof_invocation_count
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         fn request_group_members(&self, _client_id: ClientId) {}
@@ -3427,8 +3419,9 @@ mod tests {
                 .remote_devices
                 .lock()
                 .expect("Lock recipients to set remote devices");
-            *owned_remote_devices = remote_devices.iter().cloned().collect();
-            self.handle_remote_devices_changed_invocation_count.fetch_add(1, Ordering::Relaxed);
+            *owned_remote_devices = remote_devices.to_vec();
+            self.handle_remote_devices_changed_invocation_count
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         fn handle_peek_changed(
@@ -3444,8 +3437,8 @@ mod tests {
                 .peek_state
                 .lock()
                 .expect("Lock peek state to handle update");
-            owned_state.joined_members = joined_members.iter().cloned().collect();
-            owned_state.creator = creator.clone();
+            owned_state.joined_members = joined_members.to_vec();
+            owned_state.creator = creator;
             owned_state.era_id = era_id.map(String::from);
             owned_state.max_devices = max_devices;
             owned_state.device_count = device_count;
@@ -3512,7 +3505,10 @@ mod tests {
                 );
                 return;
             }
-            self.sent_group_signaling_messages.lock().expect("adding message").push(call_message);
+            self.sent_group_signaling_messages
+                .lock()
+                .expect("adding message")
+                .push(call_message);
             info!("Recorded group-wide call message from {:?}", self.user_id);
         }
         fn handle_incoming_video_track(
@@ -3529,13 +3525,13 @@ mod tests {
 
     #[derive(Clone)]
     struct TestClient {
-        user_id:               UserId,
-        demux_id:              DemuxId,
-        sfu_client:            FakeSfuClient,
-        observer:              FakeObserver,
-        client:                Client,
+        user_id: UserId,
+        demux_id: DemuxId,
+        sfu_client: FakeSfuClient,
+        observer: FakeObserver,
+        client: Client,
         sfu_rtp_packet_sender: Option<mpsc::Sender<(rtp::Header, Vec<u8>)>>,
-        default_peek_info:     PeekInfo,
+        default_peek_info: PeekInfo,
     }
 
     // Just so it's something different
@@ -3545,16 +3541,16 @@ mod tests {
 
     // Just so it's something different
     fn demux_id_to_long_device_id(demux_id: DemuxId) -> String {
-        format!("long-{}", demux_id).to_string()
+        format!("long-{}", demux_id)
     }
 
     impl TestClient {
         fn new(user_id: UserId, demux_id: DemuxId, forged_demux_id: Option<DemuxId>) -> Self {
             let sfu_client = FakeSfuClient::new(
                 SfuInfo {
-                    udp_addresses:    Vec::new(),
-                    ice_ufrag:        "fake ICE ufrag".to_string(),
-                    ice_pwd:          "fake ICE pwd".to_string(),
+                    udp_addresses: Vec::new(),
+                    ice_ufrag: "fake ICE ufrag".to_string(),
+                    ice_pwd: "fake ICE pwd".to_string(),
                     dtls_fingerprint: DtlsFingerprint::default(),
                 },
                 forged_demux_id.unwrap_or(demux_id),
@@ -3597,14 +3593,14 @@ mod tests {
             let remote_devices = clients
                 .iter()
                 .map(|client| PeekDeviceInfo {
-                    demux_id:        client.demux_id,
-                    user_id:         Some(client.user_id.clone()),
+                    demux_id: client.demux_id,
+                    user_id: Some(client.user_id.clone()),
                     short_device_id: demux_id_to_short_device_id(client.demux_id),
-                    long_device_id:  demux_id_to_long_device_id(client.demux_id),
+                    long_device_id: demux_id_to_long_device_id(client.demux_id),
                 })
                 .collect();
             // Need to clone to pass over to the actor and set in observer.
-            let clients: Vec<TestClient> = clients.into_iter().copied().cloned().collect();
+            let clients: Vec<TestClient> = clients.iter().copied().cloned().collect();
             self.observer.set_recipients(clients.clone());
             let peek_info = PeekInfo {
                 devices: remote_devices,
@@ -3657,7 +3653,7 @@ mod tests {
             assert_eq!(
                 ciphertext.len(),
                 self.client
-                    .encrypt_media(is_audio, &plaintext, &mut ciphertext)?
+                    .encrypt_media(is_audio, plaintext, &mut ciphertext)?
             );
             Ok(ciphertext)
         }
@@ -3680,12 +3676,8 @@ mod tests {
             );
             assert_eq!(
                 plaintext.len(),
-                self.client.decrypt_media(
-                    remote_demux_id,
-                    is_audio,
-                    &ciphertext,
-                    &mut plaintext
-                )?
+                self.client
+                    .decrypt_media(remote_demux_id, is_audio, ciphertext, &mut plaintext)?
             );
             Ok(plaintext)
         }
@@ -3698,7 +3690,7 @@ mod tests {
 
         // DemuxIds sorted by speaker_time, then added_time, then demux_id.
         fn speakers(&self) -> Vec<DemuxId> {
-            let mut devices = self.observer.remote_devices().clone();
+            let mut devices = self.observer.remote_devices();
             devices.sort_by_key(|device| {
                 (
                     std::cmp::Reverse(device.speaker_time_as_unix_millis()),
@@ -3997,7 +3989,7 @@ mod tests {
 
         let remote_devices = client2.observer.remote_devices();
         assert_eq!(1, remote_devices.len());
-        assert_eq!(false, remote_devices[0].media_keys_received);
+        assert!(!remote_devices[0].media_keys_received);
 
         let is_audio = false;
         let plaintext = &b"Fake Video is big"[..];
@@ -4014,7 +4006,7 @@ mod tests {
 
         let remote_devices = client2.observer.remote_devices();
         assert_eq!(1, remote_devices.len());
-        assert_eq!(true, remote_devices[0].media_keys_received);
+        assert!(remote_devices[0].media_keys_received);
 
         assert_eq!(
             plaintext,
@@ -4173,23 +4165,23 @@ mod tests {
         assert!(client.observer.remote_devices().is_empty());
 
         let peek_info = PeekInfo {
-            devices:      vec![
+            devices: vec![
                 PeekDeviceInfo {
-                    demux_id:        2,
-                    user_id:         Some(b"2".to_vec()),
+                    demux_id: 2,
+                    user_id: Some(b"2".to_vec()),
                     short_device_id: demux_id_to_short_device_id(2),
-                    long_device_id:  demux_id_to_long_device_id(2),
+                    long_device_id: demux_id_to_long_device_id(2),
                 },
                 PeekDeviceInfo {
-                    demux_id:        3,
-                    user_id:         None,
+                    demux_id: 3,
+                    user_id: None,
                     short_device_id: demux_id_to_short_device_id(3),
-                    long_device_id:  demux_id_to_long_device_id(3),
+                    long_device_id: demux_id_to_long_device_id(3),
                 },
             ],
-            creator:      None,
-            era_id:       None,
-            max_devices:  None,
+            creator: None,
+            era_id: None,
+            max_devices: None,
             device_count: 3,
         };
         client.client.set_peek_info(Ok(peek_info));
@@ -4264,7 +4256,7 @@ mod tests {
 
         peeker.set_remotes_and_wait_until_applied(&[&joiner1, &joiner2]);
         assert_eq!(
-            hash_set(&[joiner1.user_id.clone(), joiner2.user_id.clone()]),
+            hash_set(&[joiner1.user_id, joiner2.user_id]),
             hash_set(&peeker.observer.joined_members())
         );
 
@@ -4376,8 +4368,7 @@ mod tests {
     fn request_video() {
         use protobuf::group_call::{
             device_to_sfu::{
-                video_request_message::VideoRequest as VideoRequestProto,
-                VideoRequestMessage,
+                video_request_message::VideoRequest as VideoRequestProto, VideoRequestMessage,
             },
             DeviceToSfu,
         };
@@ -4394,29 +4385,29 @@ mod tests {
 
         let requests = vec![
             VideoRequest {
-                demux_id:  2,
-                width:     1920,
-                height:    1080,
+                demux_id: 2,
+                width: 1920,
+                height: 1080,
                 framerate: None,
             },
             VideoRequest {
-                demux_id:  3,
+                demux_id: 3,
                 // Rotated!
-                width:     80,
-                height:    120,
+                width: 80,
+                height: 120,
                 framerate: Some(5),
             },
             VideoRequest {
-                demux_id:  4,
-                width:     0,
-                height:    0,
+                demux_id: 4,
+                width: 0,
+                height: 0,
                 framerate: None,
             },
             // This should be filtered out
             VideoRequest {
-                demux_id:  5,
-                width:     1000,
-                height:    1000,
+                demux_id: 5,
+                width: 1000,
+                height: 1000,
                 framerate: None,
             },
         ];
@@ -4431,20 +4422,19 @@ mod tests {
                     requests: vec![
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(2)),
-                            height:          Some(1080),
+                            height: Some(1080),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(3)),
-                            height:          Some(80),
+                            height: Some(80),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(4)),
-                            height:          Some(0),
+                            height: Some(0),
                         },
                     ],
-                    max_kbps:  None,
-                }),
-                ..DeviceToSfu::default()
+                    max_kbps: None,
+                })
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4465,7 +4455,7 @@ mod tests {
         client1.client.request_video(requests.clone());
         client1.client.request_video(requests.clone());
         client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
+        client1.client.request_video(requests);
 
         let before = Instant::now();
         let _ = receiver
@@ -4492,20 +4482,19 @@ mod tests {
                     requests: vec![
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(2)),
-                            height:          Some(1080),
+                            height: Some(1080),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(3)),
-                            height:          Some(80),
+                            height: Some(80),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(4)),
-                            height:          Some(0),
+                            height: Some(0),
                         },
                     ],
-                    max_kbps:  Some(1),
-                }),
-                ..DeviceToSfu::default()
+                    max_kbps: Some(1),
+                })
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4521,20 +4510,19 @@ mod tests {
                     requests: vec![
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(2)),
-                            height:          Some(1080),
+                            height: Some(1080),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(3)),
-                            height:          Some(80),
+                            height: Some(80),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(4)),
-                            height:          Some(0),
+                            height: Some(0),
                         },
                     ],
-                    max_kbps:  Some(500),
-                }),
-                ..DeviceToSfu::default()
+                    max_kbps: Some(500),
+                })
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4550,20 +4538,19 @@ mod tests {
                     requests: vec![
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(2)),
-                            height:          Some(1080),
+                            height: Some(1080),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(3)),
-                            height:          Some(80),
+                            height: Some(80),
                         },
                         VideoRequestProto {
                             short_device_id: Some(demux_id_to_short_device_id(4)),
-                            height:          Some(0),
+                            height: Some(0),
                         },
                     ],
-                    max_kbps:  Some(20_000_000),
-                }),
-                ..DeviceToSfu::default()
+                    max_kbps: Some(20_000_000),
+                })
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4583,7 +4570,7 @@ mod tests {
 
         client1.set_remotes_and_wait_until_applied(&[&client2, &client3]);
         assert_eq!(
-            hash_set(vec![client2.user_id.clone(), client3.user_id.clone()]),
+            hash_set(vec![client2.user_id, client3.user_id]),
             hash_set(client1.observer.joined_members())
         );
 
@@ -4631,11 +4618,11 @@ mod tests {
         client1.wait_for_client_to_process();
         let initial_count = client1.sfu_client.request_count();
         let user_a = GroupMemberInfo {
-            user_id:            b"a".to_vec(),
+            user_id: b"a".to_vec(),
             user_id_ciphertext: b"A".to_vec(),
         };
         let user_b = GroupMemberInfo {
-            user_id:            b"b".to_vec(),
+            user_id: b"b".to_vec(),
             user_id_ciphertext: b"B".to_vec(),
         };
         client1.set_remotes_and_wait_until_applied(&[]);
@@ -4651,12 +4638,12 @@ mod tests {
         // Setting the same list again - even in a different order - does not trigger a poll
         client1
             .client
-            .set_group_members(vec![user_b.clone(), user_a.clone()]);
+            .set_group_members(vec![user_b, user_a.clone()]);
         client1.wait_for_client_to_process();
         assert_eq!(initial_count + 1, client1.sfu_client.request_count());
 
         // Setting a different list triggers a poll
-        client1.client.set_group_members(vec![user_a.clone()]);
+        client1.client.set_group_members(vec![user_a]);
         client1.wait_for_client_to_process();
         assert_eq!(initial_count + 2, client1.sfu_client.request_count());
 
@@ -4670,32 +4657,32 @@ mod tests {
         let client1 = TestClient::new(vec![1], 1, None);
         client1.client.connect();
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      vec![PeekDeviceInfo {
-                demux_id:        2,
-                user_id:         None,
+            devices: vec![PeekDeviceInfo {
+                demux_id: 2,
+                user_id: None,
                 short_device_id: demux_id_to_short_device_id(2),
-                long_device_id:  demux_id_to_long_device_id(2),
+                long_device_id: demux_id_to_long_device_id(2),
             }],
             device_count: 1,
-            max_devices:  Some(1),
-            creator:      None,
-            era_id:       None,
+            max_devices: Some(1),
+            creator: None,
+            era_id: None,
         }));
         client1.client.join();
         assert_eq!(EndReason::HasMaxDevices, client1.observer.ended.wait());
 
         let client1 = TestClient::new(vec![1], 1, None);
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      vec![PeekDeviceInfo {
-                demux_id:        2,
-                user_id:         None,
+            devices: vec![PeekDeviceInfo {
+                demux_id: 2,
+                user_id: None,
                 short_device_id: demux_id_to_short_device_id(2),
-                long_device_id:  demux_id_to_long_device_id(2),
+                long_device_id: demux_id_to_long_device_id(2),
             }],
             device_count: 1,
-            max_devices:  Some(2),
-            creator:      None,
-            era_id:       None,
+            max_devices: Some(2),
+            creator: None,
+            era_id: None,
         }));
         client1.connect_join_and_wait_until_joined();
         client1.disconnect_and_wait_until_ended();
@@ -4706,29 +4693,43 @@ mod tests {
     fn membership_proof_requests() {
         let client1 = TestClient::new(vec![1], 1, None);
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      vec![PeekDeviceInfo {
-                demux_id:        2,
-                user_id:         None,
+            devices: vec![PeekDeviceInfo {
+                demux_id: 2,
+                user_id: None,
                 short_device_id: demux_id_to_short_device_id(2),
-                long_device_id:  demux_id_to_long_device_id(2),
+                long_device_id: demux_id_to_long_device_id(2),
             }],
             device_count: 1,
-            max_devices:  Some(2),
-            creator:      None,
-            era_id:       None,
+            max_devices: Some(2),
+            creator: None,
+            era_id: None,
         }));
-        assert_eq!(0, client1.observer.request_membership_proof_invocation_count());
+        assert_eq!(
+            0,
+            client1.observer.request_membership_proof_invocation_count()
+        );
 
         // Expect a request for connect and join.
         client1.connect_join_and_wait_until_joined();
-        assert_eq!(2, client1.observer.request_membership_proof_invocation_count());
+        assert_eq!(
+            2,
+            client1.observer.request_membership_proof_invocation_count()
+        );
 
         // TODO: Make Actors use tokio so we can use fake time
-        std::thread::sleep(std::time::Duration::from_millis(2000) + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
-        assert_eq!(1, client1.observer.request_membership_proof_invocation_count());
+        std::thread::sleep(
+            std::time::Duration::from_millis(2000) + MEMBERSHIP_PROOF_REQUEST_INTERVAL,
+        );
+        assert_eq!(
+            1,
+            client1.observer.request_membership_proof_invocation_count()
+        );
 
         client1.disconnect_and_wait_until_ended();
-        assert_eq!(0, client1.observer.request_membership_proof_invocation_count());
+        assert_eq!(
+            0,
+            client1.observer.request_membership_proof_invocation_count()
+        );
     }
 
     #[test]
@@ -4740,73 +4741,133 @@ mod tests {
         client1.connect_join_and_wait_until_joined();
         client1.set_remotes_and_wait_until_applied(&[&client3, &client4]);
         assert_eq!(vec![3, 4], client1.speakers());
-        assert_eq!(1, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            1,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // New people put at the end regardless of DemuxId
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.set_remotes_and_wait_until_applied(&[&client2, &client4, &client3]);
         assert_eq!(vec![3, 4, 2], client1.speakers());
-        assert_eq!(1, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            1,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Changed
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(1, 4);
         assert_eq!(vec![4, 3, 2], client1.speakers());
-        assert_eq!(1, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            1,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Didn't change
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(2, 4);
         assert_eq!(vec![4, 3, 2], client1.speakers());
-        assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            0,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Changed back
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(3, 3);
         assert_eq!(vec![3, 4, 2], client1.speakers());
-        assert_eq!(1, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            1,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Ignore unknown demux ID
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(4, 5);
         assert_eq!(vec![3, 4, 2], client1.speakers());
-        assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            0,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Didn't change
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(6, 3);
         assert_eq!(vec![3, 4, 2], client1.speakers());
-        assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            0,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Ignore old messages
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(5, 4);
         assert_eq!(vec![3, 4, 2], client1.speakers());
-        assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            0,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Ignore when the local device is the current speaker
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(7, 1);
         assert_eq!(vec![3, 4, 2], client1.speakers());
-        assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            0,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Finally give 2 a chance
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(8, 2);
         assert_eq!(vec![2, 3, 4], client1.speakers());
-        assert_eq!(1, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            1,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Swap only the top two; leave the third alone
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(9, 3);
         assert_eq!(vec![3, 2, 4], client1.speakers());
-        assert_eq!(1, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            1,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         // Unchanged
         std::thread::sleep(std::time::Duration::from_millis(1));
         client1.receive_speaker(10, 3);
         assert_eq!(vec![3, 2, 4], client1.speakers());
-        assert_eq!(0, client1.observer.handle_remote_devices_changed_invocation_count());
+        assert_eq!(
+            0,
+            client1
+                .observer
+                .handle_remote_devices_changed_invocation_count()
+        );
 
         client1.disconnect_and_wait_until_ended();
     }
@@ -4814,7 +4875,12 @@ mod tests {
     #[test]
     fn forwarding_video() {
         let get_forwarding_videos = |client: &TestClient| -> Vec<(DemuxId, Option<bool>)> {
-            client.observer.remote_devices().iter().map(|remote| (remote.demux_id, remote.forwarding_video)).collect()
+            client
+                .observer
+                .remote_devices()
+                .iter()
+                .map(|remote| (remote.demux_id, remote.forwarding_video))
+                .collect()
         };
 
         let client1 = TestClient::new(vec![1], 1, None);
@@ -4823,18 +4889,27 @@ mod tests {
         client1.connect_join_and_wait_until_joined();
         client1.set_remotes_and_wait_until_applied(&[&client2, &client3]);
 
-
         assert_eq!(vec![(2, None), (3, None)], get_forwarding_videos(&client1));
 
-        client1.client.handle_forwarding_video_received([2, 3].iter().copied().collect());
+        client1
+            .client
+            .handle_forwarding_video_received([2, 3].iter().copied().collect());
         client1.wait_for_client_to_process();
 
-        assert_eq!(vec![(2, Some(true)), (3, Some(true))], get_forwarding_videos(&client1));
+        assert_eq!(
+            vec![(2, Some(true)), (3, Some(true))],
+            get_forwarding_videos(&client1)
+        );
 
-        client1.client.handle_forwarding_video_received([2].iter().copied().collect());
+        client1
+            .client
+            .handle_forwarding_video_received([2].iter().copied().collect());
         client1.wait_for_client_to_process();
 
-        assert_eq!(vec![(2, Some(true)), (3, Some(false))], get_forwarding_videos(&client1));
+        assert_eq!(
+            vec![(2, Some(true)), (3, Some(false))],
+            get_forwarding_videos(&client1)
+        );
 
         client1.disconnect_and_wait_until_ended();
     }
@@ -4846,9 +4921,9 @@ mod tests {
         client1.connect_join_and_wait_until_joined();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1)),
+                max: Some(DataRate::from_kbps(1)),
             }),
             client1.observer.send_rates()
         );
@@ -4865,86 +4940,86 @@ mod tests {
             })
             .collect();
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      vec![],
+            devices: vec![],
             device_count: 0,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1)),
+                max: Some(DataRate::from_kbps(1)),
             }),
             client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..1]).to_vec(),
+            devices: (&devices[..1]).to_vec(),
             device_count: 1,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1)),
+                max: Some(DataRate::from_kbps(1)),
             }),
             client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..2]).to_vec(),
+            devices: (&devices[..2]).to_vec(),
             device_count: 1,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1000)),
+                max: Some(DataRate::from_kbps(1000)),
             }),
             client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..5]).to_vec(),
+            devices: (&devices[..5]).to_vec(),
             device_count: 5,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1000)),
+                max: Some(DataRate::from_kbps(1000)),
             }),
             client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..20]).to_vec(),
+            devices: (&devices[..20]).to_vec(),
             device_count: 20,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(500)),
+                max: Some(DataRate::from_kbps(500)),
             }),
             client1.observer.send_rates()
         );
@@ -4953,9 +5028,9 @@ mod tests {
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   Some(DataRate::from_kbps(2000)),
+                min: Some(DataRate::from_kbps(2000)),
                 start: Some(DataRate::from_kbps(2000)),
-                max:   Some(DataRate::from_kbps(5000)),
+                max: Some(DataRate::from_kbps(5000)),
             }),
             client1.observer.send_rates()
         );
@@ -4964,26 +5039,26 @@ mod tests {
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(500)),
+                max: Some(DataRate::from_kbps(500)),
             }),
             client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..0]).to_vec(),
+            devices: (&devices[..0]).to_vec(),
             device_count: 0,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1)),
+                max: Some(DataRate::from_kbps(1)),
             }),
             client1.observer.send_rates()
         );
@@ -4992,26 +5067,26 @@ mod tests {
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   None,
+                min: None,
                 start: None,
-                max:   Some(DataRate::from_kbps(1)),
+                max: Some(DataRate::from_kbps(1)),
             }),
             client1.observer.send_rates()
         );
 
         client1.client.set_peek_info(Ok(PeekInfo {
-            devices:      (&devices[..20]).to_vec(),
+            devices: (&devices[..20]).to_vec(),
             device_count: 20,
-            max_devices:  None,
-            creator:      None,
-            era_id:       None,
+            max_devices: None,
+            creator: None,
+            era_id: None,
         }));
         client1.wait_for_client_to_process();
         assert_eq!(
             Some(SendRates {
-                min:   Some(DataRate::from_kbps(2000)),
+                min: Some(DataRate::from_kbps(2000)),
                 start: Some(DataRate::from_kbps(2000)),
-                max:   Some(DataRate::from_kbps(5000)),
+                max: Some(DataRate::from_kbps(5000)),
             }),
             client1.observer.send_rates()
         );
@@ -5031,7 +5106,7 @@ mod tests {
                 .observer
                 .sent_group_signaling_messages
                 .lock()
-                .expect("finished processing")
+                .expect("finished processing"),
         );
         match &sent_messages[..] {
             [protobuf::signaling::CallMessage {
@@ -5052,7 +5127,10 @@ mod tests {
                 assert_ne!(first_ring_id, second_ring_id, "ring IDs were the same");
             }
             _ => {
-                panic!("group messages not as expected; here's what we got: {:?}", sent_messages);
+                panic!(
+                    "group messages not as expected; here's what we got: {:?}",
+                    sent_messages
+                );
             }
         }
     }
@@ -5068,7 +5146,7 @@ mod tests {
                 .observer
                 .sent_group_signaling_messages
                 .lock()
-                .expect("finished processing")
+                .expect("finished processing"),
         );
         match &sent_messages[..] {
             [protobuf::signaling::CallMessage {
@@ -5089,7 +5167,10 @@ mod tests {
                 assert_eq!(ring.ring_id, cancel.ring_id, "ring IDs should be the same");
             }
             _ => {
-                panic!("group messages not as expected; here's what we got: {:#?}", sent_messages);
+                panic!(
+                    "group messages not as expected; here's what we got: {:#?}",
+                    sent_messages
+                );
             }
         }
     }
@@ -5110,7 +5191,7 @@ mod tests {
                 .observer
                 .sent_group_signaling_messages
                 .lock()
-                .expect("finished processing")
+                .expect("finished processing"),
         );
         match &sent_messages[..] {
             [protobuf::signaling::CallMessage {
@@ -5123,7 +5204,10 @@ mod tests {
                 );
             }
             _ => {
-                panic!("group messages not as expected; here's what we got: {:#?}", sent_messages);
+                panic!(
+                    "group messages not as expected; here's what we got: {:#?}",
+                    sent_messages
+                );
             }
         }
     }
@@ -5144,7 +5228,7 @@ mod tests {
                 .observer
                 .sent_group_signaling_messages
                 .lock()
-                .expect("finished processing")
+                .expect("finished processing"),
         );
         match &sent_messages[..] {
             [protobuf::signaling::CallMessage {
@@ -5157,7 +5241,10 @@ mod tests {
                 );
             }
             _ => {
-                panic!("group messages not as expected; here's what we got: {:#?}", sent_messages);
+                panic!(
+                    "group messages not as expected; here's what we got: {:#?}",
+                    sent_messages
+                );
             }
         }
     }
@@ -5179,7 +5266,7 @@ mod tests {
                 .observer
                 .sent_group_signaling_messages
                 .lock()
-                .expect("finished processing")
+                .expect("finished processing"),
         );
         match &sent_messages[..] {
             [protobuf::signaling::CallMessage {
@@ -5200,7 +5287,10 @@ mod tests {
                 assert_eq!(ring.ring_id, cancel.ring_id, "ring IDs should be the same");
             }
             _ => {
-                panic!("group messages not as expected; here's what we got: {:#?}", sent_messages);
+                panic!(
+                    "group messages not as expected; here's what we got: {:#?}",
+                    sent_messages
+                );
             }
         }
     }
@@ -5220,7 +5310,7 @@ mod tests {
                 .observer
                 .sent_group_signaling_messages
                 .lock()
-                .expect("finished processing")
+                .expect("finished processing"),
         );
         match &sent_messages[..] {
             [protobuf::signaling::CallMessage {
@@ -5241,7 +5331,10 @@ mod tests {
                 assert_eq!(ring.ring_id, cancel.ring_id, "ring IDs should be the same");
             }
             _ => {
-                panic!("group messages not as expected; here's what we got: {:#?}", sent_messages);
+                panic!(
+                    "group messages not as expected; here's what we got: {:#?}",
+                    sent_messages
+                );
             }
         }
     }
@@ -5292,7 +5385,10 @@ mod remote_devices_tests {
         let device_2 = remote_device_state(2, None);
         let device_3 = remote_device_state(3, None);
         let remote_devices = RemoteDevices::from_iter(vec![device_1, device_2.clone(), device_3]);
-        assert_eq!(Some(&device_2), remote_devices.find_by_demux_id(device_2.demux_id));
+        assert_eq!(
+            Some(&device_2),
+            remote_devices.find_by_demux_id(device_2.demux_id)
+        );
     }
 
     #[test]
@@ -5313,9 +5409,13 @@ mod remote_devices_tests {
         let device_3 = remote_device_state(3, None);
         let device_2_demux_id = device_2.demux_id;
         let mut remote_devices = RemoteDevices::from_iter(vec![device_1, device_2, device_3]);
-        let device_state = remote_devices.find_by_demux_id_mut(device_2_demux_id).unwrap();
+        let device_state = remote_devices
+            .find_by_demux_id_mut(device_2_demux_id)
+            .unwrap();
         device_state.speaker_time = Some(time(300));
-        let device_state = remote_devices.find_by_demux_id_mut(device_2_demux_id).unwrap();
+        let device_state = remote_devices
+            .find_by_demux_id_mut(device_2_demux_id)
+            .unwrap();
         assert_eq!(Some(time(300)), device_state.speaker_time);
     }
 
@@ -5337,9 +5437,13 @@ mod remote_devices_tests {
         let device_3 = remote_device_state(3, None);
         let device_2_long_id = device_2.long_device_id.clone();
         let mut remote_devices = RemoteDevices::from_iter(vec![device_1, device_2, device_3]);
-        let device_state = remote_devices.find_by_long_device_id_mut(&device_2_long_id).unwrap();
+        let device_state = remote_devices
+            .find_by_long_device_id_mut(&device_2_long_id)
+            .unwrap();
         device_state.speaker_time = Some(time(300));
-        let device_state = remote_devices.find_by_long_device_id_mut(&device_2_long_id).unwrap();
+        let device_state = remote_devices
+            .find_by_long_device_id_mut(&device_2_long_id)
+            .unwrap();
         assert_eq!(Some(time(300)), device_state.speaker_time);
     }
 
@@ -5349,14 +5453,17 @@ mod remote_devices_tests {
         let device_2 = remote_device_state(2, None);
         let device_3 = remote_device_state(3, None);
         let remote_devices = RemoteDevices::from_iter(vec![device_1, device_2, device_3]);
-        assert_eq!(vec![1, 2, 3].into_iter().collect::<HashSet<_>>(), remote_devices.demux_id_set());
+        assert_eq!(
+            vec![1, 2, 3].into_iter().collect::<HashSet<_>>(),
+            remote_devices.demux_id_set()
+        );
     }
 
     fn time(timestamp: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp)
     }
 
-    fn remote_device_state(id:u32, spoken_at: Option<SystemTime>) -> RemoteDeviceState {
+    fn remote_device_state(id: u32, spoken_at: Option<SystemTime>) -> RemoteDeviceState {
         let mut remote_device_state = RemoteDeviceState::new(
             id,
             id.to_be_bytes().to_vec(),

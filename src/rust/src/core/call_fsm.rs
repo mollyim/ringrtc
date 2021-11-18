@@ -57,13 +57,7 @@ use futures::{Future, Stream};
 use crate::error::RingRtcError;
 
 use crate::common::{
-    ApplicationEvent,
-    CallDirection,
-    CallId,
-    CallState,
-    DeviceId,
-    FeatureLevel,
-    Result,
+    ApplicationEvent, CallDirection, CallId, CallState, DeviceId, FeatureLevel, Result,
 };
 use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call::{Call, EventStream};
@@ -99,11 +93,11 @@ pub enum CallEvent {
     /// Connection observer event
     ConnectionObserverEvent(ConnectionObserverEvent, DeviceId),
     /// Connection observer error
-    ConnectionObserverError(failure::Error, DeviceId),
+    ConnectionObserverError(anyhow::Error, DeviceId),
 
     // Internally generated events
     /// Notify the call manager of an internal error condition.
-    InternalError(failure::Error),
+    InternalError(anyhow::Error),
     /// The call timed out while establishing a connection.
     CallTimeout,
     /// Synchronize the FSM.
@@ -177,7 +171,7 @@ where
     T: Platform,
 {
     /// Receiving end of EventPump.
-    event_stream:   EventStream<T>,
+    event_stream: EventStream<T>,
     /// Runtime for processing long running requests.
     worker_runtime: Option<TaskQueueRuntime>,
     /// Runtime for processing client application notification events.
@@ -930,7 +924,7 @@ where
                         debug!(
                             "call_id: {} remote_device_id: {} Ignoring network route changed from inactive connection.",
                             call_id, remote_device_id
-                        );    
+                        );
                     }
                 }
                 Ok(())
@@ -938,11 +932,11 @@ where
         }
     }
 
-    fn handle_internal_error(&mut self, call: Call<T>, error: failure::Error) -> Result<()> {
+    fn handle_internal_error(&mut self, call: Call<T>, error: anyhow::Error) -> Result<()> {
         info!("handle_internal_error():");
 
         let internal_error_future =
-            lazy(move |_| call.internal_error(error)).map_err(move |err: failure::Error| {
+            lazy(move |_| call.internal_error(error)).map_err(move |err: anyhow::Error| {
                 error!("Processing internal error future failed: {}", err);
             });
 
@@ -953,7 +947,7 @@ where
     fn handle_connection_observer_error(
         &mut self,
         call: Call<T>,
-        error: failure::Error,
+        error: anyhow::Error,
         remote_device_id: DeviceId,
     ) -> Result<()> {
         info!(
