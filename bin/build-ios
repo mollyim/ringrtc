@@ -26,10 +26,8 @@
 
 set -e
 
-BIN_DIR=$(dirname "$0")
-BIN_DIR=$(realpath -e "${BIN_DIR}")
 # shellcheck source=bin/env.sh
-. "${BIN_DIR}/env.sh"
+. "$(dirname "$0")"/env.sh
 
 usage()
 {
@@ -98,44 +96,17 @@ while [ "$1" != "" ]; do
     shift
 done
 
-webrtc_archs_for_environment() {
-  case $1 in
-    catalyst )
-      echo x64 arm64
+webrtc_arch_for_host_sim() {
+  case $(machine) in
+    x86_64* )
+      echo 'simulator:x64'
       ;;
-    simulator )
-      if [[ -n "${HOST_SIM_ONLY}" ]]; then
-        case $(machine) in
-          x86_64* )
-            echo x64
-            ;;
-          arm64* )
-            echo arm64
-            ;;
-          * )
-            echo 'error: unrecoginzed host architecture ' "$(machine)" >&2
-            exit 1
-            ;;
-        esac
-      else
-        echo arm64 x64
-      fi
-      ;;
-    device )
-      echo arm64
+    arm64* )
+      echo 'simulator:arm64'
       ;;
     * )
-      echo 'error: unknown environment ' "$1" >&2
+      echo 'error: unrecoginzed host architecture ' "$(machine)" >&2
       exit 1
-      ;;
-    esac
-}
-
-webrtc_args_for_environment() {
-  echo "target_environment=\"$1\""
-  case $1 in
-    catalyst )
-      echo 'ios_deployment_target="14"'
       ;;
   esac
 }
@@ -143,29 +114,26 @@ webrtc_args_for_environment() {
 # The WebRTC part of the build resulting in WebRTC.xcframework.
 if [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "webrtc" ]
 then
-  echo "Building WebRTC.xcframework in ${OUTPUT_DIR}/${BUILD_TYPE}..."
+  echo "Building WebRTC.xcframework in ${OUTPUT_DIR}..."
 
   if [[ -n "${HOST_SIM_ONLY}" ]]; then
-    ENVIRONMENTS=simulator
+    ARCHS=$(webrtc_arch_for_host_sim)
   else
-    ENVIRONMENTS="catalyst simulator device"
+    ARCHS=("simulator:x64" "simulator:arm64" "device:arm64" "catalyst:x64" "catalyst:arm64")
   fi
-  XCFRAMEWORK_ARGS=()
+  EXTRA_GN_ARGS="rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_enable_sctp=false rtc_libvpx_build_vp9=false rtc_include_ilbc=false"
 
-  for ENVIRONMENT in ${ENVIRONMENTS}; do
-    # shellcheck disable=SC2046 # word splitting for webrtc_archs_for_environment
-    (cd "${WEBRTC_SRC_DIR}" && ./tools_webrtc/ios/build_ios_libs.py -o "${OUTPUT_DIR}/${BUILD_TYPE}/${ENVIRONMENT}" --build_config ${BUILD_TYPE} --arch $(webrtc_archs_for_environment "${ENVIRONMENT}") --extra-gn-args rtc_enable_sctp=false $(webrtc_args_for_environment "${ENVIRONMENT}"))
-    # Intentionally omit the debug symbols; they're huge.
-    XCFRAMEWORK_ARGS+=(-framework "${BUILD_TYPE}/${ENVIRONMENT}/WebRTC.framework")
-  done
-
-  echo "Making xcframework in ${OUTPUT_DIR}"
-  rm -rf "${OUTPUT_DIR}"/WebRTC.xcframework
-  (cd "${OUTPUT_DIR}" && xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output WebRTC.xcframework)
+  (cd "${WEBRTC_SRC_DIR}" && ./tools_webrtc/ios/build_ios_libs.py -o "${OUTPUT_DIR}/" --build_config ${BUILD_TYPE} --arch "${ARCHS[@]}" --extra-gn-args "${EXTRA_GN_ARGS}")
 
   "${BIN_DIR}/print_build_env.py" \
       --webrtc-version="${WEBRTC_VERSION}" \
       --ringrtc-version="${PROJECT_VERSION}" > "${OUTPUT_DIR}"/WebRTC.xcframework/build_env.txt
+
+  # Delete dSYMs out of the built XCFramework.
+  # FIXME: In the future, we probably want to keep these,
+  # which is why we aren't changing WebRTC's build script to skip them altogether.
+  rm -r "${OUTPUT_DIR}"/WebRTC.xcframework/*/dSYMs
+  plutil -remove AvailableLibraries.DebugSymbolsPath "${OUTPUT_DIR}"/WebRTC.xcframework/Info.plist
 fi
 
 cargo_flags() {

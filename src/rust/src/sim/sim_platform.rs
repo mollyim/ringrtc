@@ -150,16 +150,12 @@ impl Platform for SimPlatform {
             remote_device_id,
             connection_type,
             bandwidth_mode,
+            None,
         )
         .unwrap();
         connection.set_app_connection(fake_pc).unwrap();
 
-        let peer_connection_factory = None;
-        let peer_connection = PeerConnection::new(
-            connection.peer_connection_rffi(),
-            std::ptr::null(),
-            peer_connection_factory,
-        );
+        let peer_connection = PeerConnection::new(connection.peer_connection_rffi(), None, None);
 
         connection.set_peer_connection(peer_connection).unwrap();
 

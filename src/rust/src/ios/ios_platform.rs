@@ -107,22 +107,25 @@ impl Platform for IosPlatform {
             remote_device_id,
             connection_type,
             bandwidth_mode,
+            None, // The app adds sinks to VideoTracks.
         )?;
 
         let connection_ptr = connection.get_connection_ptr()?;
 
         // Get the observer because we will need it when creating the
         // PeerConnection in Swift.
-        let pc_observer =
-            PeerConnectionObserver::new(connection_ptr, false /* enable_frame_encryption */)?;
+        let pc_observer = PeerConnectionObserver::new(
+            connection_ptr,
+            false, /* enable_frame_encryption */
+            false, /* enable_video_frame_event */
+        )?;
 
         let app_connection_interface = (self.app_interface.onCreateConnectionInterface)(
             self.app_interface.object,
-            pc_observer.rffi() as *mut c_void,
+            // This takes an owned pointer.
+            pc_observer.into_rffi().into_owned().as_ptr() as *mut std::ffi::c_void,
             remote_device_id,
             call.call_context()?.object,
-            false, /* always disable DTLS */
-            true,  /* always enable the RTP data channel */
         );
 
         if app_connection_interface.object.is_null() || app_connection_interface.pc.is_null() {
@@ -146,7 +149,7 @@ impl Platform for IosPlatform {
 
         // Note: We have to make sure the PeerConnectionFactory outlives this PC because we're not getting
         // any help from the type system when passing in a None for the PeerConnectionFactory here.
-        let peer_connection = PeerConnection::new(rffi_peer_connection, pc_observer.rffi(), None);
+        let peer_connection = PeerConnection::new(rffi_peer_connection, None, None);
 
         connection.set_peer_connection(peer_connection)?;
 
@@ -464,7 +467,7 @@ impl Platform for IosPlatform {
             self.app_interface.object,
             remote_peer.ptr,
             app_call_context.object,
-            app_media_stream,
+            app_media_stream.as_ptr(),
         );
 
         Ok(())
@@ -655,7 +658,8 @@ impl Platform for IosPlatform {
             self.app_interface.object,
             client_id,
             remote_demux_id,
-            incoming_video_track.rffi() as *mut c_void,
+            // This takes a borrowed RC.
+            incoming_video_track.rffi().as_borrowed().as_ptr() as *mut std::ffi::c_void,
         );
     }
 

@@ -12,13 +12,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 
 use futures::channel::mpsc::{Receiver, Sender};
 use futures::channel::oneshot;
 use futures::future::{self, TryFutureExt};
 
-use bytes::Bytes;
 use prost::Message;
 
 use hkdf::Hkdf;
@@ -40,40 +39,47 @@ use crate::core::util::{ptr_as_box, redact_string, TaskQueueRuntime};
 use crate::error::RingRtcError;
 use crate::protobuf;
 
-use crate::webrtc::data_channel::DataChannel;
+use crate::webrtc;
 use crate::webrtc::ice_gatherer::IceGatherer;
-use crate::webrtc::media::MediaStream;
+use crate::webrtc::media::{MediaStream, VideoFrame, VideoSink};
 use crate::webrtc::peer_connection::{PeerConnection, SendRates};
 use crate::webrtc::peer_connection_observer::{
     IceConnectionState, NetworkRoute, PeerConnectionObserverTrait,
 };
+use crate::webrtc::rtp;
 use crate::webrtc::sdp_observer::{
     create_csd_observer, create_ssd_observer, SessionDescription, SrtpCryptoSuite, SrtpKey,
 };
 use crate::webrtc::stats_observer::{create_stats_observer, StatsObserver};
 
-/// The periodic tick interval. Used to generate stats and to retransmit data channel messages.
+/// The periodic tick interval. Used to generate stats and to retransmit RTP messages.
 pub const TICK_PERIOD_SEC: u64 = 1;
 
 /// The stats period, how often to get and log them. Assumes tick period is 1 second.
 pub const STATS_PERIOD_SEC: u64 = 10;
 
+pub const RTP_DATA_PAYLOAD_TYPE: rtp::PayloadType = 101;
+pub const OLD_RTP_DATA_SSRC_FOR_OUTGOING: rtp::Ssrc = 1001;
+pub const OLD_RTP_DATA_SSRC_FOR_INCOMING: rtp::Ssrc = 2001;
+pub const OLD_RTP_DATA_RESERVED: [u8; 4] = [0, 0, 0, 0];
+pub const NEW_RTP_DATA_SSRC: rtp::Ssrc = 0xD;
+
 /// Connection observer status notification types
 /// Sent from the Connection to the parent Call object
 #[derive(Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConnectionObserverEvent {
-    /// ICE negotiation is complete and a DataChannel is also ready.
+    /// ICE is connected, but the callee has not accepted.
     /// The Call uses this to know when it should transition to the
     /// Ringing state.
-    ConnectedWithDataChannelBeforeAccepted,
+    ConnectedBeforeAccepted,
 
-    /// The remote side sent an accepted message via the data channel.
-    ReceivedAcceptedViaDataChannel,
+    /// The remote side sent an accepted message via RTP data.
+    ReceivedAcceptedViaRtpData,
 
-    /// The remote side sent a sender status message via the data channel.
-    ReceivedSenderStatusViaDataChannel(signaling::SenderStatus),
+    /// The remote side sent a sender status message via RTP data.
+    ReceivedSenderStatusViaRtpData(signaling::SenderStatus),
 
-    /// The remote side sent a hangup message via the data channel
+    /// The remote side sent a hangup message via RTP data
     /// or via signaling.
     ReceivedHangup(signaling::Hangup),
 
@@ -110,10 +116,9 @@ where
 {
     /// PeerConnection object
     peer_connection: Option<PeerConnection>,
-    /// DataChannel object
-    data_channel: Option<DataChannel>,
+    last_sent_rtp_data_timestamp: rtp::Timestamp,
     /// Raw pointer to Connection object for PeerConnectionObserver
-    connection_ptr: Option<*mut Connection<T>>,
+    connection_ptr: Option<webrtc::ptr::Owned<Connection<T>>>,
     /// Application-specific incoming media
     incoming_media: Option<<T as Platform>::AppIncomingMedia>,
     /// Application specific peer connection
@@ -134,8 +139,8 @@ where
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "peer_connection: {:?}, data_channel: {:?}, connection_ptr: {:?}",
-            self.peer_connection, self.data_channel, self.connection_ptr,
+            "peer_connection: {:?}, connection_ptr: {:?}",
+            self.peer_connection, self.connection_ptr,
         )
     }
 }
@@ -159,17 +164,6 @@ where
             None => Err(RingRtcError::OptionValueNotSet(
                 "peer_connection".to_string(),
                 "peer_connection".to_string(),
-            )
-            .into()),
-        }
-    }
-
-    fn data_channel(&self) -> Result<&DataChannel> {
-        match self.data_channel.as_ref() {
-            Some(v) => Ok(v),
-            None => Err(RingRtcError::OptionValueNotSet(
-                "data_channel".to_string(),
-                "data_channel".to_string(),
             )
             .into()),
         }
@@ -343,8 +337,13 @@ where
     connection_type: ConnectionType,
     /// Execution context for the connection periodic timer tick
     tick_context: Arc<CallMutex<TickContext>>,
-    /// The accumulated state of sending messages over the data channel
-    accumulated_dcm_state: Arc<CallMutex<protobuf::data_channel::Data>>,
+    /// The accumulated state of sending messages over RTP data
+    accumulated_rtp_data_message: Arc<CallMutex<protobuf::rtp_data::Message>>,
+    /// We use this to drop out-of-order messages.
+    last_received_rtp_data_timestamp: Arc<CallMutex<rtp::Timestamp>>,
+    // If set, all of the video frames will go here.
+    // This is separate from the observer so it can bypass a thread hop.
+    incoming_video_sink: Option<Box<dyn VideoSink>>,
 }
 
 impl<T> fmt::Display for Connection<T>
@@ -426,7 +425,9 @@ where
             terminate_condvar: Arc::clone(&self.terminate_condvar),
             connection_type: self.connection_type,
             tick_context: Arc::clone(&self.tick_context),
-            accumulated_dcm_state: Arc::clone(&self.accumulated_dcm_state),
+            accumulated_rtp_data_message: Arc::clone(&self.accumulated_rtp_data_message),
+            last_received_rtp_data_timestamp: Arc::clone(&self.last_received_rtp_data_timestamp),
+            incoming_video_sink: self.incoming_video_sink.clone(),
         }
     }
 }
@@ -442,6 +443,7 @@ where
         remote_device: DeviceId,
         connection_type: ConnectionType,
         bandwidth_mode: BandwidthMode,
+        incoming_video_sink: Option<Box<dyn VideoSink>>,
     ) -> Result<Self> {
         // Create a FSM runtime for this connection.
         let context = Context::new()?;
@@ -452,7 +454,7 @@ where
 
         let webrtc = WebRtcData {
             peer_connection: None,
-            data_channel: None,
+            last_sent_rtp_data_timestamp: 0,
             connection_ptr: None,
             incoming_media: None,
             app_connection: None,
@@ -489,10 +491,15 @@ where
             terminate_condvar: Arc::new((Mutex::new(false), Condvar::new())),
             connection_type,
             tick_context: Arc::new(CallMutex::new(TickContext::new(), "tick_context")),
-            accumulated_dcm_state: Arc::new(CallMutex::new(
-                protobuf::data_channel::Data::default(),
-                "accumulated_dcm_state",
+            accumulated_rtp_data_message: Arc::new(CallMutex::new(
+                protobuf::rtp_data::Message::default(),
+                "accumulated_rtp_data_message",
             )),
+            last_received_rtp_data_timestamp: Arc::new(CallMutex::new(
+                0,
+                "last_received_rtp_data_timestamp",
+            )),
+            incoming_video_sink,
         };
 
         connection.init_connection_ptr()?;
@@ -537,10 +544,6 @@ where
             let ice_gatherer = peer_connection.create_shared_ice_gatherer()?;
             peer_connection.use_shared_ice_gatherer(&ice_gatherer)?;
 
-            // We have to create the DataChannel before calling create_offer to make sure the
-            // data channel parameters are correct.  But we don't need to observe it.
-            let _data_channel = peer_connection.create_signaling_data_channel()?;
-
             let observer = create_csd_observer();
             peer_connection.create_offer(observer.as_ref());
             // This must be kept in sync with call.rs where it passes in V2 into create_connection.
@@ -554,7 +557,6 @@ where
 
             // The only purpose of this is to start gathering ICE candidates.
             // But we need to call set_local_description before we munge it.
-            // Otherwise there will be a data channel type mismatch.
             let observer = create_ssd_observer();
             peer_connection.set_local_description(observer.as_ref(), offer);
             observer.get_result()?;
@@ -599,10 +601,6 @@ where
 
             // Don't enable audio playout until the call is accepted.
             peer_connection.set_audio_playout_enabled(false);
-
-            // The caller is responsible for creating the data channel (the callee listens for it).
-            // Both sides will observe it.
-            let data_channel = peer_connection.create_signaling_data_channel()?;
 
             let mut bandwidth_modes = self.bandwidth_modes.lock()?;
 
@@ -649,7 +647,7 @@ where
 
             let observer = create_ssd_observer();
             peer_connection.set_remote_description(observer.as_ref(), answer);
-            // on_data_channel and on_add_stream and on_ice_connected can all happen while
+            // on_add_stream and on_ice_connected can all happen while
             // SetRemoteDescription is happening. But none of those will be processed
             // until start_fsm() is called below.
             observer.get_result()?;
@@ -658,13 +656,15 @@ where
             peer_connection.set_outgoing_media_enabled(false);
             // But do start incoming RTP right away so that we can receive the
             // "accepted" message.
+            // Warning: we're holding the lock to webrtc_data while we
+            // block on the WebRTC network thread, so we need to make
+            // sure we don't grab the webrtc_data lock in
+            // handle_rtp_received.
+            peer_connection.receive_rtp(RTP_DATA_PAYLOAD_TYPE)?;
             peer_connection.set_incoming_media_enabled(true);
 
             self.apply_bandwidth_mode(peer_connection, &bandwidth_mode)?;
 
-            // We have to do this once we're done with peer_connection because
-            // it holds a ref to peer_connection as well.
-            webrtc.data_channel = Some(data_channel);
             self.set_state(ConnectionState::ConnectingBeforeAccepted)?;
             Ok(())
         })();
@@ -745,7 +745,7 @@ where
 
             let observer = create_ssd_observer();
             peer_connection.set_remote_description(observer.as_ref(), offer);
-            // on_data_channel and on_add_stream can happen while SetRemoteDescription
+            // on_add_stream can happen while SetRemoteDescription
             // is happening.  But they won't be processed until start_fsm() is called
             // below.
             observer.get_result()?;
@@ -793,6 +793,14 @@ where
 
             // Don't enable until call is accepted.
             peer_connection.set_outgoing_media_enabled(false);
+
+            // No RTP will be processed/received until
+            // peer_connection.set_incoming_media_enabled(true).
+            // Warning: we're holding the lock to webrtc_data while we
+            // block on the WebRTC network thread, so we need to make
+            // sure we don't grab the webrtc_data lock in
+            // handle_rtp_received.
+            peer_connection.receive_rtp(RTP_DATA_PAYLOAD_TYPE)?;
 
             self.apply_bandwidth_mode(peer_connection, &bandwidth_mode)?;
 
@@ -900,27 +908,10 @@ where
         Ok(())
     }
 
-    /// Return whether the connection has a data channel.
-    pub fn has_data_channel(&self) -> Result<bool> {
-        let webrtc = self.webrtc.lock()?;
-        match webrtc.data_channel {
-            Some(_) => Ok(true),
-            None => Ok(false),
-        }
-    }
-
     /// Return the current local bandwidth mode used for this connection.
     pub fn local_bandwidth_mode(&self) -> Result<BandwidthMode> {
         let bandwidth_modes = self.bandwidth_modes.lock()?;
         Ok(bandwidth_modes.local_bandwidth_mode)
-    }
-
-    /// Update the DataChannel for sending signaling
-    pub fn set_signaling_data_channel(&self, dc: DataChannel) -> Result<()> {
-        let mut webrtc = self.webrtc.lock()?;
-
-        webrtc.data_channel = Some(dc);
-        Ok(())
     }
 
     /// Set the incoming media.
@@ -977,17 +968,17 @@ where
     }
 
     /// Clone the Connection, Box it and return a raw pointer to the Box.
-    pub fn create_connection_ptr(&self) -> *mut Connection<T> {
+    pub fn create_connection_ptr(&self) -> webrtc::ptr::Owned<Connection<T>> {
         let connection_box = Box::new(self.clone());
-        Box::into_raw(connection_box)
+        unsafe { webrtc::ptr::Owned::from_ptr(Box::into_raw(connection_box)) }
     }
 
     /// Return the internally tracked connection object pointer, for
     /// use by the PeerConnectionObserver call backs.
-    pub fn get_connection_ptr(&self) -> Result<*mut Connection<T>> {
+    pub fn get_connection_ptr(&self) -> Result<webrtc::ptr::Borrowed<Connection<T>>> {
         let webrtc = self.webrtc.lock()?;
         match webrtc.connection_ptr.as_ref() {
-            Some(v) => Ok(*v),
+            Some(v) => Ok(v.borrow()),
             None => Err(RingRtcError::OptionValueNotSet(
                 String::from("connection_ptr()"),
                 String::from("connection_ptr"),
@@ -1010,7 +1001,7 @@ where
         Arc::strong_count(&self.webrtc)
     }
 
-    /// The remote user is updating the max_bitrate via the data channel. They are
+    /// The remote user is updating the max_bitrate via RTP data. They are
     /// making the request so only update locally (if changed).
     pub fn set_remote_max_bitrate(&self, remote_max_bitrate: DataRate) -> Result<()> {
         let mut bandwidth_modes = self.bandwidth_modes.lock()?;
@@ -1054,17 +1045,16 @@ where
         // Use the minimum of the local and remote modes.
         let bandwidth_mode = bandwidth_modes.min();
 
-        let webrtc = self.webrtc.lock()?;
+        let mut webrtc = self.webrtc.lock()?;
         self.apply_bandwidth_mode(webrtc.peer_connection()?, &bandwidth_mode)?;
 
-        let mut receiver_status = protobuf::data_channel::ReceiverStatus {
+        let mut receiver_status = protobuf::rtp_data::ReceiverStatus {
             id: Some(u64::from(self.call_id)),
             max_bitrate_bps: Some(bandwidth_modes.local_bandwidth_mode.max_bitrate().as_bps()),
         };
         receiver_status.id = Some(u64::from(self.call_id));
 
-        let data_channel = webrtc.data_channel().ok();
-        self.update_and_send_dcm_state_via_data_channel(data_channel, move |data| {
+        self.update_and_send_rtp_data_message(&mut webrtc, move |data| {
             data.receiver_status = Some(receiver_status)
         })
     }
@@ -1109,10 +1099,9 @@ where
     }
 
     pub fn tick(&mut self, ticks_elapsed: u64) -> Result<()> {
-        let webrtc = self.webrtc.lock()?;
-        let data_channel = webrtc.data_channel().ok();
+        let mut webrtc = self.webrtc.lock()?;
 
-        self.send_latest_dcm_state_via_data_channel(data_channel)?;
+        self.send_latest_rtp_data_message(&mut webrtc)?;
 
         if ticks_elapsed % STATS_PERIOD_SEC == 0 {
             if let Some(observer) = webrtc.stats_observer.as_ref() {
@@ -1228,9 +1217,8 @@ where
         Ok(())
     }
 
-    /// Send a hangup message to the remote peer via the
-    /// PeerConnection DataChannel.
-    pub fn send_hangup_via_data_channel(&self, hangup: signaling::Hangup) -> Result<()> {
+    /// Send a hangup message to the remote peer via RTP data.
+    pub fn send_hangup_via_rtp_data(&self, hangup: signaling::Hangup) -> Result<()> {
         ringbench!(
             RingBench::Conn,
             RingBench::WebRtc,
@@ -1239,35 +1227,30 @@ where
 
         let (hangup_type, hangup_device_id) = hangup.to_type_and_device_id();
 
-        let hangup = protobuf::data_channel::Hangup {
+        let hangup = protobuf::rtp_data::Hangup {
             id: Some(u64::from(self.call_id)),
             r#type: Some(hangup_type as i32),
             device_id: hangup_device_id,
         };
 
-        let webrtc = self.webrtc.lock()?;
-        let data_channel = webrtc.data_channel().ok();
-        self.update_and_send_dcm_state_via_data_channel(data_channel, move |data| {
-            data.hangup = Some(hangup)
-        })
+        let mut webrtc = self.webrtc.lock()?;
+        self.update_and_send_rtp_data_message(&mut webrtc, move |data| data.hangup = Some(hangup))
     }
 
-    /// Send an accepted message to the remote peer via the
-    /// PeerConnection DataChannel.
-    pub fn send_accepted_via_data_channel(&self) -> Result<()> {
+    /// Send an accepted message to the remote peer via RTP data.
+    pub fn send_accepted_via_rtp_data(&self) -> Result<()> {
         ringbench!(
             RingBench::Conn,
             RingBench::WebRtc,
             format!("dc(accepted)\t{}", self.connection_id)
         );
 
-        let accepted = protobuf::data_channel::Accepted {
+        let accepted = protobuf::rtp_data::Accepted {
             id: Some(u64::from(self.call_id)),
         };
 
-        let webrtc = self.webrtc.lock()?;
-        let data_channel = webrtc.data_channel().ok();
-        self.update_and_send_dcm_state_via_data_channel(data_channel, move |data| {
+        let mut webrtc = self.webrtc.lock()?;
+        self.update_and_send_rtp_data_message(&mut webrtc, move |data| {
             data.accepted = Some(accepted)
         })
     }
@@ -1287,18 +1270,16 @@ where
         Ok(())
     }
 
-    /// Send the remote peer the current sender status via the
-    /// PeerConnection DataChannel.
+    /// Send the remote peer the current sender status via RTP data.
     pub fn update_sender_status_from_fsm(&self, updated: signaling::SenderStatus) -> Result<()> {
-        let webrtc = self.webrtc.lock()?;
-        let data_channel = webrtc.data_channel().ok();
-        self.update_and_send_dcm_state_via_data_channel(data_channel, move |data| {
+        let mut webrtc = self.webrtc.lock()?;
+        self.update_and_send_rtp_data_message(&mut webrtc, move |data| {
             let previous = data.sender_status.as_ref();
             let previous_video_enabled =
                 previous.and_then(|sender_status| sender_status.video_enabled);
             let previous_sharing_screen =
                 previous.and_then(|sender_status| sender_status.sharing_screen);
-            data.sender_status = Some(protobuf::data_channel::SenderStatus {
+            data.sender_status = Some(protobuf::rtp_data::SenderStatus {
                 id: Some(u64::from(self.call_id)),
                 video_enabled: updated.video_enabled.or(previous_video_enabled),
                 sharing_screen: updated.sharing_screen.or(previous_sharing_screen),
@@ -1306,58 +1287,79 @@ where
         })
     }
 
-    /// Populates a data channel message using the supplied closure and sends it via the DataChannel.
-    fn update_and_send_dcm_state_via_data_channel<F>(
+    /// Populates a message using the supplied closure and sends it via RTP data.
+    fn update_and_send_rtp_data_message<F>(
         &self,
-        data_channel: Option<&DataChannel>,
+        webrtc_data: &mut std::sync::MutexGuard<WebRtcData<T>>,
         populate: F,
     ) -> Result<()>
     where
-        F: FnOnce(&mut protobuf::data_channel::Data),
+        F: FnOnce(&mut protobuf::rtp_data::Message),
     {
-        if let Some(data_channel) = data_channel {
-            let message = {
-                // Merge this message into accumulated_state and send out the latest version.
-                let mut state = self.accumulated_dcm_state.lock()?;
-                populate(&mut state);
-                state.sequence_number = Some(state.sequence_number.unwrap_or(0) + 1);
-                state.clone()
-            };
-            info!("Sending data channel message: {:?}", message);
-            self.send_via_data_channel(data_channel, &message)
+        let message = {
+            // Merge this message into accumulated_state and send out the latest version.
+            let mut state = self.accumulated_rtp_data_message.lock()?;
+            populate(&mut state);
+            state.sequence_number = Some(state.sequence_number.unwrap_or(0) + 1);
+            state.clone()
+        };
+        info!("Sending RTP data message: {:?}", message);
+        self.send_via_rtp_data(webrtc_data, &message)
+    }
+
+    /// Sends the current accumulated state via RTP data
+    fn send_latest_rtp_data_message(
+        &self,
+        webrtc_data: &mut std::sync::MutexGuard<WebRtcData<T>>,
+    ) -> Result<()> {
+        let data = self.accumulated_rtp_data_message.lock()?;
+        if *data != protobuf::rtp_data::Message::default() {
+            self.send_via_rtp_data(webrtc_data, &data)
         } else {
+            // Don't send empty messages
             Ok(())
         }
     }
 
-    /// Sends the current accumulated state via the data channel
-    fn send_latest_dcm_state_via_data_channel(
+    /// Send data via RTP data.
+    fn send_via_rtp_data(
         &self,
-        data_channel: Option<&DataChannel>,
+        webrtc_data: &mut std::sync::MutexGuard<WebRtcData<T>>,
+        data: &protobuf::rtp_data::Message,
     ) -> Result<()> {
-        if let Some(data_channel) = data_channel {
-            let data = self.accumulated_dcm_state.lock()?;
-            if *data != protobuf::data_channel::Data::default() {
-                self.send_via_data_channel(data_channel, &data)
-            } else {
-                // Don't send empty messages
-                Ok(())
-            }
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Send data via the DataChannel.
-    fn send_via_data_channel(
-        &self,
-        data_channel: &DataChannel,
-        data: &protobuf::data_channel::Data,
-    ) -> Result<()> {
-        let mut bytes = BytesMut::with_capacity(data.encoded_len());
+        let mut bytes = BytesMut::with_capacity(OLD_RTP_DATA_RESERVED.len() + data.encoded_len());
+        bytes.put_slice(&OLD_RTP_DATA_RESERVED);
         data.encode(&mut bytes)?;
 
-        data_channel.send_data(&bytes)
+        // At 1hz, this would take 136 years to roll over.
+        webrtc_data.last_sent_rtp_data_timestamp += 1;
+        let header = rtp::Header {
+            pt: RTP_DATA_PAYLOAD_TYPE,
+            // TODO: Once all clients are updated to accept the NEW_RTP_DATA_SSRC, use that.
+            ssrc: match self.direction {
+                CallDirection::InComing => OLD_RTP_DATA_SSRC_FOR_INCOMING,
+                CallDirection::OutGoing => OLD_RTP_DATA_SSRC_FOR_OUTGOING,
+            },
+            // This has to be incremented to make sure SRTP functions properly, but rollovers are OK.
+            seqnum: webrtc_data.last_sent_rtp_data_timestamp as rtp::SequenceNumber,
+            // Just imagine the clock is the number of heartbeat ticks :).
+            // Plus the above sequence number is too small to be useful.
+            timestamp: webrtc_data.last_sent_rtp_data_timestamp,
+        };
+        // Warning: we're holding the lock to webrtc_data while we
+        // block on the WebRTC network thread, so we need to make
+        // sure we don't grab the webrtc_data lock in
+        // handle_rtp_received.
+        // Warning: send_rtp() can fail if there is a transient error, so don't take it
+        // too seriously.  Plus, we'll resend every second anyway.
+        if webrtc_data
+            .peer_connection()?
+            .send_rtp(header, &bytes)
+            .is_err()
+        {
+            warn!("Could not send RTP data message.");
+        }
+        Ok(())
     }
 
     /// Notify the parent call observer about an event.
@@ -1381,6 +1383,16 @@ where
         );
 
         let call = self.call.lock()?;
+        // When PeerConnection::SetRemoteDescription triggers PeerConnectionObserver::OnAddStream,
+        // the MediaStream is wrapped via create_incoming_media, which does the following on different platforms:
+        // - Android: wraps it in layers of JavaMediaStream/jni::JavaMediaStream.
+        // - iOS: wraps it in layers of IosMediaStream/AppMediaStreamInterface/ConnectionMediaStream/RTCMediaStream.
+        // - Desktop: does no additional wrapping
+        // Later, when the call is accepted, the wrapped media
+        // is passed to connect_incoming_media, which does the following on different platforms:
+        // - iOS: The RTCMediaStream level of wrapping is passed to the app via onConnectMedia, which adds a sink to the first video track.
+        // - Android: The JavaMediaStream level of wrapping is passed to the app via onConnectMedia, which adds a sink to the first video track.
+        // - Desktop: Uses the PeerConnectionObserver for video sinks rather than adding its own.
         let incoming_media = call.create_incoming_media(self, stream)?;
         self.set_incoming_media(incoming_media)
     }
@@ -1449,16 +1461,17 @@ where
         // Free up webrtc related resources.
         let mut webrtc = self.webrtc.lock()?;
 
+        // This makes it safe to destroy the stats observer
+        // and the Connection (which is also a PeerConnectionObserver).
+        if let Ok(peer_connection) = webrtc.peer_connection() {
+            peer_connection.close();
+        }
+
         // dispose of the incoming media
-        let _ = webrtc.incoming_media.take();
+        webrtc.incoming_media = None;
 
         // dispose of the stats observer
-        let _ = webrtc.stats_observer.take();
-
-        // unregister the data channel observer
-        if let Some(data_channel) = webrtc.data_channel.take().as_mut() {
-            data_channel.dispose();
-        }
+        webrtc.stats_observer = None;
 
         // Free the application connection object, which is in essence
         // the PeerConnection object.  It is important to dispose of
@@ -1467,14 +1480,14 @@ where
         // whose observer is using the connection_ptr.  Once the
         // PeerConnection is completely shutdown it is safe to free up
         // the connection_ptr.
-        let _ = webrtc.app_connection.take();
+        webrtc.app_connection = None;
 
         // Free the connection object previously used by the
         // PeerConnectionObserver.  Convert the pointer back into a
         // Box and let it go out of scope.
         match webrtc.connection_ptr.take() {
             Some(v) => {
-                let _ = unsafe { ptr_as_box(v)? };
+                let _ = unsafe { ptr_as_box(v.as_ptr() as *mut Connection<T>)? };
                 Ok(())
             }
             None => Err(RingRtcError::OptionValueNotSet(
@@ -1642,18 +1655,18 @@ where
         let _ = self.inject_event(ConnectionEvent::InternalError(error));
     }
 
-    pub fn inject_received_via_signaling_data_channel(&mut self, bytes: Bytes) {
-        if bytes.len() > (std::mem::size_of::<protobuf::data_channel::Data>() * 2) {
-            warn!("data channel message is excessively large: {}", bytes.len());
+    pub fn inject_received_via_rtp_data(&mut self, bytes: &[u8]) {
+        if bytes.len() > (std::mem::size_of::<protobuf::rtp_data::Message>() * 2) {
+            warn!("RTP data message is excessively large: {}", bytes.len());
             return;
         }
 
         if bytes.is_empty() {
-            warn!("data channel message has zero length");
+            warn!("RTP data message has zero length");
             return;
         }
 
-        let message = match protobuf::data_channel::Data::decode(bytes) {
+        let message = match protobuf::rtp_data::Message::decode(bytes) {
             Ok(v) => v,
             Err(e) => {
                 warn!("unable to parse rx protobuf: {}", e);
@@ -1661,18 +1674,18 @@ where
             }
         };
 
-        debug!("Received data channel message: {:?}", message);
+        debug!("Received RTP data message: {:?}", message);
 
         let mut message_handled = false;
         let original_message = message.clone();
         if let Some(accepted) = message.accepted {
             if let CallDirection::OutGoing = self.direction() {
-                self.inject_received_accepted_via_data_channel(CallId::new(accepted.id()))
+                self.inject_received_accepted_via_rtp_data(CallId::new(accepted.id()))
                     .unwrap_or_else(|e| warn!("unable to inject remote accepted event: {}", e));
             } else {
                 warn!("Unexpected incoming accepted message: {:?}", accepted);
                 self.inject_internal_error(
-                    RingRtcError::DataChannelProtocol(
+                    RingRtcError::RtpDataProtocol(
                         "Received 'accepted' for inbound call".to_string(),
                     )
                     .into(),
@@ -1694,7 +1707,7 @@ where
             message_handled = true;
         };
         if let Some(sender_status) = message.sender_status {
-            self.inject_received_sender_status_via_data_channel(
+            self.inject_received_sender_status_via_rtp_data(
                 CallId::new(sender_status.id()),
                 signaling::SenderStatus {
                     video_enabled: sender_status.video_enabled,
@@ -1706,7 +1719,7 @@ where
             message_handled = true;
         };
         if let Some(receiver_status) = message.receiver_status {
-            self.inject_received_receiver_status_via_data_channel(
+            self.inject_received_receiver_status_via_rtp_data(
                 CallId::new(receiver_status.id()),
                 DataRate::from_bps(receiver_status.max_bitrate_bps()),
                 message.sequence_number,
@@ -1715,24 +1728,24 @@ where
             message_handled = true;
         };
         if !message_handled {
-            info!("Unhandled data channel message: {:?}", original_message);
+            info!("Unhandled RTP data message: {:?}", original_message);
         }
     }
 
-    /// Inject a `ReceivedAcceptedViaDataChannel` event into the FSM.
+    /// Inject a `ReceivedAcceptedViaRtpData` event into the FSM.
     ///
-    /// `Called By:` WebRTC `DataChannelObserver` call back thread.
+    /// `Called By:` WebRTC `PeerConnectionObserver` call back thread.
     ///
     /// # Arguments
     ///
     /// * `call_id` - Call ID from the remote peer.
-    pub fn inject_received_accepted_via_data_channel(&mut self, call_id: CallId) -> Result<()> {
-        self.inject_event(ConnectionEvent::ReceivedAcceptedViaDataChannel(call_id))
+    pub fn inject_received_accepted_via_rtp_data(&mut self, call_id: CallId) -> Result<()> {
+        self.inject_event(ConnectionEvent::ReceivedAcceptedViaRtpData(call_id))
     }
 
     /// Inject a `ReceivedHangup` event into the FSM.
     ///
-    /// `Called By:` WebRTC `DataChannelObserver` call back thread.
+    /// `Called By:` WebRTC `PeerConnectionObserver` call back thread.
     ///
     /// # Arguments
     ///
@@ -1741,53 +1754,53 @@ where
         self.inject_event(ConnectionEvent::ReceivedHangup(call_id, hangup))
     }
 
-    /// Inject a `ReceivedSenderStatusViaDataChannel` event into the FSM.
+    /// Inject a `ReceivedSenderStatusViaRtpData` event into the FSM.
     ///
-    /// `Called By:` WebRTC `DataChannelObserver` call back thread.
+    /// `Called By:` WebRTC `PeerConnectionObserver` call back thread.
     ///
     /// # Arguments
     ///
     /// * `call_id` - Call ID from the remote peer.
     /// * `status` - The status of the remote peer.
-    pub fn inject_received_sender_status_via_data_channel(
+    pub fn inject_received_sender_status_via_rtp_data(
         &mut self,
         call_id: CallId,
         status: signaling::SenderStatus,
         sequence_number: Option<u64>,
     ) -> Result<()> {
-        self.inject_event(ConnectionEvent::ReceivedSenderStatusViaDataChannel(
+        self.inject_event(ConnectionEvent::ReceivedSenderStatusViaRtpData(
             call_id,
             status,
             sequence_number,
         ))
     }
 
-    /// Inject a `ReceivedReceiverStatusViaDataChannel` event into the FSM.
+    /// Inject a `ReceivedReceiverStatusViaRtpData` event into the FSM.
     ///
-    /// `Called By:` WebRTC `DataChannelObserver` call back thread.
+    /// `Called By:` WebRTC `PeerConnectionObserver` call back thread.
     ///
     /// # Arguments
     ///
     /// * `call_id` - Call ID from the remote peer.
     /// * `max_bitrate_bps` - the bitrate that the remote peer wants to use for
     /// the session.
-    fn inject_received_receiver_status_via_data_channel(
+    fn inject_received_receiver_status_via_rtp_data(
         &mut self,
         call_id: CallId,
         max_bitrate: DataRate,
         sequence_number: Option<u64>,
     ) -> Result<()> {
-        self.inject_event(ConnectionEvent::ReceivedReceiverStatusViaDataChannel(
+        self.inject_event(ConnectionEvent::ReceivedReceiverStatusViaRtpData(
             call_id,
             max_bitrate,
             sequence_number,
         ))
     }
 
-    /// Inject a `SendHangupViaDataChannel event into the FSM.
-    pub fn inject_send_hangup_via_data_channel(&mut self, hangup: signaling::Hangup) -> Result<()> {
+    /// Inject a `SendHangupViaRtpData event into the FSM.
+    pub fn inject_send_hangup_via_rtp_data(&mut self, hangup: signaling::Hangup) -> Result<()> {
         self.set_state(ConnectionState::Terminating)?;
-        self.inject_event(ConnectionEvent::SendHangupViaDataChannel(hangup))
+        self.inject_event(ConnectionEvent::SendHangupViaRtpData(hangup))
     }
 
     /// Inject a local `Accept` event into the FSM.
@@ -1831,21 +1844,6 @@ where
     /// * `stream` - WebRTC C++ MediaStream object.
     pub fn inject_received_incoming_media(&mut self, stream: MediaStream) -> Result<()> {
         let event = ConnectionEvent::ReceivedIncomingMedia(stream);
-        self.inject_event(event)
-    }
-
-    /// Inject an `ReceivedSignalingDataChannel` event into the FSM.
-    ///
-    /// `Called By:` WebRTC `PeerConnectionObserver` back thread.
-    ///
-    /// # Arguments
-    ///
-    /// * `data_channel` - WebRTC C++ `DataChannel` object.
-    pub fn inject_received_signaling_data_channel(
-        &mut self,
-        data_channel: DataChannel,
-    ) -> Result<()> {
-        let event = ConnectionEvent::ReceivedSignalingDataChannel(data_channel);
         self.inject_event(event)
     }
 
@@ -1912,8 +1910,8 @@ where
     }
 
     #[cfg(feature = "sim")]
-    pub fn last_sent_sender_status(&self) -> Option<protobuf::data_channel::SenderStatus> {
-        self.accumulated_dcm_state
+    pub fn last_sent_sender_status(&self) -> Option<protobuf::rtp_data::SenderStatus> {
+        self.accumulated_rtp_data_message
             .lock()
             .unwrap()
             .sender_status
@@ -1979,12 +1977,51 @@ where
         self.inject_received_incoming_media(stream)
     }
 
-    fn handle_signaling_data_channel_connected(&mut self, data_channel: DataChannel) -> Result<()> {
-        self.inject_received_signaling_data_channel(data_channel)
+    fn handle_incoming_video_frame(
+        &mut self,
+        track_id: u32,
+        video_frame: VideoFrame,
+    ) -> Result<()> {
+        if let Some(incoming_video_sink) = self.incoming_video_sink.as_ref() {
+            incoming_video_sink.on_video_frame(track_id, video_frame)
+        }
+        Ok(())
     }
 
-    fn handle_signaling_data_channel_message(&mut self, message: Bytes) {
-        self.inject_received_via_signaling_data_channel(message)
+    fn handle_rtp_received(&mut self, header: rtp::Header, payload: &[u8]) {
+        let data = match (header.pt, header.ssrc) {
+            // Old clients send with 4 bytes of reserved data.
+            (
+                RTP_DATA_PAYLOAD_TYPE,
+                OLD_RTP_DATA_SSRC_FOR_INCOMING | OLD_RTP_DATA_SSRC_FOR_OUTGOING,
+            ) => &payload[OLD_RTP_DATA_RESERVED.len()..],
+            // New clients will send without 4 bytes of reserved data.
+            (RTP_DATA_PAYLOAD_TYPE, NEW_RTP_DATA_SSRC) => payload,
+            (pt, ssrc) => {
+                warn!(
+                    "Received RTP with unexpected (PT, SSRC) = ({:?}, {:?})",
+                    pt, ssrc
+                );
+                return;
+            }
+        };
+        // Warning: normally you wouldn't want to take a lock while being
+        // called by the WebRTC network thread, but this lock
+        // is only taken here and nowhere else, and no other locks
+        // are taken so we can't get into a deadlock.
+        let mut last_received_rtp_data_timestamp = self
+            .last_received_rtp_data_timestamp
+            .lock()
+            .expect("Lock last_recived_rtp_data_timestamp");
+
+        // We allow equal timestamps because old clients send
+        // multiple messages with the same timestamp.
+        // This shouldn't be a problem in practice.
+        if header.timestamp >= *last_received_rtp_data_timestamp {
+            *last_received_rtp_data_timestamp = header.timestamp;
+            drop(last_received_rtp_data_timestamp);
+            self.inject_received_via_rtp_data(data);
+        }
     }
 }
 

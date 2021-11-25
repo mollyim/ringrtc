@@ -60,6 +60,7 @@ public final class GroupCall {
     @Nullable private AudioTrack                         outgoingAudioTrack;
     @Nullable private VideoSource                        outgoingVideoSource;
     @Nullable private VideoTrack                         outgoingVideoTrack;
+    @NonNull  private ArrayList<VideoTrack>              incomingVideoTracks;
 
     /*
      * Creates a GroupCall object. If successful, all supporting objects
@@ -117,6 +118,8 @@ public final class GroupCall {
         // Define maximum output video format for group calls.
         this.outgoingVideoSource.adaptOutputFormat(640, 360, 30);
 
+        this.incomingVideoTracks = new ArrayList<>();
+
         try {
             this.clientId = ringrtcCreateGroupCallClient(
                 nativeCallManager,
@@ -124,7 +127,9 @@ public final class GroupCall {
                 sfuUrl,
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
+                // Returns a borrowed RC.
                 this.outgoingAudioTrack.getNativeAudioTrack(),
+                // Returns a borrowed RC.
                 this.outgoingVideoTrack.getNativeVideoTrack());
         } catch  (CallException e) {
             Log.w(TAG, "Unable to create group call client", e);
@@ -153,6 +158,10 @@ public final class GroupCall {
         if (this.outgoingVideoTrack != null) {
             this.outgoingVideoTrack.dispose();
             this.outgoingVideoTrack = null;
+        }
+
+        for (VideoTrack incomingTrack : incomingVideoTracks) {
+            incomingTrack.dispose();
         }
     }
 
@@ -556,11 +565,11 @@ public final class GroupCall {
      * rendered for a specific member (by demuxId). Called via the CallManager.
      *
      */
-    void handleIncomingVideoTrack(long remoteDemuxId, long nativeVideoTrack) {
+    void handleIncomingVideoTrack(long remoteDemuxId, long nativeVideoTrackOwnedRc) {
         Log.i(TAG, "handleIncomingVideoTrack():");
 
-        if (nativeVideoTrack == 0) {
-            Log.d(TAG, "nativeVideoTrack is null (0)");
+        if (nativeVideoTrackOwnedRc == 0) {
+            Log.d(TAG, "nativeVideoTrackOwnedRc is null (0)");
             return;
         }
 
@@ -570,8 +579,8 @@ public final class GroupCall {
             return;
         }
 
-        remoteDeviceState.videoTrack = new VideoTrack(nativeVideoTrack);
-
+        remoteDeviceState.videoTrack = new VideoTrack(nativeVideoTrackOwnedRc);
+        this.incomingVideoTracks.add(remoteDeviceState.videoTrack);
         this.observer.onRemoteDeviceStatesChanged(this);
     }
 
@@ -689,9 +698,6 @@ public final class GroupCall {
 
         /** Could not create a peer connection for media. */
         FAILED_TO_CREATE_PEER_CONNECTION,
-
-        /** Could not create a data channel to send data. */
-        FAILED_TO_CREATE_DATA_CHANNEL,
 
         /** Could not start the peer connection for media. */
         FAILED_TO_START_PEER_CONNECTION,

@@ -10,7 +10,7 @@ use std::panic;
 use std::time::Duration;
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jbyteArray, jint, jlong, jobject};
+use jni::sys::{jbyteArray, jint, jlong, jobject};
 use jni::JNIEnv;
 use log::Level;
 
@@ -82,17 +82,24 @@ pub fn create_call_manager(env: &JNIEnv, jni_call_manager: JObject) -> Result<jl
 pub fn create_peer_connection(
     env: &JNIEnv,
     peer_connection_factory: jlong,
-    native_connection: *mut Connection<AndroidPlatform>,
+    native_connection: webrtc::ptr::Borrowed<Connection<AndroidPlatform>>,
     jni_rtc_config: JObject,
     jni_media_constraints: JObject,
-    enable_dtls: bool,
-    enable_rtp_data_channel: bool,
 ) -> Result<jlong> {
+    let connection = unsafe { native_connection.as_mut() }.ok_or_else(|| {
+        RingRtcError::NullPointer(
+            "create_peer_connection".to_owned(),
+            "native_connection".to_owned(),
+        )
+    })?;
+
     // native_connection is an un-boxed Connection<AndroidPlatform> on the heap.
     // pass ownership of it to the PeerConnectionObserver.
-    let pc_observer =
-        PeerConnectionObserver::new(native_connection, false /* enable_frame_encryption */)?;
-    let connection = unsafe { ptr_as_mut(native_connection)? };
+    let pc_observer = PeerConnectionObserver::new(
+        native_connection,
+        false, /* enable_frame_encryption */
+        false, /* enable_video_frame_event */
+    )?;
 
     // construct JNI OwnedPeerConnection object
     let jni_owned_pc = unsafe {
@@ -102,10 +109,8 @@ pub fn create_peer_connection(
             peer_connection_factory,
             jni_rtc_config,
             jni_media_constraints,
-            pc_observer.rffi() as jlong,
+            pc_observer.into_rffi().into_owned().as_ptr() as jlong,
             JObject::null(),
-            enable_dtls as jboolean,
-            enable_rtp_data_channel as jboolean,
         )
     };
     info!("jni_owned_pc: {}", jni_owned_pc);
@@ -128,7 +133,7 @@ pub fn create_peer_connection(
     // We can't "webrtc::Arc::from_borrowed(peer_connection_factory)" here because
     // peer_connection_factory is actually an OwnedFactoryAndThreads, not a PeerConnectionFactory.
     // We'd need to unwrap it with something like Rust_borrowPeerConnectionFromJniOwnedPeerConnection.
-    let peer_connection = PeerConnection::new(rffi_pc, pc_observer.rffi(), None);
+    let peer_connection = PeerConnection::new(rffi_pc, None, None);
 
     connection.set_peer_connection(peer_connection)?;
 
@@ -626,19 +631,13 @@ pub fn create_group_call_client(
     group_id: jbyteArray,
     sfu_url: JString,
     native_pcf_borrowed_rc: jlong,
-    native_audio_track: jlong,
-    native_video_track: jlong,
+    native_audio_track_borrowed_rc: jlong,
+    native_video_track_borrowed_rc: jlong,
 ) -> Result<group_call::ClientId> {
     info!("create_group_call_client():");
 
     let group_id = env.convert_byte_array(group_id)?;
     let sfu_url = env.get_string(sfu_url)?.into();
-
-    let outgoing_audio_track =
-        media::AudioTrack::unowned(native_audio_track as *const media::RffiAudioTrack);
-
-    let outgoing_video_track =
-        media::VideoTrack::unowned(native_video_track as *const media::RffiVideoTrack);
 
     let peer_connection_factory = unsafe {
         PeerConnectionFactory::from_native_factory(webrtc::Arc::from_borrowed(
@@ -648,6 +647,26 @@ pub fn create_group_call_client(
         ))
     };
 
+    // This is safe because the track given to us should still be alive.
+    let outgoing_audio_track = media::AudioTrack::new(
+        unsafe {
+            webrtc::Arc::from_borrowed(webrtc::ptr::BorrowedRc::from_ptr(
+                native_audio_track_borrowed_rc as *const media::RffiAudioTrack,
+            ))
+        },
+        Some(peer_connection_factory.rffi().clone()),
+    );
+
+    // This is safe because the track given to us should still be alive.
+    let outgoing_video_track = media::VideoTrack::new(
+        unsafe {
+            webrtc::Arc::from_borrowed(webrtc::ptr::BorrowedRc::from_ptr(
+                native_video_track_borrowed_rc as *const media::RffiVideoTrack,
+            ))
+        },
+        Some(peer_connection_factory.rffi().clone()),
+    );
+
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.create_group_call_client(
         group_id,
@@ -655,6 +674,7 @@ pub fn create_group_call_client(
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
+        None,
     )
 }
 

@@ -3,148 +3,78 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::fmt;
-use std::marker::Send;
+use crate::webrtc;
 
-use crate::core::util::CppObject;
-
-#[cfg(feature = "native")]
-use crate::core::util::RustObject;
+pub use crate::webrtc::peer_connection_factory::RffiPeerConnectionFactoryOwner;
 
 #[cfg(not(feature = "sim"))]
 use crate::webrtc::ffi::media;
-#[cfg(not(feature = "sim"))]
-use crate::webrtc::ffi::ref_count;
 
 #[cfg(feature = "sim")]
 use crate::webrtc::sim::media;
-#[cfg(feature = "sim")]
-use crate::webrtc::sim::ref_count;
 
-pub use media::{RffiAudioTrack, RffiMediaStream, RffiVideoTrack};
+pub use media::{RffiAudioTrack, RffiMediaStream, RffiVideoFrameBuffer, RffiVideoTrack};
 
 /// Rust wrapper around WebRTC C++ MediaStream object.
+#[derive(Clone, Debug)]
 pub struct MediaStream {
     /// Pointer to C++ webrtc::MediaStreamInterface object.
-    rffi: *const RffiMediaStream,
-}
-
-// Send and Sync needed to share *const pointer types across threads.
-unsafe impl Send for MediaStream {}
-unsafe impl Sync for MediaStream {}
-
-impl fmt::Display for MediaStream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "rffi_media_stream: {:p}", self.rffi)
-    }
-}
-
-impl fmt::Debug for MediaStream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl Default for MediaStream {
-    fn default() -> Self {
-        Self {
-            rffi: std::ptr::null(),
-        }
-    }
-}
-
-impl Drop for MediaStream {
-    fn drop(&mut self) {
-        if !self.rffi.is_null() {
-            ref_count::release_ref(self.rffi as CppObject);
-        }
-    }
+    rffi: webrtc::Arc<RffiMediaStream>,
 }
 
 impl MediaStream {
-    /// Create new MediaStream object from C++ MediaStream.
-    pub fn new(rffi: *const media::RffiMediaStream) -> Self {
+    // TODO: Figure out a way to pass in a PeerConnection as an owner.
+    pub fn new(rffi: webrtc::Arc<media::RffiMediaStream>) -> Self {
         Self { rffi }
     }
 
     /// Return inner C++ MediaStream pointer.
-    pub fn rffi(&self) -> *const media::RffiMediaStream {
-        self.rffi
+    pub fn rffi(&self) -> &webrtc::Arc<media::RffiMediaStream> {
+        &self.rffi
     }
 
-    /// Take ownership of the MediaStream pointer.
-    pub fn take_rffi(mut self) -> *const media::RffiMediaStream {
-        let rffi = self.rffi;
-        self.rffi = std::ptr::null();
-        rffi
-    }
-
-    pub fn first_video_track(&self) -> Option<VideoTrack> {
-        let track_rffi = unsafe { media::Rust_getFirstVideoTrack(self.rffi) };
-        if track_rffi.is_null() {
-            return None;
-        }
-        Some(VideoTrack::owned(track_rffi))
+    pub fn into_owned(self) -> webrtc::ptr::OwnedRc<media::RffiMediaStream> {
+        self.rffi.into_owned()
     }
 }
 
 /// Rust wrapper around WebRTC C++ AudioTrackInterface object.
+#[derive(Clone, Debug)]
 pub struct AudioTrack {
-    rffi: *const media::RffiAudioTrack,
-    // If owned, release ref count when Dropped
-    owned: bool,
-}
-
-impl AudioTrack {
-    pub fn unowned(rffi: *const media::RffiAudioTrack) -> Self {
-        let owned = false;
-        Self { rffi, owned }
-    }
-
-    pub fn owned(rffi: *const media::RffiAudioTrack) -> Self {
-        let owned = true;
-        Self { rffi, owned }
-    }
-
-    pub fn rffi(&self) -> *const media::RffiAudioTrack {
-        self.rffi
-    }
-
-    pub fn set_enabled(&self, enabled: bool) {
-        unsafe { media::Rust_setAudioTrackEnabled(self.rffi, enabled) }
-    }
-}
-
-impl fmt::Display for AudioTrack {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "AudioSource: {:p}", self.rffi)
-    }
-}
-
-impl fmt::Debug for AudioTrack {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
-    }
+    rffi: webrtc::Arc<media::RffiAudioTrack>,
+    // We keep this around as an easy way to make sure the PeerConnectionFactory
+    // outlives the AudioTrack.
+    _owner: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
 }
 
 impl Drop for AudioTrack {
     fn drop(&mut self) {
-        if self.owned && !self.rffi.is_null() {
-            ref_count::release_ref(self.rffi as CppObject);
+        // Delete the rffi before the _owner.
+        self.rffi = webrtc::Arc::null();
+
+        // Now it's safe to delete the _owner.
+    }
+}
+
+impl AudioTrack {
+    pub fn new(
+        rffi: webrtc::Arc<media::RffiAudioTrack>,
+        owner: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
+    ) -> Self {
+        Self {
+            rffi,
+            _owner: owner,
         }
     }
-}
 
-impl Clone for AudioTrack {
-    fn clone(&self) -> Self {
-        ref_count::add_ref(self.rffi as CppObject);
-        Self::owned(self.rffi)
+    pub fn rffi(&self) -> &webrtc::Arc<media::RffiAudioTrack> {
+        &self.rffi
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        unsafe { media::Rust_setAudioTrackEnabled(self.rffi.as_borrowed(), enabled) }
     }
 }
-
-unsafe impl Send for AudioTrack {}
-
-unsafe impl Sync for AudioTrack {}
 
 /// cbindgen:prefix-with-name=true
 #[repr(C)]
@@ -183,8 +113,7 @@ impl VideoFrameMetadata {
 
 pub struct VideoFrame {
     metadata: VideoFrameMetadata,
-    // Owns this
-    rffi_buffer: *const media::RffiVideoFrameBuffer,
+    rffi_buffer: webrtc::Arc<media::RffiVideoFrameBuffer>,
 }
 
 impl VideoFrame {
@@ -206,15 +135,18 @@ impl VideoFrame {
         }
         Self {
             metadata: self.metadata.apply_rotation(),
-            rffi_buffer: unsafe {
-                media::Rust_copyAndRotateVideoFrameBuffer(self.rffi_buffer, self.metadata.rotation)
-            },
+            rffi_buffer: webrtc::Arc::from_owned(unsafe {
+                media::Rust_copyAndRotateVideoFrameBuffer(
+                    self.rffi_buffer.as_borrowed(),
+                    self.metadata.rotation,
+                )
+            }),
         }
     }
 
-    pub fn from_owned_buffer(
+    pub fn from_buffer(
         metadata: VideoFrameMetadata,
-        rffi_buffer: *mut media::RffiVideoFrameBuffer,
+        rffi_buffer: webrtc::Arc<media::RffiVideoFrameBuffer>,
     ) -> Self {
         Self {
             metadata,
@@ -229,218 +161,114 @@ impl VideoFrame {
                 height,
                 rotation: VideoRotation::None,
             },
-            rffi_buffer: unsafe {
-                media::Rust_createVideoFrameBufferFromRgba(width, height, rgba_buffer.as_ptr())
-            },
+            rffi_buffer: webrtc::Arc::from_owned(unsafe {
+                media::Rust_createVideoFrameBufferFromRgba(
+                    width,
+                    height,
+                    webrtc::ptr::Borrowed::from_ptr(rgba_buffer.as_ptr()),
+                )
+            }),
         }
     }
 
     pub fn to_rgba(&self, rgba_buffer: &mut [u8]) {
         unsafe {
-            media::Rust_convertVideoFrameBufferToRgba(self.rffi_buffer, rgba_buffer.as_mut_ptr())
+            media::Rust_convertVideoFrameBufferToRgba(
+                self.rffi_buffer.as_borrowed(),
+                rgba_buffer.as_mut_ptr(),
+            )
         }
     }
 }
-
-impl Drop for VideoFrame {
-    fn drop(&mut self) {
-        debug!("VideoFrame::drop()");
-        if !self.rffi_buffer.is_null() {
-            ref_count::release_ref(self.rffi_buffer as crate::core::util::CppObject);
-        }
-    }
-}
-
-impl fmt::Display for VideoFrame {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VideoFrame({}x{})", self.width(), self.height())
-    }
-}
-
-impl fmt::Debug for VideoFrame {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-unsafe impl Send for VideoFrame {}
-
-unsafe impl Sync for VideoFrame {}
 
 /// Rust wrapper around WebRTC C++ VideoTrackSourceInterface object.
+#[derive(Clone, Debug)]
 pub struct VideoSource {
-    rffi: *const media::RffiVideoSource,
+    rffi: webrtc::Arc<media::RffiVideoSource>,
 }
 
 impl VideoSource {
-    pub fn new(rffi: *const media::RffiVideoSource) -> Self {
+    pub fn new(rffi: webrtc::Arc<media::RffiVideoSource>) -> Self {
         Self { rffi }
     }
 
-    pub fn rffi(&self) -> *const media::RffiVideoSource {
-        self.rffi
+    pub fn rffi(&self) -> &webrtc::Arc<media::RffiVideoSource> {
+        &self.rffi
     }
 
     pub fn push_frame(&self, frame: VideoFrame) {
         unsafe {
-            media::Rust_pushVideoFrame(self.rffi, frame.rffi_buffer);
+            media::Rust_pushVideoFrame(self.rffi.as_borrowed(), frame.rffi_buffer.as_borrowed());
         }
     }
 }
-
-impl fmt::Display for VideoSource {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VideoSource: {:p}", self.rffi)
-    }
-}
-
-impl fmt::Debug for VideoSource {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl Drop for VideoSource {
-    fn drop(&mut self) {
-        debug!("VideoSource::drop()");
-        if !self.rffi.is_null() {
-            ref_count::release_ref(self.rffi as CppObject);
-        }
-    }
-}
-
-impl Clone for VideoSource {
-    fn clone(&self) -> Self {
-        debug!("VideoSource::clone() {}", self.rffi as u64);
-        if !self.rffi.is_null() {
-            ref_count::add_ref(self.rffi as CppObject);
-        }
-        Self::new(self.rffi)
-    }
-}
-
-unsafe impl Send for VideoSource {}
-
-unsafe impl Sync for VideoSource {}
 
 /// Rust wrapper around WebRTC C++ VideoTrackInterface object.
+#[derive(Clone, Debug)]
 pub struct VideoTrack {
-    rffi: *const media::RffiVideoTrack,
-    // If owned, release ref count when Dropped
-    owned: bool,
+    rffi: webrtc::Arc<RffiVideoTrack>,
+    // We keep this around as an easy way to make sure the PeerConnectionFactory
+    // outlives the VideoTrack.
+    _owner: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
+}
+
+impl Drop for VideoTrack {
+    fn drop(&mut self) {
+        // Delete the rffi before the _owner.
+        self.rffi = webrtc::Arc::null();
+
+        // Now it's safe to delete the _owner.
+    }
 }
 
 impl VideoTrack {
-    pub fn unowned(rffi: *const media::RffiVideoTrack) -> Self {
-        let owned = false;
-        Self { rffi, owned }
+    pub fn new(
+        rffi: webrtc::Arc<media::RffiVideoTrack>,
+        owner: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
+    ) -> Self {
+        Self {
+            rffi,
+            _owner: owner,
+        }
     }
 
-    pub fn owned(rffi: *const media::RffiVideoTrack) -> Self {
-        let owned = true;
-        Self { rffi, owned }
-    }
-
-    pub fn rffi(&self) -> *const media::RffiVideoTrack {
-        self.rffi
+    pub fn rffi(&self) -> &webrtc::Arc<media::RffiVideoTrack> {
+        &self.rffi
     }
 
     pub fn set_enabled(&self, enabled: bool) {
-        unsafe { media::Rust_setVideoTrackEnabled(self.rffi, enabled) }
+        unsafe { media::Rust_setVideoTrackEnabled(self.rffi.as_borrowed(), enabled) }
     }
 
     pub fn set_content_hint(&self, is_screenshare: bool) {
-        unsafe { media::Rust_setVideoTrackContentHint(self.rffi, is_screenshare) }
+        unsafe { media::Rust_setVideoTrackContentHint(self.rffi.as_borrowed(), is_screenshare) }
     }
 
     pub fn id(&self) -> Option<u32> {
-        let id = unsafe { media::Rust_getTrackIdAsUint32(self.rffi) };
+        let id = unsafe { media::Rust_getTrackIdAsUint32(self.rffi.as_borrowed()) };
         if id == 0 {
             None
         } else {
             Some(id)
         }
     }
-
-    #[cfg(feature = "native")]
-    pub fn add_sink(&self, sink: &dyn VideoSink) {
-        let sink_ptr = Box::into_raw(Box::new(RffiVideoSink { sink })) as RustObject;
-        let cbs_ptr = &VideoSinkCallbacks {
-            onVideoFrame: video_sink_OnVideoFrame,
-        } as *const VideoSinkCallbacks as CppObject;
-        unsafe {
-            media::Rust_addVideoSink(self.rffi, sink_ptr, cbs_ptr);
-        }
-    }
 }
 
-pub trait VideoSink {
-    // If not enabled, ignore new frames and clear old frames.
-    fn set_enabled(&self, enabled: bool);
+// You could have a non-Sync, non-Send VideoSink, but
+// it's more convenient put those traits here than anywhere else.
+pub trait VideoSink: Sync + Send {
     // Warning: this video frame's output buffer is shared with a video decoder,
     // and so must quickly be dropped (by copying it and dropping the original)
     // or the video decoder will soon stall and video will be choppy.
-    fn on_video_frame(&self, frame: VideoFrame);
+    fn on_video_frame(&self, track_id: u32, frame: VideoFrame);
+    fn box_clone(&self) -> Box<dyn VideoSink>;
 }
 
-// Since dyn pointers aren't safe to send over FFI (they are double-sized fat pointers),
-// we have to wrap them in something that can have a normal pointer.
-#[cfg(feature = "native")]
-struct RffiVideoSink<'sink> {
-    sink: &'sink dyn VideoSink,
-}
-
-#[cfg(feature = "native")]
-#[repr(C)]
-#[allow(non_snake_case)]
-struct VideoSinkCallbacks {
-    onVideoFrame:
-        extern "C" fn(*mut RffiVideoSink, VideoFrameMetadata, *mut media::RffiVideoFrameBuffer),
-}
-
-#[cfg(feature = "native")]
-#[allow(non_snake_case)]
-extern "C" fn video_sink_OnVideoFrame(
-    rffi_sink: *mut RffiVideoSink,
-    metadata: VideoFrameMetadata,
-    rffi_buffer: *mut media::RffiVideoFrameBuffer,
-) {
-    let rffi_sink = unsafe { &*rffi_sink };
-    rffi_sink
-        .sink
-        .on_video_frame(VideoFrame::from_owned_buffer(metadata, rffi_buffer));
-}
-
-impl fmt::Display for VideoTrack {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VideoTrack: {:p}", self.rffi)
-    }
-}
-
-impl fmt::Debug for VideoTrack {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl Drop for VideoTrack {
-    fn drop(&mut self) {
-        if self.owned && !self.rffi.is_null() {
-            ref_count::release_ref(self.rffi as crate::core::util::CppObject);
-        }
-    }
-}
-
-impl Clone for VideoTrack {
+impl Clone for Box<dyn VideoSink> {
     fn clone(&self) -> Self {
-        ref_count::add_ref(self.rffi as CppObject);
-        Self::owned(self.rffi)
+        self.box_clone()
     }
 }
-
-unsafe impl Send for VideoTrack {}
-
-unsafe impl Sync for VideoTrack {}
 
 // Same as webrtc::AudioEncoder::Config in api/audio_codecs/audio_encoder.h.
 // Very OPUS-specific

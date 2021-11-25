@@ -11,7 +11,6 @@ use crate::common::{units::DataRate, Result};
 use crate::core::util::redact_string;
 use crate::error::RingRtcError;
 use crate::webrtc;
-use crate::webrtc::data_channel::DataChannel;
 use crate::webrtc::ice_gatherer::IceGatherer;
 use crate::webrtc::media::{AudioEncoderConfig, RffiAudioEncoderConfig};
 use crate::webrtc::network::RffiIpPort;
@@ -25,28 +24,37 @@ use crate::webrtc::stats_observer::StatsObserver;
 
 #[cfg(not(feature = "sim"))]
 use crate::webrtc::ffi::peer_connection as pc;
-#[cfg(not(feature = "sim"))]
-pub use crate::webrtc::ffi::peer_connection::{RffiDataChannel, RffiPeerConnection};
 
 #[cfg(feature = "sim")]
 use crate::webrtc::sim::peer_connection as pc;
 #[cfg(feature = "sim")]
-pub use crate::webrtc::sim::peer_connection::{
-    BoxedRtpPacketSink, RffiDataChannel, RffiPeerConnection,
-};
+pub use crate::webrtc::sim::peer_connection::BoxedRtpPacketSink;
+
+pub use pc::RffiPeerConnection;
 
 /// Rust wrapper around WebRTC C++ PeerConnection object.
 #[derive(Debug)]
 pub struct PeerConnection {
     rffi: webrtc::Arc<RffiPeerConnection>,
-    /// Pointer to C++ PeerConnectionObserverInterface (never owned)
-    rffi_pc_observer: *const RffiPeerConnectionObserver,
     // We keep this around as an easy way to make sure the PeerConnectionFactory
     // outlives the PeerConnection.  A PCF must outlive a PC because the PCF
     // owns the threads that the PC relies on.  If the PCF closes those threads,
     // not only will the PC do nothing, but methods called on it will block
     // indefinitely.
-    _rffi_pcf: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
+    _owner: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
+
+    // Used for optionally keeping the PeerConnectionObserver around longer
+    // than the native PeerConnection.
+    _rffi_pc_observer: Option<webrtc::ptr::Unique<RffiPeerConnectionObserver>>,
+}
+
+impl Drop for PeerConnection {
+    fn drop(&mut self) {
+        // Delete the rffi before the _owner and the rffi_pc_observer.
+        self.rffi = webrtc::Arc::null();
+
+        // Now it's safe to delete the _owner and the rffi_pc_observer.
+    }
 }
 
 // See PeerConnection::SetSendRates for more info.
@@ -60,39 +68,26 @@ pub struct SendRates {
 impl PeerConnection {
     pub fn new(
         rffi: webrtc::Arc<RffiPeerConnection>,
-        rffi_pc_observer: *const RffiPeerConnectionObserver,
-        rffi_pcf: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
+        rffi_pc_observer: Option<webrtc::ptr::Unique<RffiPeerConnectionObserver>>,
+        owner: Option<webrtc::Arc<RffiPeerConnectionFactoryOwner>>,
     ) -> Self {
         Self {
             rffi,
-            rffi_pc_observer,
-            _rffi_pcf: rffi_pcf,
+            _rffi_pc_observer: rffi_pc_observer,
+            _owner: owner,
         }
     }
 
     #[cfg(feature = "sim")]
     pub fn set_rtp_packet_sink(&self, rtp_packet_sink: BoxedRtpPacketSink) {
-        unsafe { (*self.rffi.as_borrowed_ptr()).set_rtp_packet_sink(rtp_packet_sink) }
-    }
-
-    /// Rust wrapper around C++ PeerConnection::CreateDataChannel().
-    /// Assumes the label "signaling" and unordered/unreliable for RTP.
-    pub fn create_signaling_data_channel(&self) -> Result<DataChannel> {
-        let rffi_data_channel = unsafe {
-            pc::Rust_createSignalingDataChannel(self.rffi.as_borrowed_ptr(), self.rffi_pc_observer)
-        };
-        if rffi_data_channel.is_null() {
-            return Err(RingRtcError::CreateSignalingDataChannel.into());
-        }
-
-        let data_channel = unsafe { DataChannel::new(rffi_data_channel) };
-
-        Ok(data_channel)
+        unsafe { self.rffi.as_borrowed().as_ref() }
+            .unwrap()
+            .set_rtp_packet_sink(rtp_packet_sink)
     }
 
     /// Rust wrapper around C++ webrtc::CreateSessionDescription(kOffer).
     pub fn create_offer(&self, csd_observer: &CreateSessionDescriptionObserver) {
-        unsafe { pc::Rust_createOffer(self.rffi.as_borrowed_ptr(), csd_observer.rffi()) }
+        unsafe { pc::Rust_createOffer(self.rffi.as_borrowed(), csd_observer.rffi().as_borrowed()) }
     }
 
     /// Rust wrapper around C++ PeerConnection::SetLocalDescription().
@@ -106,16 +101,18 @@ impl PeerConnection {
         // is deleted, we don't double delete.
         unsafe {
             pc::Rust_setLocalDescription(
-                self.rffi.as_borrowed_ptr(),
-                ssd_observer.rffi(),
-                session_description.take_rffi(),
+                self.rffi.as_borrowed(),
+                ssd_observer.rffi().as_borrowed(),
+                session_description.take_rffi().into_owned(),
             )
         }
     }
 
     /// Rust wrapper around C++ webrtc::CreateSessionDescription(kAnswer).
     pub fn create_answer(&self, csd_observer: &CreateSessionDescriptionObserver) {
-        unsafe { pc::Rust_createAnswer(self.rffi.as_borrowed_ptr(), csd_observer.rffi()) };
+        unsafe {
+            pc::Rust_createAnswer(self.rffi.as_borrowed(), csd_observer.rffi().as_borrowed())
+        };
     }
 
     /// Rust wrapper around C++ PeerConnection::SetRemoteDescription().
@@ -125,13 +122,13 @@ impl PeerConnection {
         session_description: SessionDescription,
     ) {
         // Rust_setRemoteDescription takes ownership of the local description
-        // We take out the interface (with into_rffi) so that when the SessionDescriptionInterface
+        // We take out the interface (with take_rffi) so that when the SessionDescriptionInterface
         // is deleted, we don't double delete.
         unsafe {
             pc::Rust_setRemoteDescription(
-                self.rffi.as_borrowed_ptr(),
-                ssd_observer.rffi(),
-                session_description.take_rffi(),
+                self.rffi.as_borrowed(),
+                ssd_observer.rffi().as_borrowed(),
+                session_description.take_rffi().into_owned(),
             )
         };
     }
@@ -144,18 +141,18 @@ impl PeerConnection {
     /// set_remote_description or set_local_description.
     pub fn set_outgoing_media_enabled(&self, enabled: bool) {
         unsafe {
-            pc::Rust_setOutgoingMediaEnabled(self.rffi.as_borrowed_ptr(), enabled);
+            pc::Rust_setOutgoingMediaEnabled(self.rffi.as_borrowed(), enabled);
         }
     }
 
     pub fn set_incoming_media_enabled(&self, enabled: bool) {
         unsafe {
-            pc::Rust_setIncomingMediaEnabled(self.rffi.as_borrowed_ptr(), enabled);
+            pc::Rust_setIncomingMediaEnabled(self.rffi.as_borrowed(), enabled);
         }
     }
 
     pub fn set_audio_playout_enabled(&self, enabled: bool) {
-        unsafe { pc::Rust_setAudioPlayoutEnabled(self.rffi.as_borrowed_ptr(), enabled) };
+        unsafe { pc::Rust_setAudioPlayoutEnabled(self.rffi.as_borrowed(), enabled) };
     }
 
     /// Rust wrapper around C++ PeerConnection::AddIceCandidate().
@@ -163,8 +160,12 @@ impl PeerConnection {
         info!("Remote ICE candidate: {}", redact_string(sdp));
 
         let sdp_c = CString::new(sdp)?;
-        let add_ok =
-            unsafe { pc::Rust_addIceCandidateFromSdp(self.rffi.as_borrowed_ptr(), sdp_c.as_ptr()) };
+        let add_ok = unsafe {
+            pc::Rust_addIceCandidateFromSdp(
+                self.rffi.as_borrowed(),
+                webrtc::ptr::Borrowed::from_ptr(sdp_c.as_ptr()),
+            )
+        };
         if add_ok {
             Ok(())
         } else {
@@ -179,7 +180,7 @@ impl PeerConnection {
         tcp: bool,
     ) -> Result<()> {
         let add_ok = unsafe {
-            pc::Rust_addIceCandidateFromServer(self.rffi.as_borrowed_ptr(), ip.into(), port, tcp)
+            pc::Rust_addIceCandidateFromServer(self.rffi.as_borrowed(), ip.into(), port, tcp)
         };
         if add_ok {
             Ok(())
@@ -195,8 +196,8 @@ impl PeerConnection {
 
         unsafe {
             pc::Rust_removeIceCandidates(
-                self.rffi.as_borrowed_ptr(),
-                removed_addresses.as_ptr(),
+                self.rffi.as_borrowed(),
+                webrtc::ptr::Borrowed::from_ptr(removed_addresses.as_ptr()),
                 removed_addresses.len(),
             )
         };
@@ -204,8 +205,9 @@ impl PeerConnection {
 
     // Rust wrapper around C++ PeerConnection::CreateSharedIceGatherer().
     pub fn create_shared_ice_gatherer(&self) -> Result<IceGatherer> {
-        let rffi_ice_gatherer =
-            unsafe { pc::Rust_createSharedIceGatherer(self.rffi.as_borrowed_ptr()) };
+        let rffi_ice_gatherer = webrtc::Arc::from_owned(unsafe {
+            pc::Rust_createSharedIceGatherer(self.rffi.as_borrowed())
+        });
         if rffi_ice_gatherer.is_null() {
             return Err(RingRtcError::CreateIceGatherer.into());
         }
@@ -218,7 +220,10 @@ impl PeerConnection {
     // Rust wrapper around C++ PeerConnection::UseSharedIceGatherer().
     pub fn use_shared_ice_gatherer(&self, ice_gatherer: &IceGatherer) -> Result<()> {
         let ok = unsafe {
-            pc::Rust_useSharedIceGatherer(self.rffi.as_borrowed_ptr(), ice_gatherer.rffi())
+            pc::Rust_useSharedIceGatherer(
+                self.rffi.as_borrowed(),
+                ice_gatherer.rffi().as_borrowed(),
+            )
         };
         if ok {
             Ok(())
@@ -229,12 +234,7 @@ impl PeerConnection {
 
     // Rust wrapper around C++ PeerConnection::GetStats().
     pub fn get_stats(&self, stats_observer: &StatsObserver) -> Result<()> {
-        unsafe {
-            pc::Rust_getStats(
-                self.rffi.as_borrowed_ptr(),
-                stats_observer.rffi_stats_observer(),
-            )
-        };
+        unsafe { pc::Rust_getStats(self.rffi.as_borrowed(), stats_observer.rffi().as_borrowed()) };
 
         Ok(())
     }
@@ -249,7 +249,7 @@ impl PeerConnection {
         let as_bps = |rate: Option<DataRate>| rate.map(|rate| rate.as_bps() as i32).unwrap_or(-1);
         unsafe {
             pc::Rust_setSendBitrates(
-                self.rffi.as_borrowed_ptr(),
+                self.rffi.as_borrowed(),
                 as_bps(rates.min),
                 as_bps(rates.start),
                 as_bps(rates.max),
@@ -259,6 +259,9 @@ impl PeerConnection {
         Ok(())
     }
 
+    // Warning: this blocks on the WebRTC network thread, so avoid calling it
+    // while holding a lock, especially a lock also taken in a callback
+    // from the network thread.
     pub fn send_rtp(&self, header: rtp::Header, payload: &[u8]) -> Result<()> {
         let rtp::Header {
             pt,
@@ -268,12 +271,12 @@ impl PeerConnection {
         } = header;
         let ok = unsafe {
             pc::Rust_sendRtp(
-                self.rffi.as_borrowed_ptr(),
+                self.rffi.as_borrowed(),
                 pt,
                 seqnum,
                 timestamp,
                 ssrc,
-                payload.as_ptr(),
+                webrtc::ptr::Borrowed::from_ptr(payload.as_ptr()),
                 payload.len(),
             )
         };
@@ -286,8 +289,11 @@ impl PeerConnection {
 
     // Must be called after either SetLocalDescription or SetRemoteDescription.
     // Received RTP with the matching PT will be sent to PeerConnectionObserver::handle_rtp_received.
+    // Warning: this blocks on the WebRTC network thread, so avoid calling it
+    // while holding a lock, especially a lock also taken in a callback
+    // from the network thread.
     pub fn receive_rtp(&self, pt: rtp::PayloadType) -> Result<()> {
-        let ok = unsafe { pc::Rust_receiveRtp(self.rffi.as_borrowed_ptr(), pt) };
+        let ok = unsafe { pc::Rust_receiveRtp(self.rffi.as_borrowed(), pt) };
         if ok {
             Ok(())
         } else {
@@ -298,10 +304,15 @@ impl PeerConnection {
     pub fn configure_audio_encoders(&self, config: &AudioEncoderConfig) {
         let config: RffiAudioEncoderConfig = config.into();
         info!("PeerConnection.configure_audio_encoders({:?})", config);
-        unsafe { pc::Rust_configureAudioEncoders(self.rffi.as_borrowed_ptr(), &config) };
+        unsafe {
+            pc::Rust_configureAudioEncoders(
+                self.rffi.as_borrowed(),
+                webrtc::ptr::Borrowed::from_ptr(&config),
+            )
+        };
     }
 
     pub fn close(&self) {
-        unsafe { pc::Rust_closePeerConnection(self.rffi.as_borrowed_ptr()) };
+        unsafe { pc::Rust_closePeerConnection(self.rffi.as_borrowed()) };
     }
 }

@@ -25,7 +25,7 @@ use ringrtc::{
         injectable_network::InjectableNetwork,
         media::{VideoFrame, VideoSink, VideoSource},
         network::NetworkInterfaceType,
-        peer_connection_factory::{self as pcf, Certificate, IceServer, PeerConnectionFactory},
+        peer_connection_factory::{self as pcf, IceServer, PeerConnectionFactory},
         peer_connection_observer::NetworkRoute,
     },
 };
@@ -239,7 +239,7 @@ impl CallEndpoint {
                 // Option<CallManager> thing that we have to set later.
                 let endpoint = Self::from_actor(peer_id.clone(), device_id, actor.clone());
 
-                let pcf = PeerConnectionFactory::new(pcf::Config {
+                let mut pcf = PeerConnectionFactory::new(pcf::Config {
                     use_injectable_network: true, // Set up packet flow
                     ..Default::default()
                 })?;
@@ -267,7 +267,9 @@ impl CallEndpoint {
                 let signaling_sender = Box::new(endpoint.clone());
                 let should_assume_messages_sent = true; // cli doesn't support async sending yet.
                 let state_handler = Box::new(endpoint.clone());
-                let incoming_video_sink = Box::new(endpoint.clone());
+                let incoming_video_sink = Box::new(LoggingVideoSink {
+                    peer_id: peer_id.clone(),
+                });
 
                 // Fill in fake group call things
                 let http_client = Box::new(endpoint.clone());
@@ -278,24 +280,22 @@ impl CallEndpoint {
                     signaling_sender,
                     should_assume_messages_sent,
                     state_handler,
-                    incoming_video_sink,
                     http_client,
                     group_handler,
                 );
                 let call_manager = CallManager::new(platform)?;
 
                 // And a CallContext.  We'll use the same context for each call.
-                let cert = Certificate::generate()?;
                 let outgoing_audio_track = pcf.create_outgoing_audio_track()?;
                 let outgoing_video_source = pcf.create_outgoing_video_source()?;
                 let outgoing_video_track =
                     pcf.create_outgoing_video_track(&outgoing_video_source)?;
                 let call_context = NativeCallContext::new(
-                    cert,
                     hide_ip,
                     ice_server,
                     outgoing_audio_track,
                     outgoing_video_track,
+                    incoming_video_sink,
                 );
 
                 Ok(CallEndpointState {
@@ -615,22 +615,24 @@ impl HttpClient for CallEndpoint {
     }
 }
 
-impl VideoSink for CallEndpoint {
-    fn set_enabled(&self, enabled: bool) {
-        if enabled {
-            info!("Here comes some video frames")
-        } else {
-            info!("No more video frames")
-        }
-    }
+#[derive(Clone)]
+struct LoggingVideoSink {
+    peer_id: PeerId,
+}
 
-    fn on_video_frame(&self, frame: VideoFrame) {
+impl VideoSink for LoggingVideoSink {
+    fn on_video_frame(&self, track_id: u32, frame: VideoFrame) {
         info!(
-            "{:?} received video frame size:{}x{}",
+            "{:?}.{} received video frame size:{}x{}",
             self.peer_id,
+            track_id,
             frame.width(),
             frame.height(),
         );
+    }
+
+    fn box_clone(&self) -> Box<dyn VideoSink> {
+        Box::new(self.clone())
     }
 }
 

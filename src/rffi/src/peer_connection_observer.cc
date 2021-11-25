@@ -7,14 +7,16 @@
 
 #include "rffi/api/media.h"
 #include "rffi/src/peer_connection_observer.h"
+#include "rffi/src/ptr.h"
 
 namespace webrtc {
 namespace rffi {
 
-PeerConnectionObserverRffi::PeerConnectionObserverRffi(const rust_object observer,
+PeerConnectionObserverRffi::PeerConnectionObserverRffi(void* observer,
                                                        const PeerConnectionObserverCallbacks* callbacks,
-                                                       bool enable_frame_encryption)
-  : observer_(observer), callbacks_(*callbacks), enable_frame_encryption_(enable_frame_encryption)
+                                                       bool enable_frame_encryption,
+                                                       bool enable_video_frame_event)
+  : observer_(observer), callbacks_(*callbacks), enable_frame_encryption_(enable_frame_encryption), enable_video_frame_event_(enable_video_frame_event)
 {
   RTC_LOG(LS_INFO) << "PeerConnectionObserverRffi:ctor(): " << this->observer_;
 }
@@ -28,7 +30,7 @@ void PeerConnectionObserverRffi::OnIceCandidate(const IceCandidateInterface* can
 
   std::string sdp;
   candidate->ToString(&sdp);
-  rust_candidate.sdp = sdp.c_str();
+  rust_candidate.sdp_borrowed = sdp.c_str();
 
   callbacks_.onIceCandidate(observer_, &rust_candidate);
 
@@ -78,26 +80,16 @@ void PeerConnectionObserverRffi::OnAddStream(
     rtc::scoped_refptr<MediaStreamInterface> stream) {
   RTC_LOG(LS_INFO) << "OnAddStream()";
 
-  // Ownership of |stream| is transferred to the rust call back
-  // handler.  Someone must call RefCountInterface::Release()
-  // eventually.
-  callbacks_.onAddStream(observer_, stream.release());
+  auto video_tracks = stream->GetVideoTracks();
+  if (!video_tracks.empty()) {
+    AddVideoSink(video_tracks[0].get());
+  }
+  callbacks_.onAddStream(observer_, take_rc(stream));
 }
 
 void PeerConnectionObserverRffi::OnRemoveStream(
     rtc::scoped_refptr<MediaStreamInterface> stream) {
   RTC_LOG(LS_INFO) << "OnRemoveStream()";
-}
-
-void PeerConnectionObserverRffi::OnDataChannel(rtc::scoped_refptr<DataChannelInterface> channel) {
-  RTC_LOG(LS_INFO) << "OnDataChannel() label: " << channel->label();
-
-  if (channel->label() == "signaling") {
-    channel->RegisterObserver(this);
-    // Ownership of |channel| is transferred to the rust call back
-    // handler.  Must call Rust_releaseRef() eventually.
-    callbacks_.onSignalingDataChannel(observer_, channel.release());
-  }
 }
 
 void PeerConnectionObserverRffi::OnRtpPacket(const RtpPacketReceived& rtp_packet) {
@@ -127,24 +119,26 @@ void PeerConnectionObserverRffi::OnAddTrack(
       uint32_t id = Rust_getTrackIdAsUint32(receiver->track());
       if (id != 0) {
         receiver->SetFrameDecryptor(CreateDecryptor(id));
-        callbacks_.onAddAudioRtpReceiver(observer_, receiver->track().release());
+        callbacks_.onAddAudioRtpReceiver(observer_, take_rc(receiver->track()));
       } else {
         RTC_LOG(LS_WARNING) << "Not sending decryptor for RtpReceiver with strange ID: " << receiver->track()->id();
       }
     } else {
-      callbacks_.onAddAudioRtpReceiver(observer_, receiver->track().release());
+      callbacks_.onAddAudioRtpReceiver(observer_, take_rc(receiver->track()));
     }
   } else if (receiver->media_type() == cricket::MEDIA_TYPE_VIDEO) {
     if (enable_frame_encryption_) {
       uint32_t id = Rust_getTrackIdAsUint32(receiver->track());
       if (id != 0) {
         receiver->SetFrameDecryptor(CreateDecryptor(id));
-        callbacks_.onAddVideoRtpReceiver(observer_, receiver->track().release());
+        AddVideoSink(static_cast<webrtc::VideoTrackInterface*>(receiver->track().get()));
+        callbacks_.onAddVideoRtpReceiver(observer_, take_rc(receiver->track()));
       } else {
         RTC_LOG(LS_WARNING) << "Not sending decryptor for RtpReceiver with strange ID: " << receiver->track()->id();
       }
     } else {
-      callbacks_.onAddVideoRtpReceiver(observer_, receiver->track().release());
+      AddVideoSink(static_cast<webrtc::VideoTrackInterface*>(receiver->track().get()));
+      callbacks_.onAddVideoRtpReceiver(observer_, take_rc(receiver->track()));
     }
   }
 }
@@ -154,14 +148,11 @@ void PeerConnectionObserverRffi::OnTrack(
   RTC_LOG(LS_INFO) << "OnTrack()";
 }
 
-void PeerConnectionObserverRffi::OnMessage(const DataBuffer& buffer) {
-  RTC_LOG(LS_INFO) << "OnMessage() size: " << buffer.size();
-  callbacks_.onSignalingDataChannelMessage(observer_, buffer.data.cdata(), buffer.size());
-}
-
 class Encryptor : public webrtc::FrameEncryptorInterface {
  public:
-  Encryptor(const rust_object observer, PeerConnectionObserverCallbacks* callbacks) : observer_(observer), callbacks_(callbacks) {}
+  // Passed-in observer must live at least as long as the Encryptor,
+  // which likely means as long as the PeerConnection.
+  Encryptor(void* observer, PeerConnectionObserverCallbacks* callbacks) : observer_(observer), callbacks_(callbacks) {}
 
   // This is called just before Encrypt to get the size of the ciphertext
   // buffer that will be given to Encrypt.
@@ -197,7 +188,7 @@ class Encryptor : public webrtc::FrameEncryptorInterface {
   }
 
  private:
-  const rust_object observer_;
+  void* observer_;
   PeerConnectionObserverCallbacks* callbacks_;
 };
 
@@ -208,9 +199,60 @@ rtc::scoped_refptr<FrameEncryptorInterface> PeerConnectionObserverRffi::CreateEn
   return new rtc::RefCountedObject<Encryptor>(observer_, &callbacks_);
 }
 
+void PeerConnectionObserverRffi::AddVideoSink(VideoTrackInterface* track) {
+  if (!enable_video_frame_event_ || !track) {
+    return;
+  }
+
+  uint32_t track_id = Rust_getTrackIdAsUint32(track);
+  auto sink = std::make_unique<VideoSink>(track_id, this);
+
+  rtc::VideoSinkWants wants;
+  // Note: this causes frames to be dropped, not rotated.
+  // So don't set it to true, even if it seems to make sense!
+  wants.rotation_applied = false;
+
+  // The sink gets stored in the track, but never destroys it.
+  // The sink must live as long as the track, which is why we
+  // stored it in the PeerConnectionObserverRffi.
+  track->AddOrUpdateSink(sink.get(), wants);
+  video_sinks_.push_back(std::move(sink));
+}
+
+VideoSink::VideoSink(uint32_t track_id, PeerConnectionObserverRffi* pc_observer)
+  : track_id_(track_id), pc_observer_(pc_observer) {
+}
+
+void VideoSink::OnFrame(const webrtc::VideoFrame& frame) {
+  pc_observer_->OnVideoFrame(track_id_, frame);
+}
+
+void PeerConnectionObserverRffi::OnVideoFrame(uint32_t track_id, const webrtc::VideoFrame& frame) {
+  RffiVideoFrameMetadata metadata = {};
+  metadata.width = frame.width();
+  metadata.height = frame.height();
+  metadata.rotation = frame.rotation();
+  // We can't keep a reference to the buffer around or it will slow down the video decoder.
+  // This introduces a copy, but only in the case where we aren't rotated,
+  // and it's a copy of i420 and not RGBA (i420 is smaller than RGBA).
+  // TODO: Figure out if we can make the decoder have a larger frame output pool
+  // so that we don't need to do this.
+  auto* buffer_owned_rc = Rust_copyAndRotateVideoFrameBuffer(frame.video_frame_buffer().get(), frame.rotation());
+  // If we rotated the frame, we need to update metadata as well
+  if ((metadata.rotation == kVideoRotation_90) || (metadata.rotation == kVideoRotation_270)) {
+    metadata.width = frame.height();
+    metadata.height = frame.width();
+  }
+  metadata.rotation = kVideoRotation_0;
+
+  callbacks_.onVideoFrame(observer_, track_id, metadata, buffer_owned_rc);
+}
+
 class Decryptor : public webrtc::FrameDecryptorInterface {
  public:
-  Decryptor(uint32_t track_id, const rust_object observer, PeerConnectionObserverCallbacks* callbacks) : track_id_(track_id), observer_(observer), callbacks_(callbacks) {}
+  // Passed-in observer must live at least as long as the Decryptor,
+  // which likely means as long as the PeerConnection.
+  Decryptor(uint32_t track_id, void* observer, PeerConnectionObserverCallbacks* callbacks) : track_id_(track_id), observer_(observer), callbacks_(callbacks) {}
 
   // This is called just before Decrypt to get the size of the plaintext
   // buffer that will be given to Decrypt.
@@ -247,7 +289,7 @@ class Decryptor : public webrtc::FrameDecryptorInterface {
 
  private:
   uint32_t track_id_;
-  const rust_object observer_;
+  void* observer_;
   PeerConnectionObserverCallbacks* callbacks_;
 };
 
@@ -255,16 +297,23 @@ rtc::scoped_refptr<FrameDecryptorInterface> PeerConnectionObserverRffi::CreateDe
   // The PeerConnectionObserverRffi outlives the Decryptor because it outlives the PeerConnection,
   // which outlives the RtpReceiver, which owns the Decryptor.
   // So we know the PeerConnectionObserverRffi outlives the Decryptor.
-  return new rtc::RefCountedObject<Decryptor>(track_id, observer_, &callbacks_);
+  return rtc::make_ref_counted<Decryptor>(track_id, observer_, &callbacks_);
 }
 
+// Returns an owned pointer.
+// Passed-in observer must live at least as long as the returned value,
+// which in turn must live at least as long as the PeerConnection.
 RUSTEXPORT PeerConnectionObserverRffi*
-Rust_createPeerConnectionObserver(const rust_object observer,
-                                  const PeerConnectionObserverCallbacks* callbacks,
-                                  bool enable_frame_encryption) {
-  // This observer will be freed automatically by the the
-  // PeerConnection object during its .close() method.
-  return new PeerConnectionObserverRffi(observer, callbacks, enable_frame_encryption);
+Rust_createPeerConnectionObserver(void* observer_borrowed,
+                                  const PeerConnectionObserverCallbacks* callbacks_borrowed,
+                                  bool enable_frame_encryption,
+                                  bool enable_video_frame_event) {
+  return new PeerConnectionObserverRffi(observer_borrowed, callbacks_borrowed, enable_frame_encryption, enable_video_frame_event);
+}
+
+RUSTEXPORT void
+Rust_deletePeerConnectionObserver(PeerConnectionObserverRffi* observer_owned) {
+  delete observer_owned;
 }
 
 } // namespace rffi

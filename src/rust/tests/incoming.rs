@@ -10,7 +10,6 @@ extern crate ringrtc;
 #[macro_use]
 extern crate log;
 
-use std::ptr;
 use std::time::Duration;
 
 use prost::Message;
@@ -20,7 +19,7 @@ use ringrtc::core::call_manager::MAX_MESSAGE_AGE;
 use ringrtc::core::group_call;
 use ringrtc::core::signaling;
 use ringrtc::protobuf;
-use ringrtc::webrtc::data_channel::DataChannel;
+use ringrtc::webrtc;
 use ringrtc::webrtc::media::MediaStream;
 
 #[macro_use]
@@ -110,8 +109,7 @@ fn inbound_ice_connecting() {
 //
 // 1. receive an offer
 // 2. ice connected
-// 3. on data channel
-// 4. local accept call
+// 3. local accept call
 //
 // Now in the ConnectedAndAccepted state.
 
@@ -129,25 +127,12 @@ fn connect_inbound_call() -> TestContext {
     cm.synchronize().expect(error_line!());
 
     assert_eq!(
-        active_call.state().expect(error_line!()),
-        CallState::ConnectingBeforeAccepted
-    );
-
-    info!("test: injecting signaling data channel connected");
-    let data_channel = unsafe { DataChannel::new(ptr::null()) };
-    active_connection
-        .inject_received_signaling_data_channel(data_channel)
-        .expect(error_line!());
-
-    cm.synchronize().expect(error_line!());
-
-    assert_eq!(
         active_connection.state().expect(error_line!()),
         ConnectionState::ConnectedBeforeAccepted
     );
     assert_eq!(
         active_call.state().expect(error_line!()),
-        CallState::ConnectedWithDataChannelBeforeAccepted
+        CallState::ConnectedBeforeAccepted
     );
     assert_eq!(context.event_count(ApplicationEvent::LocalRinging), 1);
     assert_eq!(context.error_count(), 0);
@@ -159,7 +144,7 @@ fn connect_inbound_call() -> TestContext {
 
     info!("test: add media stream");
     active_connection
-        .handle_received_incoming_media(MediaStream::new(ptr::null()))
+        .handle_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
         .expect(error_line!());
 
     info!("test: accepting call");
@@ -274,6 +259,200 @@ fn inbound_call_hangup_busy() {
         1
     );
     assert!(!cm.busy());
+}
+
+#[test]
+fn inbound_call_drop_connecting() {
+    test_init();
+
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedAppDroppedCall),
+        1
+    );
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn inbound_call_drop_connecting_hangup_first() {
+    test_init();
+
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+
+    cm.received_hangup(
+        active_call.call_id(),
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn inbound_call_drop_connecting_hangup_second() {
+    test_init();
+
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    cm.received_hangup(
+        active_call.call_id(),
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedAppDroppedCall),
+        1
+    );
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn inbound_call_drop_connecting_ice_failed_first() {
+    test_init();
+
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    active_connection.inject_ice_failed().expect(error_line!());
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn inbound_call_drop_connecting_ice_failed_second() {
+    test_init();
+
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    active_connection.inject_ice_failed().expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedAppDroppedCall),
+        1
+    );
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn inbound_call_drop_connected() {
+    test_init();
+
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    info!("test: injecting ice connected");
+    active_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedAppDroppedCall),
+        1
+    );
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn inbound_call_drop_accepted() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+
+    cm.drop_call(active_call.call_id()).expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::EndedAppDroppedCall),
+        1
+    );
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.accepted_hangups_sent(), 0);
+    assert_eq!(context.busy_hangups_sent(), 0);
+    assert_eq!(context.declined_hangups_sent(), 0);
+    assert_eq!(context.normal_hangups_sent(), 0);
+    assert_eq!(context.need_permission_hangups_sent(), 0);
 }
 
 #[test]

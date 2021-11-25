@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use num_enum::TryFromPrimitive;
 use prost::Message;
 use rand::Rng;
@@ -32,8 +32,8 @@ use crate::{
     error::RingRtcError,
     protobuf,
     webrtc::{
-        data_channel::DataChannel,
-        media::{AudioTrack, VideoTrack},
+        self,
+        media::{AudioTrack, VideoFrame, VideoSink, VideoTrack},
         peer_connection::{PeerConnection, SendRates},
         peer_connection_factory::{self as pcf, Certificate, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
@@ -378,7 +378,6 @@ pub enum EndReason {
     FailedToCreatePeerConnectionFactory,
     FailedToGenerateCertificate,
     FailedToCreatePeerConnection,
-    FailedToCreateDataChannel,
     FailedToStartPeerConnection,
     FailedToUpdatePeerConnection,
     FailedToSetMaxSendBitrate,
@@ -767,6 +766,8 @@ impl Client {
         peer_connection_factory: Option<PeerConnectionFactory>,
         outgoing_audio_track: AudioTrack,
         outgoing_video_track: Option<VideoTrack>,
+        // This is separate from the observer so it can bypass a thread hop.
+        incoming_video_sink: Option<Box<dyn VideoSink>>,
         ring_id: Option<RingId>,
     ) -> Result<Self> {
         debug!("group_call::Client(outer)::new(client_id: {})", client_id);
@@ -803,7 +804,7 @@ impl Client {
                 })?;
 
                 let (peer_connection_observer_impl, peer_connection_observer) =
-                    PeerConnectionObserverImpl::uninitialized()?;
+                    PeerConnectionObserverImpl::uninitialized(incoming_video_sink)?;
                 // WebRTC uses alphanumeric plus + and /, which is just barely a superset of this,
                 // but we can't uses dashes due to the sfu.
                 let local_ice_ufrag = random_alphanumeric(4);
@@ -811,18 +812,14 @@ impl Client {
                 let local_dtls_fingerprint = certificate.compute_fingerprint_sha256()?;
                 let hide_ip = false;
                 let ice_server = IceServer::none();
-                let enable_dtls = true;
-                let enable_rtp_data_channel = true;
                 let peer_connection = peer_connection_factory
                     .create_peer_connection(
                         peer_connection_observer,
-                        certificate,
+                        Some(certificate),
                         hide_ip,
                         &ice_server,
                         outgoing_audio_track,
                         outgoing_video_track,
-                        enable_dtls,
-                        enable_rtp_data_channel,
                     )
                     .map_err(|e| {
                         observer.handle_ended(client_id, EndReason::FailedToCreatePeerConnection);
@@ -2839,14 +2836,22 @@ fn encode_proto(msg: impl prost::Message) -> Result<BytesMut> {
 // more convenient (fewer "if let Some(x) = x" to do).
 struct PeerConnectionObserverImpl {
     client: Option<Client>,
+    incoming_video_sink: Option<Box<dyn VideoSink>>,
 }
 
 impl PeerConnectionObserverImpl {
-    fn uninitialized() -> Result<(Box<Self>, PeerConnectionObserver<Self>)> {
-        let mut boxed_observer_impl = Box::new(Self { client: None });
+    fn uninitialized(
+        incoming_video_sink: Option<Box<dyn VideoSink>>,
+    ) -> Result<(Box<Self>, PeerConnectionObserver<Self>)> {
+        let enable_video_frame_event = incoming_video_sink.is_some();
+        let boxed_observer_impl = Box::new(Self {
+            client: None,
+            incoming_video_sink,
+        });
         let observer = PeerConnectionObserver::new(
-            &mut *boxed_observer_impl,
+            webrtc::ptr::Borrowed::from_ptr(&*boxed_observer_impl),
             true, /* enable_frame_encryption */
+            enable_video_frame_event,
         )?;
         Ok((boxed_observer_impl, observer))
     }
@@ -2964,6 +2969,12 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                 );
 
                 if let Some(remote_demux_id) = incoming_video_track.id() {
+                    // When PeerConnection::SetRemoteDescription triggers PeerConnectionObserver::OnAddTrack,
+                    // if it's a VideoTrack, this is where it comes.  Each platform does different things:
+                    // - iOS: The VideoTrack is wrapped in an RTCVideoTrack and passed to the app
+                    //        via handleIncomingVideoTrack and onRemoteDeviceStatesChanged, which adds a sink.
+                    // - Android: The VideoTrack is wrapped in a Java VideoTrack and passed to the app via handleIncomingVideoTrack, which adds a sink.
+                    // - Desktop: A VideoSink is added by the PeerConnectionObserverRffi.
                     state.observer.handle_incoming_video_track(
                         state.client_id,
                         remote_demux_id,
@@ -2979,10 +2990,14 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
         Ok(())
     }
 
-    fn handle_signaling_data_channel_connected(
+    fn handle_incoming_video_frame(
         &mut self,
-        _data_channel: DataChannel,
+        track_id: u32,
+        video_frame: VideoFrame,
     ) -> Result<()> {
+        if let Some(incoming_video_sink) = self.incoming_video_sink.as_ref() {
+            incoming_video_sink.on_video_frame(track_id, video_frame)
+        }
         Ok(())
     }
 
@@ -2995,14 +3010,6 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                 header.ssrc
             );
         }
-    }
-
-    #[allow(clippy::collapsible_if)]
-    fn handle_signaling_data_channel_message(&mut self, _bytes: Bytes) {
-        info!(
-            "group_call::Client(outer)::handle_data_channel_message(client_id: {})",
-            self.log_id()
-        );
     }
 
     fn get_media_ciphertext_buffer_size(
@@ -3558,7 +3565,12 @@ mod tests {
             let observer = FakeObserver::new(user_id.clone());
             let fake_busy = Arc::new(CallMutex::new(false, "fake_busy"));
             let fake_self_uuid = Arc::new(CallMutex::new(Some(user_id.clone()), "fake_self_uuid"));
-            let fake_audio_track = AudioTrack::owned(FAKE_AUDIO_TRACK as *const u32);
+            let fake_audio_track = AudioTrack::new(
+                webrtc::Arc::from_owned(unsafe {
+                    webrtc::ptr::OwnedRc::from_ptr(&FAKE_AUDIO_TRACK as *const u32)
+                }),
+                None,
+            );
             let client = Client::start(
                 b"fake group ID".to_vec(),
                 demux_id,
@@ -3568,6 +3580,7 @@ mod tests {
                 fake_self_uuid,
                 None,
                 fake_audio_track,
+                None,
                 None,
                 None,
             )

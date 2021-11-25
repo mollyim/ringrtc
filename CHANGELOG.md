@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.14.3
+
+- Avoid handling RTP Data before accepted
+
+- Reference signalapp/webrtc@4638c
+  - Port crash fix
+
+## v2.14.2
+
+- Don't terminate a 1:1 call because of transient RTP data error
+
+- Reference signalapp/webrtc@4638b
+  - Make it possible to share an APM between PeerConnections (ensures AEC/NS operation)
+
+## v2.14.1
+
+- Desktop: Clear out the incoming video frame to avoid rendering old data
+
+- iOS: Delete the dSYMs out of the built xcframework
+
+## v2.14.0
+
+- Update WebRTC to 4638 (M95)
+
+- Further improvements to WebRTC pointer management
+
+- Replace DataChannel with direct RTP data
+
+- Logging/Testing/Build improvements
+
 ## v2.13.6
 
 - Use SetAudioPlayout() function for group calls

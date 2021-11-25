@@ -7,8 +7,8 @@
 
 set -e
 
-BIN_DIR="$(realpath -e $(dirname $0))"
-. "${BIN_DIR}/env.sh"
+# shellcheck source=bin/env.sh
+. "$(dirname "$0")"/env.sh
 
 # Note: make sure to only use NodeJS architectures here, like x64, ia32, arm64, etc.
 TARGET_ARCH=${TARGET_ARCH:-x64}
@@ -98,7 +98,7 @@ case "$(rustup show active-toolchain)" in
         CARGO_TARGET="${CARGO_ARCH}-unknown-linux-gnu"
         ;;
     * )
-        echo "Unknown platform detected!\nPlease make sure you have installed a valid Rust toolchain via rustup! Aborting."
+        printf "Unknown platform detected!\nPlease make sure you have installed a valid Rust toolchain via rustup! Aborting.\n"
         exit 1
 esac
 
@@ -109,7 +109,7 @@ export MACOSX_DEPLOYMENT_TARGET="10.10"
 # Build WebRTC.
 (
     cd src/webrtc/src
-    WEBRTC_ARGS="target_cpu=\"${GN_ARCH}\" rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_use_x11=false rtc_enable_sctp=false"
+    WEBRTC_ARGS="target_cpu=\"${GN_ARCH}\" rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_use_x11=false rtc_enable_sctp=false rtc_libvpx_build_vp9=false rtc_include_ilbc=false"
 
     if [ "${BUILD_TYPE}" = "debug" ]
     then
@@ -127,22 +127,22 @@ export MACOSX_DEPLOYMENT_TARGET="10.10"
 
     if [ "${BUILD_TYPE}" = "debug" ]
     then
-        npm_config_arch=${TARGET_ARCH} npm_config_target_arch=${TARGET_ARCH} npm_config_disturl=https://atom.io/download/electron npm_config_runtime=electron npm_config_target=11.2.0 npm_config_build_from_source=true npm_config_devdir=~/.electron-gyp RUSTFLAGS="${RUSTFLAGS_WIN}" OUTPUT_DIR="${OUTPUT_DIR}" cargo build --target ${CARGO_TARGET} --features electron
+        RUSTFLAGS="${RUSTFLAGS_WIN}" OUTPUT_DIR="${OUTPUT_DIR}" cargo build --target ${CARGO_TARGET} --features electron
     else
-        npm_config_arch=${TARGET_ARCH} npm_config_target_arch=${TARGET_ARCH} npm_config_disturl=https://atom.io/download/electron npm_config_runtime=electron npm_config_target=11.2.0 npm_config_build_from_source=true npm_config_devdir=~/.electron-gyp RUSTFLAGS="-C link-arg=-s ${RUSTFLAGS_WIN}" OUTPUT_DIR="${OUTPUT_DIR}" cargo build --target ${CARGO_TARGET} --features electron --release
+        RUSTFLAGS="-C link-arg=-s ${RUSTFLAGS_WIN}" OUTPUT_DIR="${OUTPUT_DIR}" cargo build --target ${CARGO_TARGET} --features electron --release
     fi
 
     if [ $DEFAULT_PLATFORM = "darwin" ]
     then
         mkdir -p ../node/build/darwin
-        cp -f target/${CARGO_TARGET}/${BUILD_TYPE}/libringrtc.dylib ../node/build/darwin/libringrtc-${TARGET_ARCH}.node
+        cp -f target/${CARGO_TARGET}/${BUILD_TYPE}/libringrtc.dylib ../node/build/darwin/libringrtc-"${TARGET_ARCH}".node
     elif [ $DEFAULT_PLATFORM = "win32" ]
     then
         mkdir -p ../node/build/win32
-        cp -f target/${CARGO_TARGET}/${BUILD_TYPE}/ringrtc.dll ../node/build/win32/libringrtc-${TARGET_ARCH}.node
+        cp -f target/${CARGO_TARGET}/${BUILD_TYPE}/ringrtc.dll ../node/build/win32/libringrtc-"${TARGET_ARCH}".node
     elif [ $DEFAULT_PLATFORM = "linux" ]
     then
         mkdir -p ../node/build/linux
-        cp -f target/${CARGO_TARGET}/${BUILD_TYPE}/libringrtc.so ../node/build/linux/libringrtc-${TARGET_ARCH}.node
+        cp -f target/${CARGO_TARGET}/${BUILD_TYPE}/libringrtc.so ../node/build/linux/libringrtc-"${TARGET_ARCH}".node
     fi
 )

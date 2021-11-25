@@ -5,13 +5,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 
+# Allow non-exported environment variables
+# shellcheck disable=SC2034
+
 # Specify WebRTC version.  This corresponds to the
 # branch or tag of the signalapp/webrtc repository.
-WEBRTC_VERSION="4389k-1"
+WEBRTC_VERSION="4638c-1"
 
 RINGRTC_MAJOR_VERSION=2
-RINGRTC_MINOR_VERSION=13
-RINGRTC_REVISION=6
+RINGRTC_MINOR_VERSION=14
+RINGRTC_REVISION=3
 
 # Specify RingRTC version to publish.
 RINGRTC_VERSION="${RINGRTC_MAJOR_VERSION}.${RINGRTC_MINOR_VERSION}.${RINGRTC_REVISION}"
