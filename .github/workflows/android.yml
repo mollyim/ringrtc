@@ -16,7 +16,7 @@ jobs:
     - name: Set up JDK 1.8
       uses: actions/setup-java@v1
       with:
-        java-version: '8.0.292'
+        java-version: '8.0.312'
 
     - name: Validate Gradle Wrapper
       uses: gradle/wrapper-validation-action@v1
@@ -25,7 +25,7 @@ jobs:
       run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /opt/depot_tools
           cd /opt/depot_tools
-          git checkout c4575f80164adf0d5c75141339653e482602e418^{commit}
+          git checkout 2ffa1bde797a8127c0f72908d0bd74051fd65d0d^{commit}
           echo "/opt/depot_tools" >> "$GITHUB_PATH"
 
     - name: Install Clippy
