@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.16.0
+
+- Group Calls: Leave via RTP instead of HTTP
+
+- Group Calls: Don't use DTLS
+
+- Group Calls: Increase default max receive rate
+
+## v2.15.0
+
+- Android: Add audio processing options (to control AEC/NS)
+
+- Android: Improve JNI/Rust interfaces
+
+- Remove legacy Multi-Ring checks and hangup
+
 ## v2.14.3
 
 - Avoid handling RTP Data before accepted

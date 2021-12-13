@@ -15,9 +15,12 @@ use std::{
 };
 
 use bytes::BytesMut;
+use hkdf::Hkdf;
 use num_enum::TryFromPrimitive;
 use prost::Message;
-use rand::Rng;
+use rand::{rngs::OsRng, Rng};
+use sha2::Sha256;
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 use crate::core::util::uuid_to_string;
 use crate::{
@@ -27,7 +30,8 @@ use crate::{
         Result,
     },
     core::{
-        bandwidth_mode::BandwidthMode, call_mutex::CallMutex, crypto as frame_crypto, signaling,
+        bandwidth_mode::BandwidthMode, call_mutex::CallMutex, crypto as frame_crypto, sfu_client,
+        signaling,
     },
     error::RingRtcError,
     protobuf,
@@ -35,12 +39,12 @@ use crate::{
         self,
         media::{AudioTrack, VideoFrame, VideoSink, VideoTrack},
         peer_connection::{PeerConnection, SendRates},
-        peer_connection_factory::{self as pcf, Certificate, IceServer, PeerConnectionFactory},
+        peer_connection_factory::{self as pcf, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
             IceConnectionState, NetworkRoute, PeerConnectionObserver, PeerConnectionObserverTrait,
         },
         rtp,
-        sdp_observer::{create_ssd_observer, SessionDescription},
+        sdp_observer::{create_ssd_observer, SessionDescription, SrtpCryptoSuite, SrtpKey},
         stats_observer::{create_stats_observer, StatsObserver},
     },
 };
@@ -65,13 +69,6 @@ pub type UserIdCiphertext = Vec<u8>;
 // That allow for enough SSRCs to be derived from them.
 // Currently that gap is 16.
 pub type DemuxId = u32;
-// SHA256 of DER form of X.509 certificate
-// Basically what you get from https://tools.ietf.org/html/rfc8122#section-5
-// but with SHA256 and without the hex encoding.
-// Or what you get by calling this WebRTC code:
-//  auto identity = SSLIdentity::Create("name", rtc::KeyParams(), 3153600000);
-//  auto fingerprint = rtc::SSLFingerprint::CreateUnique("sha-256", *identity);
-pub type DtlsFingerprint = [u8; 32];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingId(i64);
@@ -131,49 +128,36 @@ pub enum SignalingMessageUrgency {
     HandleImmediately,
 }
 
-/// Converts the DTLS fingerprint into a SDP-format hex string.
-/// ```
-/// let fp = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31];
-/// let fp = ringrtc::core::group_call::encode_fingerprint(&fp);
-/// assert_eq!(fp, "00:01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F")
-/// ```
-pub fn encode_fingerprint(dtls_fingerprint: &DtlsFingerprint) -> String {
-    let mut s = String::new();
-    for byte in dtls_fingerprint {
-        if !s.is_empty() {
-            s.push(':');
-        }
-        let hex = format!("{:02X}", byte);
-        s.push_str(&hex);
-    }
-    s
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SrtpKeys {
+    client: SrtpKey,
+    server: SrtpKey,
 }
 
-/// Parses a DTLS fingerprint from a SDP-format hex string.
-/// ```
-/// let bad_string = "00:11:22:33";
-/// assert_eq!(ringrtc::core::group_call::decode_fingerprint(&bad_string), None);
-/// let good_string = "00:01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F";
-/// let good_fingerprint = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31];
-/// assert_eq!(ringrtc::core::group_call::decode_fingerprint(&good_string), Some(good_fingerprint));
-/// ```
-pub fn decode_fingerprint(s: &str) -> Option<DtlsFingerprint> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 32 {
-        error!("Failed to parse fingerprint: {} - bad length", s);
-        return None;
-    }
+impl SrtpKeys {
+    const SUITE: SrtpCryptoSuite = SrtpCryptoSuite::AeadAes128Gcm;
+    const KEY_LEN: usize = Self::SUITE.key_size();
+    const SALT_LEN: usize = Self::SUITE.salt_size();
+    const MASTER_KEY_MATERIAL_LEN: usize =
+        Self::KEY_LEN + Self::SALT_LEN + Self::KEY_LEN + Self::SALT_LEN;
 
-    let mut fp = [0; 32];
-    for i in 0..32 {
-        if let Ok(b) = u8::from_str_radix(parts[i], 16) {
-            fp[i] = b;
-        } else {
-            error!("Failed to parse fingerprint: {} - bad component", s);
-            return None;
+    fn from_master_key_material(master_key_material: &[u8; Self::MASTER_KEY_MATERIAL_LEN]) -> Self {
+        Self {
+            client: SrtpKey {
+                suite: Self::SUITE,
+                key: master_key_material[..Self::KEY_LEN].to_vec(),
+                salt: master_key_material[Self::KEY_LEN..][..Self::SALT_LEN].to_vec(),
+            },
+            server: SrtpKey {
+                suite: SrtpCryptoSuite::AeadAes128Gcm,
+                key: master_key_material[Self::KEY_LEN..][Self::SALT_LEN..][..Self::KEY_LEN]
+                    .to_vec(),
+                salt: master_key_material[Self::KEY_LEN..][Self::SALT_LEN..][Self::KEY_LEN..]
+                    [..Self::SALT_LEN]
+                    .to_vec(),
+            },
         }
     }
-    Some(fp)
 }
 
 pub const INVALID_CLIENT_ID: ClientId = 0;
@@ -312,7 +296,7 @@ pub enum ConnectionState {
 //      | joined     |
 //      V            |
 //   Joined       -->|
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JoinState {
     /// Join() has not yet been called
     /// or leave() has been called
@@ -325,9 +309,67 @@ pub enum JoinState {
     /// Join() has been called but a response from the SFU is pending.
     Joining,
 
-    /// Join() has been called and a response from the SFU has been received.
-    /// and a DemuxId/RequestToken has been assigned.
-    Joined(DemuxId, String),
+    /// Join() has been called, a response from the SFU has been received,
+    /// and a DemuxId has been assigned.
+    Joined(DemuxId),
+}
+
+// This really should go in JoinState and/or ConnectionState,
+// but an EphemeralSecret isn't Clone or Debug, so it's inconvenient
+// to put them in there.  Plus, because of the weird relationship
+// between the ConnectionState and JoinState due to limitations of
+// the SFU (not being able to connect until after joined), it's
+// also more convenient to call GroupCall::start_peer_connection
+// with a state separate from those 2.
+enum DheState {
+    NotYetStarted,
+    WaitingForServerPublicKey { client_secret: EphemeralSecret },
+    Negotiated { srtp_keys: SrtpKeys },
+}
+
+impl Default for DheState {
+    fn default() -> Self {
+        Self::NotYetStarted
+    }
+}
+
+impl DheState {
+    fn start(client_secret: EphemeralSecret) -> Self {
+        DheState::WaitingForServerPublicKey { client_secret }
+    }
+
+    fn negotiate_in_place(&mut self, server_pub_key: &PublicKey, hkdf_extra_info: &[u8]) {
+        *self = std::mem::take(self).negotiate(server_pub_key, hkdf_extra_info)
+    }
+
+    fn negotiate(self, server_pub_key: &PublicKey, hkdf_extra_info: &[u8]) -> Self {
+        match self {
+            DheState::NotYetStarted => {
+                error!("Attempting to negotiated SRTP keys before starting DHE.");
+                self
+            }
+            DheState::WaitingForServerPublicKey { client_secret } => {
+                let shared_secret = client_secret.diffie_hellman(server_pub_key);
+                let mut master_key_material = [0u8; SrtpKeys::MASTER_KEY_MATERIAL_LEN];
+                Hkdf::<Sha256>::new(Some(&[0u8; 32]), shared_secret.as_bytes())
+                    .expand_multi_info(
+                        &[
+                            b"Signal_Group_Call_20211105_SignallingDH_SRTPKey_KDF",
+                            hkdf_extra_info,
+                        ],
+                        &mut master_key_material,
+                    )
+                    .expect("SRTP master key material expansion");
+                DheState::Negotiated {
+                    srtp_keys: SrtpKeys::from_master_key_material(&master_key_material),
+                }
+            }
+            DheState::Negotiated { .. } => {
+                warn!("Attempting to negotiated SRTP keys a second time.");
+                self
+            }
+        }
+    }
 }
 
 // The info about SFU needed in order to connect to it.
@@ -336,7 +378,6 @@ pub struct SfuInfo {
     pub udp_addresses: Vec<SocketAddr>,
     pub ice_ufrag: String,
     pub ice_pwd: String,
-    pub dtls_fingerprint: DtlsFingerprint,
 }
 
 // The current state of the SFU conference.
@@ -376,7 +417,7 @@ pub enum EndReason {
     CallManagerIsBusy,
     SfuClientFailedToJoin,
     FailedToCreatePeerConnectionFactory,
-    FailedToGenerateCertificate,
+    FailedToNegotiatedSrtpKeys,
     FailedToCreatePeerConnection,
     FailedToStartPeerConnection,
     FailedToUpdatePeerConnection,
@@ -392,19 +433,12 @@ pub type BoxedPeekInfoHandler = Box<dyn FnOnce(Result<PeekInfo>) + Send + 'stati
 // The callbacks from the Client to the "SFU client" for the group call.
 pub trait SfuClient {
     // This should call Client.on_sfu_client_joined when the SfuClient has joined.
-    fn join(
-        &mut self,
-        ice_ufrag: &str,
-        ice_pwd: &str,
-        dtls_fingerprint: &DtlsFingerprint,
-        client: Client,
-    );
+    fn join(&mut self, ice_ufrag: &str, ice_pwd: &str, dhe_pub_key: [u8; 32], client: Client);
     fn peek(&mut self, handle_remote_devices: BoxedPeekInfoHandler);
 
     // Notifies the client of the new membership proof.
     fn set_membership_proof(&mut self, proof: MembershipProof);
     fn set_group_members(&mut self, members: Vec<GroupMemberInfo>);
-    fn leave(&mut self, long_device_id: String);
 }
 
 // Associates a group member's UUID with their UUID ciphertext
@@ -525,6 +559,8 @@ const RTP_DATA_TO_SFU_SSRC: rtp::Ssrc = 1;
 // ramp all the way up, though.
 const ALL_ALONE_MAX_SEND_RATE_KBPS: u64 = 1;
 
+const NORMAL_MAX_RECEIVE_RATE_KBPS: u64 = 20_000_000;
+
 // The time between when a sender generates a new media send key
 // and applies it.  It needs to be big enough that there is
 // a high probability that receivers will receive the
@@ -632,6 +668,9 @@ struct State {
     join_state: JoinState,
     remote_devices: RemoteDevices,
 
+    // State that changes infrequently and is not sent to the observer.
+    dhe_state: DheState,
+
     // Things to control peeking
     remote_devices_request_state: RemoteDevicesRequestState,
     last_peek_info: Option<PeekInfo>,
@@ -649,7 +688,6 @@ struct State {
     // Things for controlling the PeerConnection
     local_ice_ufrag: String,
     local_ice_pwd: String,
-    local_dtls_fingerprint: DtlsFingerprint,
     sfu_info: Option<SfuInfo>,
     peer_connection: PeerConnection,
     peer_connection_observer_impl: Box<PeerConnectionObserverImpl>,
@@ -798,10 +836,6 @@ impl Client {
                     },
                     Some(v) => v,
                 };
-                let certificate = Certificate::generate().map_err(|e| {
-                    observer.handle_ended(client_id, EndReason::FailedToGenerateCertificate);
-                    e
-                })?;
 
                 let (peer_connection_observer_impl, peer_connection_observer) =
                     PeerConnectionObserverImpl::uninitialized(incoming_video_sink)?;
@@ -809,13 +843,11 @@ impl Client {
                 // but we can't uses dashes due to the sfu.
                 let local_ice_ufrag = random_alphanumeric(4);
                 let local_ice_pwd = random_alphanumeric(22);
-                let local_dtls_fingerprint = certificate.compute_fingerprint_sha256()?;
                 let hide_ip = false;
                 let ice_server = IceServer::none();
                 let peer_connection = peer_connection_factory
                     .create_peer_connection(
                         peer_connection_observer,
-                        Some(certificate),
                         hide_ip,
                         &ice_server,
                         outgoing_audio_track,
@@ -837,6 +869,7 @@ impl Client {
 
                     connection_state: ConnectionState::NotConnected,
                     join_state: JoinState::NotJoined(ring_id),
+                    dhe_state: DheState::default(),
                     remote_devices: Default::default(),
 
                     remote_devices_request_state:
@@ -849,7 +882,6 @@ impl Client {
 
                     outgoing_heartbeat_state: Default::default(),
 
-                    local_dtls_fingerprint,
                     sfu_info: None,
                     peer_connection_observer_impl,
                     peer_connection,
@@ -870,7 +902,8 @@ impl Client {
                     speaker_rtp_timestamp: None,
 
                     send_rates: SendRates::default(),
-                    max_receive_rate: None,
+                    // If the client never calls set_bandwidth_mode, use the normal max receive rate.
+                    max_receive_rate: Some(DataRate::from_kbps(NORMAL_MAX_RECEIVE_RATE_KBPS)),
                     forwarding_video_demux_ids: HashSet::default(),
 
                     cancellable_initial_ring: None,
@@ -927,9 +960,7 @@ impl Client {
         Self::send_video_requests_to_sfu(state);
         state.on_demand_video_request_sent_since_last_tick = false;
 
-        state
-            .actor
-            .send_delayed(TICK_INTERVAL, move |state| Self::tick(state));
+        state.actor.send_delayed(TICK_INTERVAL, Self::tick);
     }
 
     fn request_remote_devices_as_soon_as_possible(state: &mut State) {
@@ -1100,7 +1131,7 @@ impl Client {
                 state.client_id
             );
             match state.join_state {
-                JoinState::Joined(_, _) => {
+                JoinState::Joined(_) => {
                     warn!("Can't join when already joined.");
                 }
                 JoinState::Joining => {
@@ -1123,10 +1154,13 @@ impl Client {
                         state.observer.request_membership_proof(state.client_id);
                         state.next_membership_proof_request_time = Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
 
+                        let client_secret = EphemeralSecret::new(&mut OsRng);
+                        let client_pub_key = PublicKey::from(&client_secret);
+                        state.dhe_state = DheState::start(client_secret);
                         state.sfu_client.join(
                             &state.local_ice_ufrag,
                             &state.local_ice_pwd,
-                            &state.local_dtls_fingerprint,
+                            *client_pub_key.as_bytes(),
                             callback,
                         );
                     } else {
@@ -1169,7 +1203,7 @@ impl Client {
             state.client_id,
             join_state
         );
-        state.join_state = join_state.clone();
+        state.join_state = join_state;
         state
             .observer
             .handle_join_state_changed(state.client_id, join_state);
@@ -1196,15 +1230,14 @@ impl Client {
             JoinState::NotJoined(_) => {
                 warn!("Can't leave when not joined.");
             }
-            JoinState::Joining | JoinState::Joined(_, _) => {
+            JoinState::Joining | JoinState::Joined(_) => {
                 state.peer_connection.set_outgoing_media_enabled(false);
                 state.peer_connection.set_incoming_media_enabled(false);
                 Self::release_busy(state);
 
-                if let JoinState::Joined(local_demux_id, long_device_id) = state.join_state.clone()
-                {
-                    state.sfu_client.leave(long_device_id);
+                if let JoinState::Joined(local_demux_id) = state.join_state {
                     Self::send_leaving_through_sfu_and_over_signaling(state, local_demux_id);
+                    Self::send_leave_to_sfu(state);
                 }
                 Self::set_join_state_and_notify_observer(state, JoinState::NotJoined(None));
                 state.next_stats_time = None;
@@ -1371,7 +1404,7 @@ impl Client {
                 state.client_id
             );
 
-            if let JoinState::Joined(local_demux_id, _) = state.join_state {
+            if let JoinState::Joined(local_demux_id) = state.join_state {
                 let user_ids: HashSet<UserId> = state
                     .remote_devices
                     .iter()
@@ -1421,7 +1454,7 @@ impl Client {
                 // Effectively only allow one low quality video
                 BandwidthMode::Low => DataRate::from_kbps(500),
                 // Effectively allow a lot of video 
-                BandwidthMode::Normal => DataRate::from_kbps(20_000_000),
+                BandwidthMode::Normal => DataRate::from_kbps(NORMAL_MAX_RECEIVE_RATE_KBPS),
             });
             if !state.on_demand_video_request_sent_since_last_tick {
                 Self::send_video_requests_to_sfu(state);
@@ -1524,6 +1557,7 @@ impl Client {
                     max_kbps: state.max_receive_rate.map(|rate| rate.as_kbps() as u32),
                     requests,
                 }),
+                ..Default::default()
             }) {
                 Err(e) => {
                     warn!("Failed to encode video request: {:?}", e);
@@ -1588,7 +1622,7 @@ impl Client {
         );
 
         let joining_or_joined = match state.join_state {
-            JoinState::Joined(_, _) | JoinState::Joining => true,
+            JoinState::Joined(_) | JoinState::Joining => true,
             JoinState::NotJoined(_) => false,
         };
         if joining_or_joined {
@@ -1614,7 +1648,7 @@ impl Client {
     }
 
     // This should be called by the SfuClient after it has joined.
-    pub fn on_sfu_client_joined(&self, result: Result<(SfuInfo, DemuxId, String)>) {
+    pub fn on_sfu_client_joined(&self, joined: Result<sfu_client::Joined>) {
         debug!(
             "group_call::Client(outer)::on_sfu_client_joined(client_id: {})",
             self.client_id
@@ -1625,14 +1659,36 @@ impl Client {
                 state.client_id
             );
 
-            if let Ok((sfu_info, local_demux_id, long_device_id)) = result {
+            if let Ok(sfu_client::Joined {
+                sfu_info,
+                local_demux_id,
+                server_dhe_pub_key,
+                hkdf_extra_info,
+                ..
+            }) = joined
+            {
                 match state.connection_state {
                     ConnectionState::NotConnected => {
                         warn!("The SFU completed joining before connect() was requested.");
                     }
                     ConnectionState::Connecting => {
-                        if Self::start_peer_connection(state, &sfu_info, local_demux_id).is_err() {
+                        state.dhe_state.negotiate_in_place(
+                            &PublicKey::from(server_dhe_pub_key),
+                            &hkdf_extra_info,
+                        );
+                        let srtp_keys = match &state.dhe_state {
+                            DheState::Negotiated { srtp_keys } => srtp_keys,
+                            _ => {
+                                Self::end(state, EndReason::FailedToNegotiatedSrtpKeys);
+                                return;
+                            }
+                        };
+
+                        if Self::start_peer_connection(state, &sfu_info, local_demux_id, srtp_keys)
+                            .is_err()
+                        {
                             Self::end(state, EndReason::FailedToStartPeerConnection);
+                            return;
                         };
 
                         // Set a low bitrate until we learn someone else is in the call.
@@ -1658,7 +1714,7 @@ impl Client {
                         // The call to set_peek_info_inner needs the join state to be joined.
                         // But make sure to fire observer.handle_join_state_changed after
                         // set_peek_info_inner so that state.remote_devices are filled in.
-                        state.join_state = JoinState::Joined(local_demux_id, long_device_id);
+                        state.join_state = JoinState::Joined(local_demux_id);
                         if let Some(peek_info) = &state.last_peek_info {
                             // TODO: Do the same processing without making it look like we just
                             // got an update from the server even though the update actually came
@@ -1668,13 +1724,13 @@ impl Client {
                         }
                         state
                             .observer
-                            .handle_join_state_changed(state.client_id, state.join_state.clone());
+                            .handle_join_state_changed(state.client_id, state.join_state);
                         // We just now appeared in the participants list, and possibly even updated
                         // the eraId.
                         Self::request_remote_devices_as_soon_as_possible(state);
                         state.next_stats_time = Some(Instant::now() + STATS_INTERVAL);
                     }
-                    JoinState::Joined(_, _) => {
+                    JoinState::Joined(_) => {
                         warn!("The SFU completed joining more than once.");
                     }
                 };
@@ -1757,13 +1813,14 @@ impl Client {
         state: &State,
         sfu_info: &SfuInfo,
         local_demux_id: DemuxId,
+        srtp_keys: &SrtpKeys,
     ) -> Result<()> {
         debug!(
             "group_call::Client(inner)::start_peer_connection(client_id: {})",
             state.client_id
         );
 
-        Self::set_peer_connection_descriptions(state, sfu_info, local_demux_id, &[])?;
+        Self::set_peer_connection_descriptions(state, sfu_info, local_demux_id, &[], srtp_keys)?;
 
         for addr in &sfu_info.udp_addresses {
             // We use the octects instead of to_string() to bypass the IP address logging filter.
@@ -1862,7 +1919,10 @@ impl Client {
         }
 
         let peek_info_to_remember = peek_info.clone();
-        if let JoinState::Joined(local_demux_id, _) = state.join_state {
+        if let (JoinState::Joined(local_demux_id), DheState::Negotiated { srtp_keys }) =
+            (&state.join_state, &state.dhe_state)
+        {
+            let local_demux_id = *local_demux_id;
             // We remember these before changing state.remote_devices so we can calculate changes after.
             let old_demux_ids: HashSet<DemuxId> = state.remote_devices.demux_id_set();
 
@@ -1928,6 +1988,7 @@ impl Client {
                         sfu_info,
                         local_demux_id,
                         &new_demux_ids,
+                        srtp_keys,
                     );
                     if result.is_err() {
                         Self::end(state, EndReason::FailedToUpdatePeerConnection);
@@ -2061,11 +2122,12 @@ impl Client {
         sfu_info: &SfuInfo,
         local_demux_id: DemuxId,
         remote_demux_ids: &[DemuxId],
+        srtp_keys: &SrtpKeys,
     ) -> Result<()> {
         let local_description = SessionDescription::local_for_group_call(
             &state.local_ice_ufrag,
             &state.local_ice_pwd,
-            &state.local_dtls_fingerprint,
+            &srtp_keys.client,
             Some(local_demux_id),
         )?;
         let observer = create_ssd_observer();
@@ -2077,7 +2139,7 @@ impl Client {
         let remote_description = SessionDescription::remote_for_group_call(
             &sfu_info.ice_ufrag,
             &sfu_info.ice_pwd,
-            &sfu_info.dtls_fingerprint,
+            &srtp_keys.server,
             remote_demux_ids,
         )?;
         let observer = create_ssd_observer();
@@ -2105,7 +2167,7 @@ impl Client {
                 let ratchet_counter: frame_crypto::RatchetCounter = 0;
                 let secret = frame_crypto::random_secret(&mut rand::rngs::OsRng);
 
-                if let JoinState::Joined(local_demux_id, _) = state.join_state {
+                if let JoinState::Joined(local_demux_id) = state.join_state {
                     let user_ids: HashSet<UserId> = state
                         .remote_devices
                         .iter()
@@ -2175,7 +2237,7 @@ impl Client {
                 .expect("Get lock for frame encryption context to advance media send key");
             frame_crypto_context.advance_send_ratchet()
         };
-        if let JoinState::Joined(local_demux_id, _) = state.join_state {
+        if let JoinState::Joined(local_demux_id) = state.join_state {
             info!(
                 "Sending newly advanced key to users with added devices (number of users: {})",
                 users_with_added_devices.len()
@@ -2273,7 +2335,7 @@ impl Client {
             "Sending pending media key to users with added devices (number of users: {}).",
             users_with_added_devices.len()
         );
-        if let JoinState::Joined(local_demux_id, _) = state.join_state {
+        if let JoinState::Joined(local_demux_id) = state.join_state {
             if let KeyRotationState::Pending { secret, .. } = state.media_send_key_rotation_state {
                 for user_id in users_with_added_devices.iter() {
                     Self::send_media_send_key_to_user_over_signaling(
@@ -2485,6 +2547,27 @@ impl Client {
         Self::broadcast_data_through_sfu(state, &heartbeat_msg)
     }
 
+    fn send_leave_to_sfu(state: &mut State) {
+        use protobuf::group_call::{device_to_sfu::LeaveMessage, DeviceToSfu};
+        match encode_proto(DeviceToSfu {
+            leave: Some(LeaveMessage {}),
+            ..Default::default()
+        }) {
+            Err(e) => {
+                warn!("Failed to encode LeaveMessage: {:?}", e);
+            }
+            Ok(msg) => {
+                if let Err(e) = Self::send_data_to_sfu(state, &msg) {
+                    warn!("Failed to send LeaveMessage: {:?}", e);
+                }
+                // Send it *again* to increase reliability just a little.
+                if let Err(e) = Self::send_data_to_sfu(state, &msg) {
+                    warn!("Failed to send extra redundancy LeaveMessage: {:?}", e);
+                }
+            }
+        }
+    }
+
     fn send_leaving_through_sfu_and_over_signaling(state: &mut State, local_demux_id: DemuxId) {
         use protobuf::group_call::{device_to_device::Leaving, DeviceToDevice};
 
@@ -2561,7 +2644,7 @@ impl Client {
             "group_call::Client(inner)::broadcast_data_through_sfu(client_id: {}, message: {:?})",
             state.client_id, message,
         );
-        if let JoinState::Joined(local_demux_id, _) = state.join_state {
+        if let JoinState::Joined(local_demux_id) = state.join_state {
             let message = Self::encrypt_data(state, message)?;
             let seqnum = state.rtp_data_through_sfu_next_seqnum;
             state.rtp_data_through_sfu_next_seqnum =
@@ -2586,7 +2669,7 @@ impl Client {
             "group_call::Client(inner)::send_data_to_sfu(client_id: {}, message: {:?})",
             state.client_id, message,
         );
-        if let JoinState::Joined(_local_demux_id, _) = state.join_state {
+        if let JoinState::Joined(_) = state.join_state {
             let seqnum = state.rtp_data_to_sfu_next_seqnum;
             state.rtp_data_to_sfu_next_seqnum = state.rtp_data_to_sfu_next_seqnum.wrapping_add(1);
 
@@ -2899,7 +2982,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                     (ConnectionState::Connecting, IceConnectionState::Disconnected) |
                     (ConnectionState::Connecting, IceConnectionState::Closed) |
                     (ConnectionState::Connecting, IceConnectionState::Failed) => {
-                        // ICE or DTLS failed before we got connected :(
+                        // ICE failed before we got connected :(
                         Client::end(state, EndReason::IceFailedWhileConnecting);
                     }
                     (ConnectionState::Connecting, IceConnectionState::Checking) => {
@@ -2907,8 +2990,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                     }
                     (ConnectionState::Connecting, IceConnectionState::Connected) |
                     (ConnectionState::Connecting, IceConnectionState::Completed) => {
-                        // ICE and DTLS Connected!
-                        // (Despite the name, PeerConnection::OnIceStateChanged is for ICE and DTLS.
+                        // ICE Connected!
                         Client::set_connection_state_and_notify_observer(state, ConnectionState::Connected);
                     }
                     (ConnectionState::Connected, IceConnectionState::Checking) |
@@ -3195,21 +3277,21 @@ mod tests {
             &mut self,
             _ice_ufrag: &str,
             _ice_pwd: &str,
-            _dtls_fingerprint: &DtlsFingerprint,
+            _dhe_pub_key: [u8; 32],
             client: Client,
         ) {
-            client.on_sfu_client_joined(Ok((
-                self.sfu_info.clone(),
-                self.local_demux_id,
-                "token".to_string(),
-            )));
+            client.on_sfu_client_joined(Ok(sfu_client::Joined {
+                sfu_info: self.sfu_info.clone(),
+                local_demux_id: self.local_demux_id,
+                server_dhe_pub_key: [0u8; 32],
+                hkdf_extra_info: b"hkdf_extra_info".to_vec(),
+            }));
         }
         fn peek(&mut self, _handle_remote_devices: BoxedPeekInfoHandler) {
             self.request_count.fetch_add(1, atomic::Ordering::SeqCst);
         }
         fn set_group_members(&mut self, _members: Vec<GroupMemberInfo>) {}
         fn set_membership_proof(&mut self, _proof: MembershipProof) {}
-        fn leave(&mut self, _long_device_id: String) {}
     }
 
     // TODO: Put this in common util area?
@@ -3403,7 +3485,7 @@ mod tests {
         }
 
         fn handle_join_state_changed(&self, _client_id: ClientId, join_state: JoinState) {
-            if let JoinState::Joined(_, _) = join_state {
+            if let JoinState::Joined(_) = join_state {
                 let mut owned_remote_devices_at_join_time = self
                     .remote_devices_at_join_time
                     .lock()
@@ -3558,7 +3640,6 @@ mod tests {
                     udp_addresses: Vec::new(),
                     ice_ufrag: "fake ICE ufrag".to_string(),
                     ice_pwd: "fake ICE pwd".to_string(),
-                    dtls_fingerprint: DtlsFingerprint::default(),
                 },
                 forged_demux_id.unwrap_or(demux_id),
             );
@@ -4446,8 +4527,9 @@ mod tests {
                             height: Some(0),
                         },
                     ],
-                    max_kbps: None,
-                })
+                    max_kbps: Some(NORMAL_MAX_RECEIVE_RATE_KBPS as u32),
+                }),
+                ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4507,7 +4589,8 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(1),
-                })
+                }),
+                ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4535,7 +4618,8 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(500),
-                })
+                }),
+                ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
@@ -4563,12 +4647,38 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(20_000_000),
-                })
+                }),
+                ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
 
         client1.disconnect_and_wait_until_ended();
+    }
+
+    #[test]
+    fn device_to_sfu_leave() {
+        use protobuf::group_call::{device_to_sfu::LeaveMessage, DeviceToSfu};
+
+        let mut client1 = TestClient::new(vec![1], 1, None);
+
+        let (sender, receiver) = mpsc::channel();
+        client1.sfu_rtp_packet_sender = Some(sender);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[]);
+        client1.client.leave();
+
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                leave: Some(LeaveMessage {}),
+                ..Default::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
     }
 
     #[test]
@@ -5492,5 +5602,88 @@ mod remote_devices_tests {
 
     fn long_device_id(id: u32) -> u64 {
         ((id as u64) << 32) | (id as u64)
+    }
+
+    #[test]
+    fn srtp_keys_from_master_key_material() {
+        assert_eq!(
+            SrtpKeys {
+                client: SrtpKey {
+                    suite: SrtpCryptoSuite::AeadAes128Gcm,
+                    key: (1..=16).collect(),
+                    salt: (17..=28).collect(),
+                },
+                server: SrtpKey {
+                    suite: SrtpCryptoSuite::AeadAes128Gcm,
+                    key: (29..=44).collect(),
+                    salt: (45..=56).collect(),
+                }
+            },
+            SrtpKeys::from_master_key_material(
+                &((1..=56).collect::<Vec<u8>>().try_into().unwrap())
+            )
+        )
+    }
+
+    #[test]
+    fn dhe_state() {
+        struct NotCryptoRng<T: rand::RngCore>(T);
+
+        impl<T: rand::RngCore> rand::RngCore for NotCryptoRng<T> {
+            fn next_u32(&mut self) -> u32 {
+                self.0.next_u32()
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                self.0.next_u64()
+            }
+
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                self.0.fill_bytes(dest)
+            }
+
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand::Error> {
+                self.0.try_fill_bytes(dest)
+            }
+        }
+
+        impl<T: rand::RngCore> rand::CryptoRng for NotCryptoRng<T> {}
+
+        let mut rand = NotCryptoRng(rand::rngs::mock::StepRng::new(1, 1));
+        let client_secret = EphemeralSecret::new(&mut rand);
+        let server_secret = EphemeralSecret::new(&mut rand);
+        let client_pub_key = PublicKey::from(&client_secret);
+        let server_pub_key = PublicKey::from(&server_secret);
+        let server_cert = &b"server_cert"[..];
+
+        let mut state = DheState::default();
+        assert!(matches!(state, DheState::NotYetStarted));
+        state.negotiate_in_place(&server_pub_key, server_cert);
+        assert!(matches!(state, DheState::NotYetStarted));
+
+        state = DheState::start(client_secret);
+        assert!(matches!(state, DheState::WaitingForServerPublicKey { .. }));
+        state.negotiate_in_place(&server_pub_key, server_cert);
+        assert!(matches!(state, DheState::Negotiated { .. }));
+        if let DheState::Negotiated { srtp_keys } = state {
+            let server_master_key_material = {
+                // Code copied from the server
+                let shared_secret = server_secret.diffie_hellman(&client_pub_key);
+                let mut master_key_material = [0u8; 56];
+                Hkdf::<Sha256>::new(Some(&[0u8; 32]), shared_secret.as_bytes())
+                    .expand_multi_info(
+                        &[
+                            b"Signal_Group_Call_20211105_SignallingDH_SRTPKey_KDF",
+                            server_cert,
+                        ],
+                        &mut master_key_material,
+                    )
+                    .unwrap();
+                master_key_material
+            };
+            let expected_srtp_keys =
+                SrtpKeys::from_master_key_material(&server_master_key_material);
+            assert_eq!(expected_srtp_keys, srtp_keys);
+        };
     }
 }

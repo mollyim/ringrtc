@@ -186,7 +186,6 @@ pub enum EndReason {
     AcceptedOnAnotherDevice,
     DeclinedOnAnotherDevice,
     BusyOnAnotherDevice,
-    CallerIsNotMultiring,
 }
 
 impl fmt::Display for EndReason {
@@ -208,7 +207,6 @@ impl fmt::Display for EndReason {
             EndReason::AcceptedOnAnotherDevice => "AcceptedOnAnotherDevice",
             EndReason::DeclinedOnAnotherDevice => "DeclinedOnAnotherDevice",
             EndReason::BusyOnAnotherDevice => "BusyOnAnotherDevice",
-            EndReason::CallerIsNotMultiring => "CallerIsNotMultiring",
         };
         write!(f, "({})", display)
     }
@@ -412,7 +410,6 @@ impl Platform for NativePlatform {
         )?;
         let pc = self.peer_connection_factory.create_peer_connection(
             pc_observer,
-            None, /* disable DTLS; no certificate */
             context.hide_ip,
             &context.ice_server,
             context.outgoing_audio_track.clone(),
@@ -537,10 +534,6 @@ impl Platform for NativePlatform {
                 remote_peer,
                 CallState::Ended(EndReason::BusyOnAnotherDevice),
             ),
-            ApplicationEvent::IgnoreCallsFromNonMultiringCallers => self.send_state(
-                remote_peer,
-                CallState::Ended(EndReason::CallerIsNotMultiring),
-            ),
             ApplicationEvent::RemoteVideoEnable => self.send_remote_video_state(remote_peer, true),
             ApplicationEvent::RemoteVideoDisable => {
                 self.send_remote_video_state(remote_peer, false)
@@ -663,14 +656,13 @@ impl Platform for NativePlatform {
             "NativePlatform::on_send_hangup(): remote_peer: {}, call_id: {}",
             remote_peer, call_id
         );
-        let message = if send.use_legacy {
-            signaling::Message::LegacyHangup(send.hangup)
-        } else {
-            signaling::Message::Hangup(send.hangup)
-        };
         let receiver_device_id = None; // always broadcast
-
-        self.send_signaling(remote_peer, call_id, receiver_device_id, message)?;
+        self.send_signaling(
+            remote_peer,
+            call_id,
+            receiver_device_id,
+            signaling::Message::Hangup(send.hangup),
+        )?;
         Ok(())
     }
 

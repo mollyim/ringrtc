@@ -20,7 +20,7 @@ use crate::android::jni_util::*;
 use crate::android::logging::init_logging;
 use crate::android::webrtc_peer_connection_factory::*;
 
-use crate::common::{CallId, CallMediaType, DeviceId, FeatureLevel, HttpResponse, Result};
+use crate::common::{CallId, CallMediaType, DeviceId, HttpResponse, Result};
 use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call_manager::CallManager;
 use crate::core::connection::Connection;
@@ -43,11 +43,12 @@ pub fn get_build_info(env: &JNIEnv) -> Result<jobject> {
     #[cfg(any(not(debug_assertions), test))]
     let debug = false;
 
-    const BUILD_INFO_CLASS: &str = "org/signal/ringrtc/BuildInfo";
-    const BUILD_INFO_SIG: &str = "(Z)V";
-    let args = [debug.into()];
-
-    let result = jni_new_object(env, BUILD_INFO_CLASS, BUILD_INFO_SIG, &args)?.into_inner();
+    let result = jni_new_object(
+        env,
+        jni_class_name!(org.signal.ringrtc.BuildInfo),
+        jni_args!((debug => boolean) -> void),
+    )?
+    .into_inner();
 
     Ok(result)
 }
@@ -80,7 +81,7 @@ pub fn create_call_manager(env: &JNIEnv, jni_call_manager: JObject) -> Result<jl
 
 /// Create a org.webrtc.PeerConnection object
 pub fn create_peer_connection(
-    env: &JNIEnv,
+    env: JNIEnv,
     peer_connection_factory: jlong,
     native_connection: webrtc::ptr::Borrowed<Connection<AndroidPlatform>>,
     jni_rtc_config: JObject,
@@ -104,7 +105,7 @@ pub fn create_peer_connection(
     // construct JNI OwnedPeerConnection object
     let jni_owned_pc = unsafe {
         Java_org_webrtc_PeerConnectionFactory_nativeCreatePeerConnection(
-            env.clone(),
+            env,
             JClass::from(JObject::null()),
             peer_connection_factory,
             jni_rtc_config,
@@ -248,7 +249,6 @@ pub fn received_answer(
     call_id: jlong,
     sender_device_id: DeviceId,
     opaque: jbyteArray,
-    sender_device_feature_level: FeatureLevel,
     sender_identity_key: jbyteArray,
     receiver_identity_key: jbyteArray,
 ) -> Result<()> {
@@ -277,7 +277,6 @@ pub fn received_answer(
         signaling::ReceivedAnswer {
             answer: signaling::Answer::new(opaque)?,
             sender_device_id,
-            sender_device_feature_level,
             sender_identity_key,
             receiver_identity_key,
         },
@@ -296,7 +295,6 @@ pub fn received_offer(
     age_sec: u64,
     call_media_type: CallMediaType,
     receiver_device_id: DeviceId,
-    sender_device_feature_level: FeatureLevel,
     receiver_device_is_primary: bool,
     sender_identity_key: jbyteArray,
     receiver_identity_key: jbyteArray,
@@ -329,7 +327,6 @@ pub fn received_offer(
             offer: signaling::Offer::new(call_media_type, opaque)?,
             age: Duration::from_secs(age_sec),
             sender_device_id,
-            sender_device_feature_level,
             receiver_device_id,
             receiver_device_is_primary,
             sender_identity_key,
@@ -625,11 +622,13 @@ pub fn peek_group_call(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_group_call_client(
     env: &JNIEnv,
     call_manager: *mut AndroidCallManager,
     group_id: jbyteArray,
     sfu_url: JString,
+    hkdf_extra_info: jbyteArray,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -638,6 +637,7 @@ pub fn create_group_call_client(
 
     let group_id = env.convert_byte_array(group_id)?;
     let sfu_url = env.get_string(sfu_url)?.into();
+    let hkdf_extra_info = env.convert_byte_array(hkdf_extra_info)?;
 
     let peer_connection_factory = unsafe {
         PeerConnectionFactory::from_native_factory(webrtc::Arc::from_borrowed(
@@ -671,6 +671,7 @@ pub fn create_group_call_client(
     call_manager.create_group_call_client(
         group_id,
         sfu_url,
+        hkdf_extra_info,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
@@ -805,9 +806,9 @@ pub fn request_video(
     let jni_rendered_resolution_list = env.get_list(jni_rendered_resolutions)?;
     let mut rendered_resolutions: Vec<group_call::VideoRequest> = Vec::new();
     for jni_rendered_resolution in jni_rendered_resolution_list.iter()? {
-        const LONG_TYPE: &str = "J";
-        const INT_TYPE: &str = "I";
-        const NULLABLE_INT_TYPE: &str = "Ljava/lang/Integer;";
+        const LONG_TYPE: &str = jni_signature!(long);
+        const INT_TYPE: &str = jni_signature!(int);
+        const NULLABLE_INT_TYPE: &str = jni_signature!(java.lang.Integer);
 
         const DEMUX_ID_FIELD: &str = "demuxId";
         let demux_id =
@@ -833,9 +834,9 @@ pub fn request_video(
         let framerate = if framerate.is_null() {
             None
         } else {
-            // We have java/lang/Integer, so we need to invoke the function to get the actual
+            // We have java.lang.Integer, so we need to invoke the function to get the actual
             // int value that is attached to it.
-            match env.call_method(framerate, "intValue", "()I", &[]) {
+            match env.call_method(framerate, "intValue", jni_signature!(() -> int), &[]) {
                 Ok(jvalue) => {
                     match jvalue.i() {
                         Ok(int) => Some(int.to_owned() as u16),
