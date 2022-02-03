@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.17.0
+
+- Add API to get the incoming and outgoing audio levels
+
+## v2.16.1
+
+- Node: Optimize use of CanvasVideoRenderer.renderVideoFrame
+
+- Node: Update builds and logging
+
 ## v2.16.0
 
 - Group Calls: Leave via RTP instead of HTTP

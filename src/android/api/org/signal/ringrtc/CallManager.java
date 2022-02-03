@@ -767,6 +767,7 @@ public class CallManager {
   {
     checkCallManagerExists();
 
+    Log.i(TAG, "#outgoing_audio_enabled: " + enable);
     Connection connection = ringrtcGetActiveConnection(nativeCallManager);
     connection.setAudioEnabled(enable);
   }
@@ -1134,6 +1135,11 @@ public class CallManager {
     observer.onNetworkRouteChanged(remote, networkRoute);
   }
 
+  @CalledByNative
+  private void onAudioLevels(Remote remote, int capturedLevel, int receivedLevel) {
+    observer.onAudioLevels(remote, capturedLevel, receivedLevel);
+  }
+
   // A faster version of PeerConnection.AdapterType.fromNativeIndex.
   // It also won't return null.
   @NonNull
@@ -1311,6 +1317,19 @@ public class CallManager {
   }
 
   @CalledByNative
+  private void handleAudioLevels(long clientId, int capturedLevel, List<ReceivedAudioLevel> receivedLevels) {
+    Log.d(TAG, "handleAudioLevels():");
+
+    GroupCall groupCall = this.groupCallByClientId.get(clientId);
+    if (groupCall == null) {
+      Log.w(TAG, "groupCall not found by clientId: " + clientId);
+      return;
+    }
+
+    groupCall.handleAudioLevels(capturedLevel, receivedLevels);
+  }
+
+  @CalledByNative
   private void handleJoinStateChanged(long clientId, GroupCall.JoinState joinState) {
     Log.i(TAG, "handleJoinStateChanged():");
 
@@ -1478,6 +1497,21 @@ public class CallManager {
       }
 
       factory.dispose();
+    }
+  }
+
+  /**
+   *
+   * A way to pass a list of (demuxId, level) through the FFI.
+   *
+   */
+  public class ReceivedAudioLevel {
+    public long demuxId;
+    public int level;  // Range of 0-32767, where 0 is silence
+
+    public ReceivedAudioLevel(long demuxId, int level) {
+      this.demuxId = demuxId;
+      this.level = level;
     }
   }
 
@@ -1732,6 +1766,16 @@ public class CallManager {
      * @param networkRoute  the current network route
      */
     void onNetworkRouteChanged(Remote remote, NetworkRoute networkRoute);
+
+    /**
+     *
+     * Notification of audio levels
+     *
+     * @param remote        remote peer of the incoming busy call
+     * @param capturedLevel the audio level captured locally.  Range of 0-32767, where 0 is silence.
+     * @param receivedLevel the audio level received from the remote peer.  Range of 0-32767, where 0 is silence.
+     */
+    void onAudioLevels(Remote remote, int capturedLevel, int receivedLevel);
 
     /**
      *

@@ -170,6 +170,19 @@ export class NetworkRoute {
   }
 }
 
+// Range of 0-32767 where 0 is silence.
+export type AudioLevel = number;
+
+export class ReceivedAudioLevel {
+  demuxId: number; // UInt32
+  level: AudioLevel;
+
+  constructor(demuxId: number, level: AudioLevel) {
+    this.demuxId = demuxId;
+    this.level = level;
+  }
+}
+
 class Requests<T> {
   private _resolveById: Map<number, (response: T) => void> = new Map();
   private _nextId: number = 1;
@@ -464,6 +477,23 @@ export class RingRTCType {
     }
   }
 
+  onAudioLevels(
+    remoteUserId: UserId,
+    capturedLevel: AudioLevel,
+    receivedLevel: AudioLevel,
+  ): void {
+    const call = this._call;
+    if (!call || call.remoteUserId !== remoteUserId) {
+      return;
+    }
+
+    call.outgoingAudioLevel = capturedLevel;
+    call.remoteAudioLevel = receivedLevel;
+    if (call.handleAudioLevels) {
+      call.handleAudioLevels();
+    }
+  }
+
   renderVideoFrame(width: number, height: number, buffer: Buffer): void {
     const call = this._call;
     if (!call) {
@@ -685,12 +715,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
-          'requestMembershipProof(): GroupCall not found in map!'
-        );
+        this.logError('requestMembershipProof(): GroupCall not found in map!');
         return;
       }
 
@@ -704,12 +729,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
-          'requestGroupMembers(): GroupCall not found in map!'
-        );
+        this.logError('requestGroupMembers(): GroupCall not found in map!');
         return;
       }
 
@@ -726,10 +746,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleConnectionStateChanged(): GroupCall not found in map!'
         );
         return;
@@ -748,12 +765,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
-          'handleJoinStateChanged(): GroupCall not found in map!'
-        );
+        this.logError('handleJoinStateChanged(): GroupCall not found in map!');
         return;
       }
 
@@ -769,16 +781,27 @@ export class RingRTCType {
     silly_deadlock_protection(() => {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleNetworkRouteChanged(): GroupCall not found in map!'
         );
         return;
       }
 
       groupCall.handleNetworkRouteChanged(localNetworkAdapterType);
+    });
+  }
+
+  // Called by Rust
+  handleAudioLevels(
+    clientId: GroupCallClientId,
+    capturedLevel: AudioLevel, 
+    receivedLevels: Array<ReceivedAudioLevel>
+  ): void {
+    silly_deadlock_protection(() => {
+      let groupCall = this._groupCallByClientId.get(clientId);
+      if (!!groupCall) {
+        groupCall.handleAudioLevels(capturedLevel, receivedLevels);
+      }
     });
   }
 
@@ -791,10 +814,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleRemoteDevicesChanged(): GroupCall not found in map!'
         );
         return;
@@ -810,12 +830,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
-          'handlePeekChanged(): GroupCall not found in map!'
-        );
+        this.logError('handlePeekChanged(): GroupCall not found in map!');
         return;
       }
 
@@ -827,10 +842,7 @@ export class RingRTCType {
   handlePeekResponse(request_id: number, info: PeekInfo): void {
     silly_deadlock_protection(() => {
       if (!this._peekRequests.resolve(request_id, info)) {
-        this.onLogMessage(
-          CallLogLevel.Warn,
-          'Service.ts',
-          0,
+        this.logWarn(
           `Invalid request ID for handlePeekResponse: ${request_id}`
         );
       }
@@ -843,12 +855,7 @@ export class RingRTCType {
       let groupCall = this._groupCallByClientId.get(clientId);
       if (!groupCall) {
         let error = new Error();
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
-          'handleEnded(): GroupCall not found in map!'
-        );
+        this.logError('handleEnded(): GroupCall not found in map!');
         return;
       }
 
@@ -887,6 +894,21 @@ export class RingRTCType {
     }
   }
 
+  // Called from here
+  logError(message: string) {
+    this.onLogMessage(CallLogLevel.Error, 'Service.ts', 0, message);
+  }
+
+  // Called from here
+  logWarn(message: string) {
+    this.onLogMessage(CallLogLevel.Warn, 'Service.ts', 0, message);
+  }
+
+  // Called from here
+  logInfo(message: string) {
+    this.onLogMessage(CallLogLevel.Info, 'Service.ts', 0, message);
+  }
+
   // Called by MessageReceiver
   // tslint:disable-next-line cyclomatic-complexity
   handleCallingMessage(
@@ -914,10 +936,7 @@ export class RingRTCType {
       // opaque is required. sdp is obsolete, but it might still come with opaque.
       if (!opaque) {
         // TODO: Remove once the proto is updated to only support opaque and require it.
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleCallingMessage(): opaque not received for offer, remote should update'
         );
         return;
@@ -943,10 +962,7 @@ export class RingRTCType {
       // opaque is required. sdp is obsolete, but it might still come with opaque.
       if (!opaque) {
         // TODO: Remove once the proto is updated to only support opaque and require it.
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleCallingMessage(): opaque not received for answer, remote should update'
         );
         return;
@@ -972,10 +988,7 @@ export class RingRTCType {
           candidates.push(copy);
         } else {
           // TODO: Remove once the proto is updated to only support opaque and require it.
-          this.onLogMessage(
-            CallLogLevel.Error,
-            'Service.ts',
-            0,
+          this.logError(
             'handleCallingMessage(): opaque not received for ice candidate, remote should update'
           );
           continue;
@@ -983,10 +996,7 @@ export class RingRTCType {
       }
 
       if (candidates.length == 0) {
-        this.onLogMessage(
-          CallLogLevel.Warn,
-          'Service.ts',
-          0,
+        this.logWarn(
           'handleCallingMessage(): No ice candidates in ice message, remote should update'
         );
         return;
@@ -1029,20 +1039,14 @@ export class RingRTCType {
     }
     if (message.opaque) {
       if (remoteUuid == null) {
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleCallingMessage(): opaque message received without UUID!'
         );
         return;
       }
       const data = to_buffer(message.opaque.data);
       if (data == undefined) {
-        this.onLogMessage(
-          CallLogLevel.Error,
-          'Service.ts',
-          0,
+        this.logError(
           'handleCallingMessage(): opaque message received without data!'
         );
         return;
@@ -1268,6 +1272,8 @@ export class Call {
   private _outgoingVideoEnabled: boolean = false;
   private _outgoingVideoIsScreenShare: boolean = false;
   private _remoteVideoEnabled: boolean = false;
+  outgoingAudioLevel: AudioLevel = 0;
+  remoteAudioLevel: AudioLevel = 0;
   remoteSharingScreen: boolean = false;
   networkRoute: NetworkRoute = new NetworkRoute();
   private _videoCapturer: VideoCapturer | null = null;
@@ -1279,6 +1285,7 @@ export class Call {
   handleRemoteVideoEnabled?: () => void;
   handleRemoteSharingScreen?: () => void;
   handleNetworkRouteChanged?: () => void;
+  handleAudioLevels?: () => void;
 
   // This callback should be set by the VideoCapturer,
   // But could also be set by the UX.
@@ -1575,6 +1582,7 @@ export class LocalDeviceState {
   joinState: JoinState;
   audioMuted: boolean;
   videoMuted: boolean;
+  audioLevel: AudioLevel;
   presenting: boolean;
   sharingScreen: boolean;
   networkRoute: NetworkRoute;
@@ -1585,6 +1593,7 @@ export class LocalDeviceState {
     // By default audio and video are muted.
     this.audioMuted = true;
     this.videoMuted = true;
+    this.audioLevel = 0;
     this.presenting = false;
     this.sharingScreen = false;
     this.networkRoute = new NetworkRoute();
@@ -1599,6 +1608,7 @@ export class RemoteDeviceState {
 
   audioMuted: boolean | undefined;
   videoMuted: boolean | undefined;
+  audioLevel: AudioLevel;
   presenting: boolean | undefined;
   sharingScreen: boolean | undefined;
   videoAspectRatio: number | undefined; // Float
@@ -1610,6 +1620,7 @@ export class RemoteDeviceState {
     this.demuxId = demuxId;
     this.userId = userId;
     this.mediaKeysReceived = mediaKeysReceived;
+    this.audioLevel = 0;
   }
 }
 
@@ -1650,6 +1661,7 @@ export interface GroupCallObserver {
   requestGroupMembers(groupCall: GroupCall): void;
   onLocalDeviceStateChanged(groupCall: GroupCall): void;
   onRemoteDeviceStatesChanged(groupCall: GroupCall): void;
+  onAudioLevels(groupCall: GroupCall): void;
   onPeekChanged(groupCall: GroupCall): void;
   onEnded(groupCall: GroupCall, reason: GroupCallEndReason): void;
 }
@@ -1681,7 +1693,11 @@ export class GroupCall {
 
     this._localDeviceState = new LocalDeviceState();
 
-    this._clientId = this._callManager.createGroupCallClient(groupId, sfuUrl, hkdfExtraInfo);
+    this._clientId = this._callManager.createGroupCallClient(
+      groupId,
+      sfuUrl,
+      hkdfExtraInfo
+    );
   }
 
   // Called by UI
@@ -1810,6 +1826,21 @@ export class GroupCall {
       localNetworkAdapterType;
 
     this._observer.onLocalDeviceStateChanged(this);
+  }
+
+  handleAudioLevels(capturedLevel: AudioLevel, receivedLevels: Array<ReceivedAudioLevel>) {
+    this._localDeviceState.audioLevel = capturedLevel;
+    if (this._remoteDeviceStates != undefined) {
+      for (const received of receivedLevels) {
+        for (let remoteDeviceState of this._remoteDeviceStates) {
+          if (remoteDeviceState.demuxId == received.demuxId) {
+            remoteDeviceState.audioLevel = received.level;
+          }
+        }
+      }
+    }
+
+    this._observer.onAudioLevels(this);
   }
 
   // Called by Rust via RingRTC object
@@ -2077,7 +2108,11 @@ export interface CallManager {
 
   // Group Calls
 
-  createGroupCallClient(groupId: Buffer, sfuUrl: string, hkdfExtraInfo: Buffer): GroupCallClientId;
+  createGroupCallClient(
+    groupId: Buffer,
+    sfuUrl: string,
+    hkdfExtraInfo: Buffer
+  ): GroupCallClientId;
   deleteGroupCallClient(clientId: GroupCallClientId): void;
   connect(clientId: GroupCallClientId): void;
   join(clientId: GroupCallClientId): void;
