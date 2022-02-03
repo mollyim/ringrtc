@@ -1,0 +1,29 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *'
+
+jobs:
+  sync:
+    name: Sync
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          ref: upstream
+          fetch-depth: 0
+          token: ${{ secrets.PUBLISH_PAT }}
+
+      - name: Fetch and merge upstream
+        run: |
+          git remote add upstream https://github.com/signalapp/ringrtc.git
+          git fetch upstream
+          git merge --ff-only upstream/master
+
+      - name: Push changes
+        run: |
+          git push origin upstream
+          git tag | grep -xP 'v\d+(?:\.\d+){2}' | xargs -r git push origin
