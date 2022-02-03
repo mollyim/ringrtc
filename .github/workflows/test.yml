@@ -1,8 +1,12 @@
-name: RingRTC CI
+name: Test
+
 on:
-  push:
-    branches: [ master, 'staging/*' ]
   pull_request: # all target branches
+  push: # all target branches
+    paths-ignore:
+      - '**/README*.md'
+      - '.github/FUNDING.yml'
+      - '.github/ISSUE_TEMPLATE/**'
 
 jobs:
   code_formatting:

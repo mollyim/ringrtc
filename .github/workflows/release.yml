@@ -1,11 +1,14 @@
-name: Android CI
+name: Release
 
-on: [ push, pull_request ]
+on:
+  push:
+    tags:
+      - 'v*'
 
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-20.04
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
 
     steps:
     - name: Free up disk space
@@ -16,17 +19,19 @@ jobs:
     - name: Set up JDK 1.8
       uses: actions/setup-java@v1
       with:
-        java-version: '8.0.312'
+        java-version: 8
 
     - name: Validate Gradle Wrapper
-      uses: gradle/wrapper-validation-action@v1
+      uses: gradle/wrapper-validation-action@master
 
     - name: Install depot_tools
       run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /opt/depot_tools
-          cd /opt/depot_tools
-          git checkout 2ffa1bde797a8127c0f72908d0bd74051fd65d0d^{commit}
-          echo "/opt/depot_tools" >> "$GITHUB_PATH"
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /opt/depot_tools
+        cd /opt/depot_tools
+        git checkout "$DEPOT_TOOLS_GIT_HASH^{commit}"
+        echo "/opt/depot_tools" >> "$GITHUB_PATH"
+      env:
+        DEPOT_TOOLS_GIT_HASH: f537138fb7019fc321cbda339c8ce4599499af8e
 
     - name: Install Clippy
       run: rustup component add clippy
@@ -49,15 +54,15 @@ jobs:
 
     - name: Log checksums
       run: sha256sum out/gradle/outputs/aar/*
-    - name: Upload artifacts
+
+    - name: Upload AARs
       uses: actions/upload-artifact@v2
       with:
         name: ringrtc-aar
         path: out/gradle/outputs/aar
 
     - name: Publish to GitHub Packages
-      if: startsWith(github.ref, 'refs/tags/v')
       run: ./bin/build-aar --arch arm arm64 x64 --release-build --publish
       env:
         ORG_GRADLE_PROJECT_ci: 1
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.PUBLISH_PAT }}
