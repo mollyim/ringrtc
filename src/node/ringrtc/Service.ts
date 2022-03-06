@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { GumVideoCaptureOptions } from './VideoSupport';
+import { GumVideoCaptureOptions, VideoPixelFormatEnum } from './VideoSupport';
 
 /* tslint:disable max-classes-per-file */
 
@@ -171,16 +171,22 @@ export class NetworkRoute {
 }
 
 // Range of 0-32767 where 0 is silence.
-export type AudioLevel = number;
+export type RawAudioLevel = number;
+// Range of 0-1 where 0 is silence.
+export type NormalizedAudioLevel = number;
 
 export class ReceivedAudioLevel {
   demuxId: number; // UInt32
-  level: AudioLevel;
+  level: RawAudioLevel;
 
-  constructor(demuxId: number, level: AudioLevel) {
+  constructor(demuxId: number, level: RawAudioLevel) {
     this.demuxId = demuxId;
     this.level = level;
   }
+}
+
+function normalizeAudioLevel(raw: RawAudioLevel): NormalizedAudioLevel {
+  return raw / 32767;
 }
 
 class Requests<T> {
@@ -206,11 +212,29 @@ class Requests<T> {
   }
 }
 
+class CallInfo {
+  isVideoCall: boolean;
+  receivedAtCounter: number;
+
+  constructor(isVideoCall: boolean, receivedAtCounter: number) {
+    this.isVideoCall = isVideoCall;
+    this.receivedAtCounter = receivedAtCounter;
+  }
+}
+
 export class RingRTCType {
   private readonly callManager: CallManager;
   private _call: Call | null;
   private _groupCallByClientId: Map<GroupCallClientId, GroupCall>;
   private _peekRequests: Requests<PeekInfo>;
+
+  // A map to hold call information not maintained in RingRTC.
+  private _callInfoByCallId: Map<String, CallInfo>;
+
+  private getCallInfoKey(callId: CallId): String {
+    // CallId is u64 so use a string key instead.
+    return callId.high.toString() + callId.low.toString();
+  }
 
   // Set by UX
   handleOutgoingSignaling:
@@ -219,7 +243,13 @@ export class RingRTCType {
   handleIncomingCall: ((call: Call) => Promise<CallSettings | null>) | null =
     null;
   handleAutoEndedIncomingCallRequest:
-    | ((remoteUserId: UserId, reason: CallEndedReason, ageSec: number) => void)
+    | ((
+        remoteUserId: UserId,
+        reason: CallEndedReason,
+        ageSec: number,
+        wasVideoCall: boolean,
+        receivedAtCounter: number | undefined
+      ) => void)
     | null = null;
   handleLogMessage:
     | ((
@@ -262,6 +292,7 @@ export class RingRTCType {
     this._call = null;
     this._groupCallByClientId = new Map();
     this._peekRequests = new Requests<PeekInfo>();
+    this._callInfoByCallId = new Map();
   }
 
   setConfig(config: Config) {
@@ -372,6 +403,7 @@ export class RingRTCType {
         call.ignore();
         return;
       }
+
       call.settings = settings;
       this.proceed(callId, settings);
     })();
@@ -385,7 +417,8 @@ export class RingRTCType {
         settings.iceServer.password || '',
         settings.iceServer.urls,
         settings.hideIp,
-        settings.bandwidthMode
+        settings.bandwidthMode,
+        settings.audioLevelsIntervalMillis || 0,
       );
     });
   }
@@ -400,7 +433,19 @@ export class RingRTCType {
   }
 
   // Called by Rust
-  onCallEnded(remoteUserId: UserId, reason: CallEndedReason, ageSec: number) {
+  onCallEnded(
+    remoteUserId: UserId,
+    callId: CallId,
+    reason: CallEndedReason,
+    ageSec: number
+  ) {
+    let callInfo = this._callInfoByCallId.get(this.getCallInfoKey(callId));
+    const { isVideoCall, receivedAtCounter } = callInfo || {
+      isVideoCall: false,
+      receivedAtCounter: undefined,
+    };
+    this._callInfoByCallId.delete(this.getCallInfoKey(callId));
+
     const call = this._call;
     if (call && reason == CallEndedReason.ReceivedOfferWithGlare) {
       // The current call is the outgoing call.
@@ -416,19 +461,36 @@ export class RingRTCType {
       // (proceeded down to the code below)
     }
 
-    // If there is no call or the remoteUserId doesn't match that of
-    // the current call, or if one of the "receive offer while already
-    // in a call" reasons are provided, don't end the current call,
-    // just update the call history.
+    // If there is no call or the remoteUserId doesn't match that of the current
+    // call, or if one of the "receive offer while already in a call or because
+    // it expired" reasons are provided, don't end the current call, because
+    // there isn't one for this Ended notification, just update the call history.
+    // If the incoming call ends while in the prering state, also immediately
+    // update the call history because it is just a replay of messages.
     if (
       !call ||
       call.remoteUserId !== remoteUserId ||
       reason === CallEndedReason.ReceivedOfferWhileActive ||
-      reason === CallEndedReason.ReceivedOfferExpired
+      reason === CallEndedReason.ReceivedOfferExpired ||
+      (call.state === CallState.Prering && call.isIncoming)
     ) {
       if (this.handleAutoEndedIncomingCallRequest) {
-        this.handleAutoEndedIncomingCallRequest(remoteUserId, reason, ageSec);
+        this.handleAutoEndedIncomingCallRequest(
+          remoteUserId,
+          reason,
+          ageSec,
+          isVideoCall,
+          receivedAtCounter
+        );
       }
+
+      if (call && (call.state === CallState.Prering && call.isIncoming)) {
+        // Set the state to Ended without triggering a state update since we
+        // already notified the client.
+        call.endedReason = reason;
+        call.setCallEnded();
+      }
+
       return;
     }
 
@@ -479,16 +541,16 @@ export class RingRTCType {
 
   onAudioLevels(
     remoteUserId: UserId,
-    capturedLevel: AudioLevel,
-    receivedLevel: AudioLevel,
+    capturedLevel: RawAudioLevel,
+    receivedLevel: RawAudioLevel
   ): void {
     const call = this._call;
     if (!call || call.remoteUserId !== remoteUserId) {
       return;
     }
 
-    call.outgoingAudioLevel = capturedLevel;
-    call.remoteAudioLevel = receivedLevel;
+    call.outgoingAudioLevel = normalizeAudioLevel(capturedLevel);
+    call.remoteAudioLevel = normalizeAudioLevel(receivedLevel);
     if (call.handleAudioLevels) {
       call.handleAudioLevels();
     }
@@ -674,6 +736,7 @@ export class RingRTCType {
     groupId: Buffer,
     sfuUrl: string,
     hkdfExtraInfo: Buffer,
+    audioLevelsIntervalMillis: number | undefined,
     observer: GroupCallObserver
   ): GroupCall | undefined {
     const groupCall = new GroupCall(
@@ -681,6 +744,7 @@ export class RingRTCType {
       groupId,
       sfuUrl,
       hkdfExtraInfo,
+      audioLevelsIntervalMillis,
       observer
     );
 
@@ -794,7 +858,7 @@ export class RingRTCType {
   // Called by Rust
   handleAudioLevels(
     clientId: GroupCallClientId,
-    capturedLevel: AudioLevel, 
+    capturedLevel: RawAudioLevel,
     receivedLevels: Array<ReceivedAudioLevel>
   ): void {
     silly_deadlock_protection(() => {
@@ -877,7 +941,7 @@ export class RingRTCType {
         const ringId = BigInt(ringIdString);
         this.handleGroupCallRingUpdate(groupId, ringId, sender, state);
       } else {
-        console.log('RingRTC.handleGroupCallRingUpdate is not set!');
+        this.logError('RingRTC.handleGroupCallRingUpdate is not set!');
       }
     });
   }
@@ -917,6 +981,7 @@ export class RingRTCType {
     remoteDeviceId: DeviceId,
     localDeviceId: DeviceId,
     messageAgeSec: number,
+    messageReceivedAtCounter: number,
     message: CallingMessage,
     senderIdentityKey: Buffer,
     receiverIdentityKey: Buffer
@@ -943,6 +1008,14 @@ export class RingRTCType {
       }
 
       const offerType = message.offer.type || OfferType.AudioCall;
+
+      // Save the call details for later when the call is ended.
+      let callInfo = new CallInfo(
+        offerType === OfferType.VideoCall,
+        messageReceivedAtCounter
+      );
+      this._callInfoByCallId.set(this.getCallInfoKey(callId), callInfo);
+
       this.callManager.receivedOffer(
         remoteUserId,
         remoteDeviceId,
@@ -1072,7 +1145,7 @@ export class RingRTCType {
     if (this.handleSendHttpRequest) {
       this.handleSendHttpRequest(requestId, url, method, headers, body);
     } else {
-      console.log('RingRTC.handleSendHttpRequest is not set!');
+      this.logError('RingRTC.handleSendHttpRequest is not set!');
     }
   }
 
@@ -1085,7 +1158,7 @@ export class RingRTCType {
     if (this.handleSendCallMessage) {
       this.handleSendCallMessage(recipientUuid, message, urgency);
     } else {
-      console.log('RingRTC.handleSendCallMessage is not set!');
+      this.logError('RingRTC.handleSendCallMessage is not set!');
     }
   }
 
@@ -1098,7 +1171,7 @@ export class RingRTCType {
     if (this.handleSendCallMessageToGroup) {
       this.handleSendCallMessageToGroup(groupId, message, urgency);
     } else {
-      console.log('RingRTC.handleSendCallMessageToGroup is not set!');
+      this.logError('RingRTC.handleSendCallMessageToGroup is not set!');
     }
   }
 
@@ -1224,6 +1297,7 @@ export interface CallSettings {
   iceServer: IceServer;
   hideIp: boolean;
   bandwidthMode: BandwidthMode;
+  audioLevelsIntervalMillis?: number;
 }
 
 interface IceServer {
@@ -1272,8 +1346,8 @@ export class Call {
   private _outgoingVideoEnabled: boolean = false;
   private _outgoingVideoIsScreenShare: boolean = false;
   private _remoteVideoEnabled: boolean = false;
-  outgoingAudioLevel: AudioLevel = 0;
-  remoteAudioLevel: AudioLevel = 0;
+  outgoingAudioLevel: NormalizedAudioLevel = 0;
+  remoteAudioLevel: NormalizedAudioLevel = 0;
   remoteSharingScreen: boolean = false;
   networkRoute: NetworkRoute = new NetworkRoute();
   private _videoCapturer: VideoCapturer | null = null;
@@ -1335,6 +1409,10 @@ export class Call {
     if (!!this.handleStateChanged) {
       this.handleStateChanged();
     }
+  }
+
+  setCallEnded() {
+    this._state = CallState.Ended;
   }
 
   set videoCapturer(capturer: VideoCapturer | null) {
@@ -1413,9 +1491,9 @@ export class Call {
   }
 
   // With this method, a Call is a VideoFrameSender
-  sendVideoFrame(width: number, height: number, rgbaBuffer: Buffer): void {
+  sendVideoFrame(width: number, height: number, format: VideoPixelFormatEnum, buffer: Buffer): void {
     // This assumes we only have one active all.
-    this._callManager.sendVideoFrame(width, height, rgbaBuffer);
+    this._callManager.sendVideoFrame(width, height, format, buffer);
   }
 
   // With this method, a Call is a VideoFrameSource
@@ -1582,7 +1660,7 @@ export class LocalDeviceState {
   joinState: JoinState;
   audioMuted: boolean;
   videoMuted: boolean;
-  audioLevel: AudioLevel;
+  audioLevel: NormalizedAudioLevel;
   presenting: boolean;
   sharingScreen: boolean;
   networkRoute: NetworkRoute;
@@ -1608,7 +1686,7 @@ export class RemoteDeviceState {
 
   audioMuted: boolean | undefined;
   videoMuted: boolean | undefined;
-  audioLevel: AudioLevel;
+  audioLevel: NormalizedAudioLevel;
   presenting: boolean | undefined;
   sharingScreen: boolean | undefined;
   videoAspectRatio: number | undefined; // Float
@@ -1686,6 +1764,7 @@ export class GroupCall {
     groupId: Buffer,
     sfuUrl: string,
     hkdfExtraInfo: Buffer,
+    audioLevelsIntervalMillis: number | undefined,
     observer: GroupCallObserver
   ) {
     this._callManager = callManager;
@@ -1696,7 +1775,8 @@ export class GroupCall {
     this._clientId = this._callManager.createGroupCallClient(
       groupId,
       sfuUrl,
-      hkdfExtraInfo
+      hkdfExtraInfo,
+      audioLevelsIntervalMillis || 0,
     );
   }
 
@@ -1828,13 +1908,16 @@ export class GroupCall {
     this._observer.onLocalDeviceStateChanged(this);
   }
 
-  handleAudioLevels(capturedLevel: AudioLevel, receivedLevels: Array<ReceivedAudioLevel>) {
-    this._localDeviceState.audioLevel = capturedLevel;
+  handleAudioLevels(
+    capturedLevel: RawAudioLevel,
+    receivedLevels: Array<ReceivedAudioLevel>
+  ) {
+    this._localDeviceState.audioLevel = normalizeAudioLevel(capturedLevel);
     if (this._remoteDeviceStates != undefined) {
       for (const received of receivedLevels) {
         for (let remoteDeviceState of this._remoteDeviceStates) {
           if (remoteDeviceState.demuxId == received.demuxId) {
-            remoteDeviceState.audioLevel = received.level;
+            remoteDeviceState.audioLevel = normalizeAudioLevel(received.level);
           }
         }
       }
@@ -1875,9 +1958,9 @@ export class GroupCall {
   }
 
   // With this, a GroupCall is a VideoFrameSender
-  sendVideoFrame(width: number, height: number, rgbaBuffer: Buffer): void {
+  sendVideoFrame(width: number, height: number, format: VideoPixelFormatEnum, buffer: Buffer): void {
     // This assumes we only have one active all.
-    this._callManager.sendVideoFrame(width, height, rgbaBuffer);
+    this._callManager.sendVideoFrame(width, height, format, buffer);
   }
 
   // With this, a GroupCall can provide a VideoFrameSource for each remote device.
@@ -2040,7 +2123,8 @@ export interface CallManager {
     iceServerPassword: string,
     iceServerUrls: Array<string>,
     hideIp: boolean,
-    bandwidthMode: BandwidthMode
+    bandwidthMode: BandwidthMode,
+    audioLevelsIntervalMillis: number,
   ): void;
   accept(callId: CallId): void;
   ignore(callId: CallId): void;
@@ -2056,7 +2140,7 @@ export interface CallManager {
   setOutgoingVideoEnabled(enabled: boolean): void;
   setOutgoingVideoIsScreenShare(enabled: boolean): void;
   updateBandwidthMode(bandwidthMode: BandwidthMode): void;
-  sendVideoFrame(width: number, height: number, buffer: Buffer): void;
+  sendVideoFrame(width: number, height: number, format: VideoPixelFormatEnum, buffer: Buffer): void;
   receiveVideoFrame(buffer: Buffer): [number, number] | undefined;
   receivedOffer(
     remoteUserId: UserId,
@@ -2111,7 +2195,8 @@ export interface CallManager {
   createGroupCallClient(
     groupId: Buffer,
     sfuUrl: string,
-    hkdfExtraInfo: Buffer
+    hkdfExtraInfo: Buffer,
+    audioLevelsIntervalMillis: number,
   ): GroupCallClientId;
   deleteGroupCallClient(clientId: GroupCallClientId): void;
   connect(clientId: GroupCallClientId): void;
@@ -2170,6 +2255,7 @@ export interface CallManagerCallbacks {
   onCallState(remoteUserId: UserId, state: CallState): void;
   onCallEnded(
     remoteUserId: UserId,
+    callId: CallId,
     endedReason: CallEndedReason,
     ageSec: number
   ): void;
@@ -2258,7 +2344,7 @@ export interface CallManagerCallbacks {
 }
 
 export enum CallState {
-  Prering = 'init',
+  Prering = 'idle',
   Ringing = 'ringing',
   Accepted = 'connected',
   Reconnecting = 'connecting',

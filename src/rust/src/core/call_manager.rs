@@ -437,13 +437,15 @@ where
         call_id: CallId,
         app_call_context: <T as Platform>::AppCallContext,
         bandwidth_mode: BandwidthMode,
+        audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         handle_active_call_api!(
             self,
             CallManager::handle_proceed,
             call_id,
             app_call_context,
-            bandwidth_mode
+            bandwidth_mode,
+            audio_levels_interval
         )
     }
 
@@ -909,7 +911,7 @@ where
 
         if let Some(event) = event {
             let remote_peer = call.remote_peer()?;
-            self.notify_application(&*remote_peer, event)?;
+            self.notify_application(&*remote_peer, call_id, event)?;
         }
 
         if let Some(hangup) = hangup {
@@ -939,8 +941,11 @@ where
         .map_err(move |err| {
             error!("Conclude call future failed: {}", err);
             if let Ok(remote_peer) = call_error.remote_peer() {
-                let _ = cm_error
-                    .notify_application(&*remote_peer, ApplicationEvent::EndedInternalFailure);
+                let _ = cm_error.notify_application(
+                    &*remote_peer,
+                    call_id,
+                    ApplicationEvent::EndedInternalFailure,
+                );
             }
         });
         self.worker_spawn(future)
@@ -1069,6 +1074,7 @@ where
         call_id: CallId,
         app_call_context: <T as Platform>::AppCallContext,
         bandwidth_mode: BandwidthMode,
+        audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         ringbench!(
             RingBench::App,
@@ -1082,7 +1088,7 @@ where
             Ok(())
         } else {
             active_call.set_call_context(app_call_context)?;
-            active_call.inject_proceed(bandwidth_mode)
+            active_call.inject_proceed(bandwidth_mode, audio_levels_interval)
         }
     }
 
@@ -1349,10 +1355,10 @@ where
 
         match incoming_call_action {
             IncomingCallAction::Ignore(app_event) => {
-                self.notify_application(&remote_peer, app_event)?;
+                self.notify_application(&remote_peer, incoming_call_id, app_event)?;
             }
             IncomingCallAction::RejectAsBusy(app_event) => {
-                self.notify_application(&remote_peer, app_event)?;
+                self.notify_application(&remote_peer, incoming_call_id, app_event)?;
                 self.send_busy(incoming_call)?;
             }
             IncomingCallAction::Start => {
@@ -1860,7 +1866,8 @@ where
         // The future hit problems before creating or accessing
         // an active call. Simply notify the application with no
         // call clean up.
-        let _ = self.notify_application(remote_peer, ApplicationEvent::EndedInternalFailure);
+        let _ =
+            self.notify_application(remote_peer, call_id, ApplicationEvent::EndedInternalFailure);
         let _ = self.notify_call_concluded(remote_peer, call_id);
     }
 
@@ -2034,12 +2041,13 @@ where
     pub(super) fn notify_application(
         &self,
         remote_peer: &<T as Platform>::AppRemotePeer,
+        call_id: CallId,
         event: ApplicationEvent,
     ) -> Result<()> {
         ringbench!(RingBench::Cm, RingBench::App, format!("event({})", event));
 
         let platform = self.platform.lock()?;
-        platform.on_event(remote_peer, event)
+        platform.on_event(remote_peer, call_id, event)
     }
 
     /// Notify application that the network route changed
@@ -2080,6 +2088,7 @@ where
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
         bandwidth_mode: BandwidthMode,
+        audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<T>> {
         let mut platform = self.platform.lock()?;
         platform.create_connection(
@@ -2088,6 +2097,7 @@ where
             connection_type,
             signaling_version,
             bandwidth_mode,
+            audio_levels_interval,
         )
     }
 
@@ -2144,33 +2154,33 @@ where
     pub(super) fn notify_offer_expired(
         &self,
         remote_peer: &<T as Platform>::AppRemotePeer,
-        _call_id: CallId,
+        call_id: CallId,
         age: Duration,
     ) -> Result<()> {
         ringbench!(
             RingBench::Cm,
             RingBench::App,
-            format!("offer_expired()\t{}", _call_id)
+            format!("offer_expired()\t{}", call_id)
         );
 
         let platform = self.platform.lock()?;
-        platform.on_offer_expired(remote_peer, age)
+        platform.on_offer_expired(remote_peer, call_id, age)
     }
 
     /// Notify application that the call is concluded.
     pub(super) fn notify_call_concluded(
         &self,
         remote_peer: &<T as Platform>::AppRemotePeer,
-        _call_id: CallId,
+        call_id: CallId,
     ) -> Result<()> {
         ringbench!(
             RingBench::Cm,
             RingBench::App,
-            format!("call_concluded()\t{}", _call_id)
+            format!("call_concluded()\t{}", call_id)
         );
 
         let platform = self.platform.lock()?;
-        platform.on_call_concluded(remote_peer)
+        platform.on_call_concluded(remote_peer, call_id)
     }
 
     /// Local timeout of the active call.
@@ -2598,6 +2608,7 @@ where
         group_id: group_call::GroupId,
         sfu_url: String,
         hkdf_extra_info: Vec<u8>,
+        audio_levels_interval: Option<Duration>,
         peer_connection_factory: Option<PeerConnectionFactory>,
         outgoing_audio_track: AudioTrack,
         outgoing_video_track: VideoTrack,
@@ -2637,6 +2648,7 @@ where
             Some(outgoing_video_track),
             incoming_video_sink,
             ring_id,
+            audio_levels_interval,
         )?;
 
         let mut client_by_id = self.group_call_by_client_id.lock()?;

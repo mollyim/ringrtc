@@ -10,10 +10,10 @@
 
 # Specify WebRTC version.  This corresponds to the
 # branch or tag of the signalapp/webrtc repository.
-WEBRTC_VERSION="4638d-1"
+WEBRTC_VERSION="4638f-1"
 
 RINGRTC_MAJOR_VERSION=2
-RINGRTC_MINOR_VERSION=17
+RINGRTC_MINOR_VERSION=18
 RINGRTC_REVISION=0
 
 # Specify RingRTC version to publish.

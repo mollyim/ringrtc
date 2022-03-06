@@ -23,7 +23,7 @@ use ringrtc::{
     webrtc::{
         injectable_network,
         injectable_network::InjectableNetwork,
-        media::{VideoFrame, VideoSink, VideoSource},
+        media::{VideoFrame, VideoPixelFormat, VideoSink, VideoSource},
         network::NetworkInterfaceType,
         peer_connection::AudioLevel,
         peer_connection_factory::{self as pcf, IceServer, PeerConnectionFactory},
@@ -486,7 +486,12 @@ impl CallEndpoint {
             let rgba_data: Vec<u8> = (0..(width * height * 4)).map(|i: u32| i as u8).collect();
             state
                 .outgoing_video_source
-                .push_frame(VideoFrame::from_rgba(width, height, &rgba_data));
+                .push_frame(VideoFrame::copy_from_slice(
+                    width,
+                    height,
+                    VideoPixelFormat::Rgba,
+                    &rgba_data,
+                ));
             state.actor.send_delayed(duration, move |state| {
                 send_one_frame_and_schedule_another(state, width, height, duration);
             });
@@ -546,20 +551,30 @@ impl SignalingSender for CallEndpoint {
 }
 
 impl CallStateHandler for CallEndpoint {
-    fn handle_call_state(&self, remote_peer_id: &str, call_state: CallState) -> Result<()> {
+    fn handle_call_state(
+        &self,
+        remote_peer_id: &str,
+        call_id: CallId,
+        call_state: CallState,
+    ) -> Result<()> {
         info!(
             "State change in call from {}.{} to {}: now {:?}",
             self.peer_id, self.device_id, remote_peer_id, call_state
         );
 
         self.actor.send(move |state| {
-            if let CallState::Incoming(call_id, _call_media_type)
-            | CallState::Outgoing(call_id, _call_media_type) = call_state
+            if let CallState::Incoming(_call_media_type) | CallState::Outgoing(_call_media_type) =
+                call_state
             {
                 state
                     .call_manager
-                    .proceed(call_id, state.call_context.clone(), BandwidthMode::VeryLow)
-                    .expect("proceed with outgoing call");
+                    .proceed(
+                        call_id,
+                        state.call_context.clone(),
+                        BandwidthMode::VeryLow,
+                        None,
+                    )
+                    .expect("proceed with call");
             }
         });
         Ok(())

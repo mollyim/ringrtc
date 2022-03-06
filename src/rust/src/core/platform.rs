@@ -47,6 +47,7 @@ pub trait Platform: fmt::Debug + fmt::Display + Send + Sized + 'static {
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
         bandwidth_mode: BandwidthMode,
+        audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<Self>>;
 
     /// Inform the client application that a call should be started.
@@ -59,7 +60,12 @@ pub trait Platform: fmt::Debug + fmt::Display + Send + Sized + 'static {
     ) -> Result<()>;
 
     /// Notify the client application about an event.
-    fn on_event(&self, remote_peer: &Self::AppRemotePeer, event: ApplicationEvent) -> Result<()>;
+    fn on_event(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        call_id: CallId,
+        event: ApplicationEvent,
+    ) -> Result<()>;
 
     /// Notify the client application that the network route has changed (1:1 calls)
     fn on_network_route_changed(
@@ -175,10 +181,15 @@ pub trait Platform: fmt::Debug + fmt::Display + Send + Sized + 'static {
     ) -> Result<bool>;
 
     /// Notify the application that an offer is too old.
-    fn on_offer_expired(&self, remote_peer: &Self::AppRemotePeer, age: Duration) -> Result<()>;
+    fn on_offer_expired(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        call_id: CallId,
+        age: Duration,
+    ) -> Result<()>;
 
     /// Notify the application that the call is completely concluded
-    fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer) -> Result<()>;
+    fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer, call_id: CallId) -> Result<()>;
 
     /// Return true if you want a CallManager to always assume you called
     /// message_sent() for every signaling message.

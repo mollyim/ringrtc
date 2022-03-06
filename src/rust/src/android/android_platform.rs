@@ -264,13 +264,15 @@ impl Platform for AndroidPlatform {
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
         bandwidth_mode: BandwidthMode,
+        audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<Self>> {
         info!(
-            "create_connection(): call_id: {} remote_device_id: {} signaling_version: {:?}, bandwidth_mode: {}",
+            "create_connection(): call_id: {} remote_device_id: {} signaling_version: {:?}, bandwidth_mode: {}, audio_levels_interval: {:?}",
             call.call_id(),
             remote_device_id,
             signaling_version,
-            bandwidth_mode
+            bandwidth_mode,
+            audio_levels_interval,
         );
 
         let env = self.java_env()?;
@@ -281,6 +283,7 @@ impl Platform for AndroidPlatform {
             remote_device_id,
             connection_type,
             bandwidth_mode,
+            audio_levels_interval,
             None, // The app adds sinks to VideoTracks.
         )?;
 
@@ -363,7 +366,12 @@ impl Platform for AndroidPlatform {
         Ok(())
     }
 
-    fn on_event(&self, remote_peer: &Self::AppRemotePeer, event: ApplicationEvent) -> Result<()> {
+    fn on_event(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        _call_id: CallId,
+        event: ApplicationEvent,
+    ) -> Result<()> {
         info!("on_event(): {}", event);
 
         let env = self.java_env()?;
@@ -925,12 +933,17 @@ impl Platform for AndroidPlatform {
         Ok(result != 0)
     }
 
-    fn on_offer_expired(&self, remote_peer: &Self::AppRemotePeer, _age: Duration) -> Result<()> {
+    fn on_offer_expired(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        call_id: CallId,
+        _age: Duration,
+    ) -> Result<()> {
         // Android already keeps track of the offer timestamp, so no need to pass the age through.
-        self.on_event(remote_peer, ApplicationEvent::ReceivedOfferExpired)
+        self.on_event(remote_peer, call_id, ApplicationEvent::ReceivedOfferExpired)
     }
 
-    fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer) -> Result<()> {
+    fn on_call_concluded(&self, remote_peer: &Self::AppRemotePeer, _call_id: CallId) -> Result<()> {
         info!("on_call_concluded():");
 
         let env = self.java_env()?;

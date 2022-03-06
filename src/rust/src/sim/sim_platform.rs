@@ -135,6 +135,7 @@ impl Platform for SimPlatform {
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
         bandwidth_mode: BandwidthMode,
+        audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<Self>> {
         info!(
             "create_connection(): call_id: {} remote_device_id: {}, signaling_version: {:?}",
@@ -150,6 +151,7 @@ impl Platform for SimPlatform {
             remote_device_id,
             connection_type,
             bandwidth_mode,
+            audio_levels_interval,
             None,
         )
         .unwrap();
@@ -185,7 +187,12 @@ impl Platform for SimPlatform {
         }
     }
 
-    fn on_event(&self, remote_peer: &Self::AppRemotePeer, event: ApplicationEvent) -> Result<()> {
+    fn on_event(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        _call_id: CallId,
+        event: ApplicationEvent,
+    ) -> Result<()> {
         info!("on_event(): {}, remote_peer: {}", event, remote_peer);
 
         let mut map = self.event_map.lock().unwrap();
@@ -467,13 +474,22 @@ impl Platform for SimPlatform {
         Ok(remote_peer1 == remote_peer2)
     }
 
-    fn on_offer_expired(&self, _remote_peer: &Self::AppRemotePeer, _age: Duration) -> Result<()> {
+    fn on_offer_expired(
+        &self,
+        _remote_peer: &Self::AppRemotePeer,
+        _call_id: CallId,
+        _age: Duration,
+    ) -> Result<()> {
         info!("on_offer_expired():");
         let _ = self.stats.offer_expired.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
-    fn on_call_concluded(&self, _remote_peer: &Self::AppRemotePeer) -> Result<()> {
+    fn on_call_concluded(
+        &self,
+        _remote_peer: &Self::AppRemotePeer,
+        _call_id: CallId,
+    ) -> Result<()> {
         info!("on_call_concluded():");
         if self.force_internal_fault.load(Ordering::Acquire) {
             Err(SimError::CallConcludedError.into())
