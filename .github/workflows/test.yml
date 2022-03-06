@@ -32,10 +32,8 @@ jobs:
         components: clippy
     - run: shellcheck **/*.sh bin/build-aar bin/build-cli bin/build-electron bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-android-deps bin/gsync-webrtc bin/install-ndk-toolchains bin/prepare-workspace bin/rust-lint-check src/rust/scripts/make-protos src/rust/scripts/run-tests
     - run: rm -rf out/rust-lint
-    - uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --target-dir=out/rust-lint --manifest-path=./src/rust/Cargo.toml --features sim -- -D warnings
+    - name: Run clippy
+      run: cargo clippy --target-dir=out/rust-lint --manifest-path=./src/rust/Cargo.toml --features sim -- -D warnings
     - run: rustup target add aarch64-linux-android aarch64-apple-ios
     - name: Clippy (Android)
       run: cargo clippy --target aarch64-linux-android -- -D warnings
