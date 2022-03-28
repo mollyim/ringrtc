@@ -122,15 +122,25 @@ class NativeCallManager {
 type GroupId = Buffer;
 type GroupCallUserId = Buffer;
 
+export class PeekDeviceInfo {
+  demuxId: number;
+  userId?: GroupCallUserId;
+
+  constructor(demuxId: number, userId: GroupCallUserId | undefined) {
+    this.demuxId = demuxId;
+    this.userId = userId;
+  }
+}
+
 export class PeekInfo {
-  joinedMembers: Array<GroupCallUserId>;
+  devices: Array<PeekDeviceInfo>;
   creator?: GroupCallUserId;
   eraId?: string;
   maxDevices?: number;
   deviceCount: number;
 
   constructor() {
-    this.joinedMembers = [];
+    this.devices = [];
     this.deviceCount = 0;
   }
 }
@@ -756,18 +766,18 @@ export class RingRTCType {
   // Called by UX
   // Returns a list of user IDs
   peekGroupCall(
-    sfu_url: string,
-    membership_proof: Buffer,
-    group_members: Array<GroupMemberInfo>
+    sfuUrl: string,
+    membershipProof: Buffer,
+    groupMembers: Array<GroupMemberInfo>
   ): Promise<PeekInfo> {
     let [requestId, promise] = this._peekRequests.add();
     // Response comes back via handlePeekResponse
     silly_deadlock_protection(() => {
       this.callManager.peekGroupCall(
         requestId,
-        sfu_url,
-        membership_proof,
-        group_members
+        sfuUrl,
+        membershipProof,
+        groupMembers
       );
     });
     return promise;
@@ -823,7 +833,8 @@ export class RingRTCType {
   // Called by Rust
   handleJoinStateChanged(
     clientId: GroupCallClientId,
-    joinState: JoinState
+    joinState: JoinState,
+    demuxId: number | undefined
   ): void {
     silly_deadlock_protection(() => {
       let groupCall = this._groupCallByClientId.get(clientId);
@@ -833,7 +844,7 @@ export class RingRTCType {
         return;
       }
 
-      groupCall.handleJoinStateChanged(joinState);
+      groupCall.handleJoinStateChanged(joinState, demuxId);
     });
   }
 
@@ -1658,6 +1669,8 @@ export enum HttpMethod {
 export class LocalDeviceState {
   connectionState: ConnectionState;
   joinState: JoinState;
+  // Set after joined
+  demuxId?: number;
   audioMuted: boolean;
   videoMuted: boolean;
   audioLevel: NormalizedAudioLevel;
@@ -1894,8 +1907,13 @@ export class GroupCall {
   }
 
   // Called by Rust via RingRTC object
-  handleJoinStateChanged(joinState: JoinState): void {
+  handleJoinStateChanged(joinState: JoinState, demuxId: number | undefined): void {
     this._localDeviceState.joinState = joinState;
+
+    // Don't set to undefined after we leave so we can still know the demuxId after we leave.
+    if (demuxId != undefined) {
+      this._localDeviceState.demuxId = demuxId;
+    }
 
     this._observer.onLocalDeviceStateChanged(this);
   }
@@ -2325,7 +2343,8 @@ export interface CallManagerCallbacks {
   ): void;
   handleJoinStateChanged(
     clientId: GroupCallClientId,
-    joinState: JoinState
+    joinState: JoinState,
+    demuxId: number | undefined
   ): void;
   handleRemoteDevicesChanged(
     clientId: GroupCallClientId,

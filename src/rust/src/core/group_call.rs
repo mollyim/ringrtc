@@ -34,6 +34,10 @@ use crate::{
         signaling,
     },
     error::RingRtcError,
+    lite::sfu::{
+        DemuxId, GroupMember, MembershipProof, PeekDeviceInfo, PeekInfo, PeekResult,
+        PeekResultCallback, UserId,
+    },
     protobuf,
     webrtc::{
         self,
@@ -55,20 +59,6 @@ pub type ClientId = u32;
 // Group UUID
 pub type GroupId = Vec<u8>;
 pub type GroupIdRef<'a> = &'a [u8];
-// An opaque value obtained from a Groups server and provided to an SFU
-pub type MembershipProof = Vec<u8>;
-// User UUID plaintext
-pub type UserId = Vec<u8>;
-// User UUID cipher text within the context of the group
-pub type UserIdCiphertext = Vec<u8>;
-// Each device joined to a group call is assigned a DemuxID
-// which is used for demuxing media, but also identifying
-// the device.
-// 0 is not a valid value
-// When given as remote devices, these must have "gaps"
-// That allow for enough SSRCs to be derived from them.
-// Currently that gap is 16.
-pub type DemuxId = u32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingId(i64);
@@ -216,11 +206,10 @@ pub trait Observer {
     fn handle_peek_changed(
         &self,
         client_id: ClientId,
-        joined_members: &[UserId],
-        creator: Option<UserId>,
-        era_id: Option<&str>,
-        max_devices: Option<u32>,
-        device_count: u32,
+        peek_info: &PeekInfo,
+        // We use a HashSet because the client expects a unique list of users,
+        // and there can be multiple devices from the same user.
+        joined_members: &HashSet<UserId>,
     );
 
     // This is separate from handle_remote_devices_changed because everything else
@@ -387,32 +376,6 @@ pub struct SfuInfo {
     pub ice_pwd: String,
 }
 
-// The current state of the SFU conference.
-#[derive(Clone, Debug, Default)]
-pub struct PeekInfo {
-    /// Currently joined devices
-    pub devices: Vec<PeekDeviceInfo>,
-    /// The user who created the call
-    pub creator: Option<UserId>,
-    /// The "era" of this group call; changes every time the last partipant leaves and someone else joins again.
-    pub era_id: Option<String>,
-    /// The maximum number of devices that can join this group call.
-    pub max_devices: Option<u32>,
-    /// The number of devices currently joined (including local device/user).
-    pub device_count: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct PeekDeviceInfo {
-    pub demux_id: DemuxId,
-    pub user_id: Option<UserId>,
-    // These are basically the same as DemuxIds,
-    // but the SFU uses one sometimes and the other
-    // other times.
-    pub short_device_id: u64,
-    pub long_device_id: String,
-}
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EndReason {
@@ -435,24 +398,15 @@ pub enum EndReason {
     HasMaxDevices,
 }
 
-pub type BoxedPeekInfoHandler = Box<dyn FnOnce(Result<PeekInfo>) + Send + 'static>;
-
 // The callbacks from the Client to the "SFU client" for the group call.
 pub trait SfuClient {
     // This should call Client.on_sfu_client_joined when the SfuClient has joined.
-    fn join(&mut self, ice_ufrag: &str, ice_pwd: &str, dhe_pub_key: [u8; 32], client: Client);
-    fn peek(&mut self, handle_remote_devices: BoxedPeekInfoHandler);
+    fn join(&mut self, ice_ufrag: &str, dhe_pub_key: [u8; 32], client: Client);
+    fn peek(&mut self, result_callback: PeekResultCallback);
 
     // Notifies the client of the new membership proof.
     fn set_membership_proof(&mut self, proof: MembershipProof);
-    fn set_group_members(&mut self, members: Vec<GroupMemberInfo>);
-}
-
-// Associates a group member's UUID with their UUID ciphertext
-#[derive(Clone, Debug)]
-pub struct GroupMemberInfo {
-    pub user_id: UserId,
-    pub user_id_ciphertext: UserIdCiphertext,
+    fn set_group_members(&mut self, members: Vec<GroupMember>);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -479,8 +433,6 @@ impl From<protobuf::group_call::device_to_device::Heartbeat> for HeartbeatState 
 pub struct RemoteDeviceState {
     pub demux_id: DemuxId,
     pub user_id: UserId,
-    short_device_id: u64,
-    long_device_id: String,
     pub media_keys_received: bool,
     pub heartbeat_state: HeartbeatState,
     // The latest timestamp we received from an update to
@@ -510,18 +462,10 @@ fn as_unix_millis(t: Option<SystemTime>) -> u64 {
 }
 
 impl RemoteDeviceState {
-    fn new(
-        demux_id: DemuxId,
-        user_id: UserId,
-        short_device_id: u64,
-        long_device_id: String,
-        added_time: SystemTime,
-    ) -> Self {
+    fn new(demux_id: DemuxId, user_id: UserId, added_time: SystemTime) -> Self {
         Self {
             demux_id,
             user_id,
-            short_device_id,
-            long_device_id,
             media_keys_received: false,
             heartbeat_state: Default::default(),
             heartbeat_rtp_timestamp: None,
@@ -564,9 +508,23 @@ const RTP_DATA_TO_SFU_SSRC: rtp::Ssrc = 1;
 // It looks like the bandwidth estimator will only probe up to 100kbps,
 // but that's better than nothing.  It appears to take 26 seconds to
 // ramp all the way up, though.
-const ALL_ALONE_MAX_SEND_RATE_KBPS: u64 = 1;
+const ALL_ALONE_MAX_SEND_RATE: DataRate = DataRate::from_kbps(1);
 
-const NORMAL_MAX_RECEIVE_RATE_KBPS: u64 = 20_000_000;
+const SMALL_CALL_MAX_SEND_RATE: DataRate = DataRate::from_kbps(1000);
+
+// This is the smallest rate at which WebRTC seems to still send VGA.
+const LARGE_CALL_MAX_SEND_RATE: DataRate = DataRate::from_kbps(671);
+
+// Use a higher bitrate for screen sharing
+const SCREENSHARE_MIN_SEND_RATE: DataRate = DataRate::from_mbps(2);
+const SCREENSHARE_START_SEND_RATE: DataRate = DataRate::from_mbps(2);
+const SCREENSHARE_MAX_SEND_RATE: DataRate = DataRate::from_mbps(5);
+
+const AUDIO_ONLY_MAX_RECEIVE_RATE: DataRate = DataRate::from_kbps(1);
+
+const LOW_MAX_RECEIVE_RATE: DataRate = DataRate::from_kbps(500);
+
+const NORMAL_MAX_RECEIVE_RATE: DataRate = DataRate::from_mbps(20);
 
 // The time between when a sender generates a new media send key
 // and applies it.  It needs to be big enough that there is
@@ -778,16 +736,6 @@ impl RemoteDevices {
         self.0.iter_mut().find(|device| device.demux_id == demux_id)
     }
 
-    /// Find remote device state by the long device id
-    fn find_by_long_device_id_mut(
-        &mut self,
-        long_device_id: &str,
-    ) -> Option<&mut RemoteDeviceState> {
-        self.0
-            .iter_mut()
-            .find(|device| device.long_device_id == *long_device_id)
-    }
-
     /// Returns a set containing all the demux ids in the collection
     fn demux_id_set(&self) -> HashSet<DemuxId> {
         self.iter().map(|device| device.demux_id).collect()
@@ -924,7 +872,7 @@ impl Client {
 
                     send_rates: SendRates::default(),
                     // If the client never calls set_bandwidth_mode, use the normal max receive rate.
-                    max_receive_rate: Some(DataRate::from_kbps(NORMAL_MAX_RECEIVE_RATE_KBPS)),
+                    max_receive_rate: Some(NORMAL_MAX_RECEIVE_RATE),
                     forwarding_video_demux_ids: HashSet::default(),
 
                     cancellable_initial_ring: None,
@@ -1048,7 +996,7 @@ impl Client {
             let actor = state.actor.clone();
             state.sfu_client.peek(Box::new(move |peek_info| {
                 actor.send(move |state| {
-                    Self::set_peek_info_inner(state, peek_info);
+                    Self::set_peek_result_inner(state, peek_info);
                 });
             }));
             state.remote_devices_request_state = RemoteDevicesRequestState::Requested {
@@ -1205,7 +1153,6 @@ impl Client {
                         state.dhe_state = DheState::start(client_secret);
                         state.sfu_client.join(
                             &state.local_ice_ufrag,
-                            &state.local_ice_pwd,
                             *client_pub_key.as_bytes(),
                             callback,
                         );
@@ -1497,12 +1444,9 @@ impl Client {
             );
 
             state.max_receive_rate = Some(match bandwidth_mode {
-                // Effectively force audio-only
-                BandwidthMode::VeryLow => DataRate::from_kbps(1),
-                // Effectively only allow one low quality video
-                BandwidthMode::Low => DataRate::from_kbps(500),
-                // Effectively allow a lot of video 
-                BandwidthMode::Normal => DataRate::from_kbps(NORMAL_MAX_RECEIVE_RATE_KBPS),
+                BandwidthMode::VeryLow => AUDIO_ONLY_MAX_RECEIVE_RATE,
+                BandwidthMode::Low => LOW_MAX_RECEIVE_RATE,
+                BandwidthMode::Normal => NORMAL_MAX_RECEIVE_RATE,
             });
             if !state.on_demand_video_request_sent_since_last_heartbeat {
                 Self::send_video_requests_to_sfu(state);
@@ -1513,7 +1457,7 @@ impl Client {
 
     fn set_send_rates_inner(state: &mut State, send_rates: SendRates) {
         if state.send_rates != send_rates {
-            if send_rates.max == Some(DataRate::from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS)) {
+            if send_rates.max == Some(ALL_ALONE_MAX_SEND_RATE) {
                 info!(
                     "Disable audio render and outgoing media because there are no other devices."
                 );
@@ -1571,7 +1515,7 @@ impl Client {
                         .find_by_demux_id(request.demux_id)
                         .map(|device| {
                             VideoRequestProto {
-                                short_device_id: Some(device.short_device_id),
+                                demux_id: Some(device.demux_id),
                                 // We use the min because the SFU does not understand the concept of video rotation
                                 // so all requests must be in terms of non-rotated video even though the apps
                                 // will request in terms of rotated video.  We assume that all video is sent over the
@@ -1619,7 +1563,7 @@ impl Client {
         }
     }
 
-    pub fn set_group_members(&self, group_members: Vec<GroupMemberInfo>) {
+    pub fn set_group_members(&self, group_members: Vec<GroupMember>) {
         debug!(
             "group_call::Client(outer)::set_group_members(client_id: {})",
             self.client_id
@@ -1743,7 +1687,7 @@ impl Client {
                         Self::set_send_rates_inner(
                             state,
                             SendRates {
-                                max: Some(DataRate::from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS)),
+                                max: Some(ALL_ALONE_MAX_SEND_RATE),
                                 ..SendRates::default()
                             },
                         );
@@ -1759,16 +1703,16 @@ impl Client {
                         warn!("The SFU completed joining before join() was requested.");
                     }
                     JoinState::Joining => {
-                        // The call to set_peek_info_inner needs the join state to be joined.
+                        // The call to set_peek_result_inner needs the join state to be joined.
                         // But make sure to fire observer.handle_join_state_changed after
-                        // set_peek_info_inner so that state.remote_devices are filled in.
+                        // set_peek_result_inner so that state.remote_devices are filled in.
                         state.join_state = JoinState::Joined(local_demux_id);
                         if let Some(peek_info) = &state.last_peek_info {
                             // TODO: Do the same processing without making it look like we just
                             // got an update from the server even though the update actually came
                             // from earlier.  For now, it's close enough.
                             let peek_info = peek_info.clone();
-                            Self::set_peek_info_inner(state, Ok(peek_info));
+                            Self::set_peek_result_inner(state, Ok(peek_info));
                         }
                         state
                             .observer
@@ -1898,32 +1842,32 @@ impl Client {
         Ok(())
     }
 
-    pub fn set_peek_info(&self, info: Result<PeekInfo>) {
+    pub fn set_peek_result(&self, result: PeekResult) {
         debug!(
-            "group_call::Client(outer)::set_peek_info: {}, info: {:?})",
-            self.client_id, info
+            "group_call::Client(outer)::set_peek_result: {}, result: {:?})",
+            self.client_id, result
         );
 
         self.actor.send(move |state| {
-            Self::set_peek_info_inner(state, info);
+            Self::set_peek_result_inner(state, result);
         });
     }
 
     // Most of the logic moved to inner method so this can be called by both
-    // set_peek_info() and as a callback to SfuClient::request_remote_devices.
-    fn set_peek_info_inner(state: &mut State, peek_info: Result<PeekInfo>) {
+    // set_peek_result() and as a callback to SfuClient::request_remote_devices.
+    fn set_peek_result_inner(state: &mut State, result: PeekResult) {
         debug!(
-            "group_call::Client(inner)::set_peek_info_inner(client_id: {}, info: {:?} state: {:?})",
-            state.client_id, peek_info, state.remote_devices_request_state
+            "group_call::Client(inner)::set_peek_result_inner(client_id: {}, result: {:?} state: {:?})",
+            state.client_id, result, state.remote_devices_request_state
         );
 
-        if let Err(e) = peek_info {
+        if let Err(e) = result {
             warn!("Failed to request remote devices from SFU: {}", e);
             state.remote_devices_request_state =
                 RemoteDevicesRequestState::Failed { at: Instant::now() };
             return;
         }
-        let peek_info = peek_info.unwrap();
+        let peek_info = result.unwrap();
 
         let is_first_update = matches!(
             state.remote_devices_request_state,
@@ -1955,15 +1899,9 @@ impl Client {
             _ => None,
         };
         if old_user_ids != new_user_ids || old_era_id != peek_info.era_id {
-            let joined_members: Vec<UserId> = new_user_ids.iter().cloned().collect();
-            state.observer.handle_peek_changed(
-                state.client_id,
-                &joined_members,
-                peek_info.creator.clone(),
-                peek_info.era_id.as_deref(),
-                peek_info.max_devices,
-                peek_info.device_count,
-            )
+            state
+                .observer
+                .handle_peek_changed(state.client_id, &peek_info, &new_user_ids)
         }
 
         let peek_info_to_remember = peek_info.clone();
@@ -1994,8 +1932,6 @@ impl Client {
                     if let PeekDeviceInfo {
                         demux_id,
                         user_id: Some(user_id),
-                        short_device_id,
-                        long_device_id,
                     } = device
                     {
                         // Keep the old one, with its state, if there is one.
@@ -2003,13 +1939,7 @@ impl Client {
                             match old_remote_devices_by_id_pair.remove(&(demux_id, user_id.clone()))
                             {
                                 Some(existing_remote_device) => existing_remote_device,
-                                None => RemoteDeviceState::new(
-                                    demux_id,
-                                    user_id,
-                                    short_device_id,
-                                    long_device_id,
-                                    added_time,
-                                ),
+                                None => RemoteDeviceState::new(demux_id, user_id, added_time),
                             },
                         )
                     } else {
@@ -2045,7 +1975,7 @@ impl Client {
                 }
             }
 
-            // Note: if the first call to set_peek_info is [], we still fire the
+            // Note: if the first call to set_peek_result is [], we still fire the
             // handle_remote_devices_changed to ensure the observer can tell the difference
             // between "we know we have no remote devices" and "we don't know what we have yet".
             if demux_ids_changed || is_first_update {
@@ -2057,14 +1987,10 @@ impl Client {
             }
 
             if new_user_ids != old_user_ids {
-                let joined_members: Vec<UserId> = new_user_ids.iter().cloned().collect();
                 state.observer.handle_peek_changed(
                     state.client_id,
-                    &joined_members,
-                    peek_info.creator.clone(),
-                    peek_info.era_id.as_deref(),
-                    peek_info.max_devices,
-                    peek_info.device_count,
+                    &peek_info_to_remember,
+                    &new_user_ids,
                 )
             }
             // If someone was added, we must advance the send media key
@@ -2138,33 +2064,28 @@ impl Client {
 
     // Returns (min, start, max)
     fn compute_send_rates(joined_member_count: usize, sharing_screen: bool) -> SendRates {
-        let from_kbps = |kbps| Some(DataRate::from_kbps(kbps));
         match (joined_member_count, sharing_screen) {
-            // No one is here, so push it down as low as WebRTC will let us.
             (0, _) => SendRates {
-                max: from_kbps(ALL_ALONE_MAX_SEND_RATE_KBPS),
+                max: Some(ALL_ALONE_MAX_SEND_RATE),
                 ..SendRates::default()
             },
-            // Use a higher bitrate for screen sharing
             (_, true) => SendRates {
-                min: from_kbps(2000),
-                start: from_kbps(2000),
-                max: from_kbps(5000),
+                min: Some(SCREENSHARE_MIN_SEND_RATE),
+                start: Some(SCREENSHARE_START_SEND_RATE),
+                max: Some(SCREENSHARE_MAX_SEND_RATE),
             },
-            // Send between 500kbps and 1Mbps depending on how many other devices there are.
-            // The more there are, the less we will send.
             (1..=7, _) => SendRates {
-                max: from_kbps(1000),
+                max: Some(SMALL_CALL_MAX_SEND_RATE),
                 ..SendRates::default()
             },
             _ => SendRates {
-                max: from_kbps(500),
+                max: Some(LARGE_CALL_MAX_SEND_RATE),
                 ..SendRates::default()
             },
         }
     }
 
-    // Pulled into a named private method because it might be called by set_peek_info
+    // Pulled into a named private method because it might be called by set_peek_result
     fn set_peer_connection_descriptions(
         state: &State,
         sfu_info: &SfuInfo,
@@ -2746,13 +2667,10 @@ impl Client {
                 if let Ok(msg) = SfuToDevice::decode(payload) {
                     let mut handled = false;
                     if let Some(Speaker {
-                        long_device_id: Some(speaker_long_device_id),
+                        demux_id: Some(demux_id),
                     }) = &msg.speaker
                     {
-                        self.handle_speaker_received(
-                            header.timestamp,
-                            speaker_long_device_id.clone(),
-                        );
+                        self.handle_speaker_received(header.timestamp, *demux_id);
                         handled = true;
                     };
                     if let Some(DeviceJoinedOrLeft { .. }) = msg.device_joined_or_left {
@@ -2811,7 +2729,7 @@ impl Client {
         }
     }
 
-    fn handle_speaker_received(&self, timestamp: rtp::Timestamp, speaker_long_device_id: String) {
+    fn handle_speaker_received(&self, timestamp: rtp::Timestamp, demux_id: DemuxId) {
         self.actor.send(move |state| {
             if let Some(speaker_rtp_timestamp) = state.speaker_rtp_timestamp {
                 if timestamp <= speaker_rtp_timestamp {
@@ -2827,10 +2745,7 @@ impl Client {
 
             let latest_speaker_demux_id = state.remote_devices.latest_speaker_demux_id();
 
-            if let Some(speaker_device) = state
-                .remote_devices
-                .find_by_long_device_id_mut(&speaker_long_device_id)
-            {
+            if let Some(speaker_device) = state.remote_devices.find_by_demux_id_mut(demux_id) {
                 if latest_speaker_demux_id == Some(speaker_device.demux_id) {
                     debug!(
                         "Already the latest speaker demux {:?} since {:?}",
@@ -2853,7 +2768,7 @@ impl Client {
             } else {
                 debug!(
                     "Ignoring speaker change because it isn't a known remote devices: {}",
-                    speaker_long_device_id
+                    demux_id
                 );
                 // Unknown speaker device. It's probably the local device.
             }
@@ -3321,13 +3236,7 @@ mod tests {
     }
 
     impl SfuClient for FakeSfuClient {
-        fn join(
-            &mut self,
-            _ice_ufrag: &str,
-            _ice_pwd: &str,
-            _dhe_pub_key: [u8; 32],
-            client: Client,
-        ) {
+        fn join(&mut self, _ice_ufrag: &str, _dhe_pub_key: [u8; 32], client: Client) {
             client.on_sfu_client_joined(Ok(sfu_client::Joined {
                 sfu_info: self.sfu_info.clone(),
                 local_demux_id: self.local_demux_id,
@@ -3335,10 +3244,10 @@ mod tests {
                 hkdf_extra_info: b"hkdf_extra_info".to_vec(),
             }));
         }
-        fn peek(&mut self, _handle_remote_devices: BoxedPeekInfoHandler) {
+        fn peek(&mut self, _peek_result_callback: PeekResultCallback) {
             self.request_count.fetch_add(1, atomic::Ordering::SeqCst);
         }
-        fn set_group_members(&mut self, _members: Vec<GroupMemberInfo>) {}
+        fn set_group_members(&mut self, _members: Vec<GroupMember>) {}
         fn set_membership_proof(&mut self, _proof: MembershipProof) {}
     }
 
@@ -3582,21 +3491,18 @@ mod tests {
         fn handle_peek_changed(
             &self,
             _client_id: ClientId,
-            joined_members: &[UserId],
-            creator: Option<UserId>,
-            era_id: Option<&str>,
-            max_devices: Option<u32>,
-            device_count: u32,
+            peek_info: &PeekInfo,
+            joined_members: &HashSet<UserId>,
         ) {
             let mut owned_state = self
                 .peek_state
                 .lock()
                 .expect("Lock peek state to handle update");
-            owned_state.joined_members = joined_members.to_vec();
-            owned_state.creator = creator;
-            owned_state.era_id = era_id.map(String::from);
-            owned_state.max_devices = max_devices;
-            owned_state.device_count = device_count;
+            owned_state.joined_members = joined_members.iter().cloned().collect();
+            owned_state.creator = peek_info.creator.clone();
+            owned_state.era_id = peek_info.era_id.clone();
+            owned_state.max_devices = peek_info.max_devices;
+            owned_state.device_count = peek_info.device_count;
         }
 
         fn handle_send_rates_changed(&self, _client_id: ClientId, send_rates: SendRates) {
@@ -3689,16 +3595,6 @@ mod tests {
         default_peek_info: PeekInfo,
     }
 
-    // Just so it's something different
-    fn demux_id_to_short_device_id(demux_id: DemuxId) -> u64 {
-        (demux_id + 1000) as u64
-    }
-
-    // Just so it's something different
-    fn demux_id_to_long_device_id(demux_id: DemuxId) -> String {
-        format!("long-{}", demux_id)
-    }
-
     impl TestClient {
         fn new(user_id: UserId, demux_id: DemuxId, forged_demux_id: Option<DemuxId>) -> Self {
             let sfu_client = FakeSfuClient::new(
@@ -3756,8 +3652,6 @@ mod tests {
                 .map(|client| PeekDeviceInfo {
                     demux_id: client.demux_id,
                     user_id: Some(client.user_id.clone()),
-                    short_device_id: demux_id_to_short_device_id(client.demux_id),
-                    long_device_id: demux_id_to_long_device_id(client.demux_id),
                 })
                 .collect();
             // Need to clone to pass over to the actor and set in observer.
@@ -3767,7 +3661,7 @@ mod tests {
                 devices: remote_devices,
                 ..self.default_peek_info.clone()
             };
-            self.client.set_peek_info(Ok(peek_info));
+            self.client.set_peek_result(Ok(peek_info));
             let local_demux_id = self.demux_id;
             let sfu_rtp_packet_sender = self.sfu_rtp_packet_sender.clone();
             self.client.actor.send(move |state| {
@@ -3845,7 +3739,7 @@ mod tests {
 
         fn receive_speaker(&self, timestamp: u32, speaker_demux_id: DemuxId) {
             self.client
-                .handle_speaker_received(timestamp, demux_id_to_long_device_id(speaker_demux_id));
+                .handle_speaker_received(timestamp, speaker_demux_id);
             self.wait_for_client_to_process();
         }
 
@@ -4330,14 +4224,10 @@ mod tests {
                 PeekDeviceInfo {
                     demux_id: 2,
                     user_id: Some(b"2".to_vec()),
-                    short_device_id: demux_id_to_short_device_id(2),
-                    long_device_id: demux_id_to_long_device_id(2),
                 },
                 PeekDeviceInfo {
                     demux_id: 3,
                     user_id: None,
-                    short_device_id: demux_id_to_short_device_id(3),
-                    long_device_id: demux_id_to_long_device_id(3),
                 },
             ],
             creator: None,
@@ -4345,7 +4235,7 @@ mod tests {
             max_devices: None,
             device_count: 3,
         };
-        client.client.set_peek_info(Ok(peek_info));
+        client.client.set_peek_result(Ok(peek_info));
         client.wait_for_client_to_process();
 
         let remote_devices = client.observer.remote_devices();
@@ -4388,19 +4278,33 @@ mod tests {
 
         // Temporary clear the observer state so we can verify we don't get a
         // callback when nothing changes.
-        peeker
-            .observer
-            .handle_peek_changed(0, &[], None, None, None, 0);
+        peeker.observer.handle_peek_changed(
+            0,
+            &PeekInfo {
+                creator: None,
+                era_id: None,
+                devices: vec![],
+                device_count: 0,
+                max_devices: None,
+            },
+            &HashSet::default(),
+        );
         assert_eq!(0, peeker.observer.joined_members().len());
         peeker.set_remotes_and_wait_until_applied(&[&joiner1, &joiner2]);
         assert_eq!(0, peeker.observer.joined_members().len());
         peeker.observer.handle_peek_changed(
             0,
-            &[joiner1.user_id.clone(), joiner2.user_id.clone()],
-            None,
-            None,
-            None,
-            3,
+            &PeekInfo {
+                creator: None,
+                era_id: None,
+                devices: vec![],
+                device_count: 3,
+                max_devices: None,
+            },
+            &([joiner1.user_id.clone(), joiner2.user_id.clone()]
+                .iter()
+                .cloned()
+                .collect()),
         );
 
         peeker.set_remotes_and_wait_until_applied(&[]);
@@ -4582,19 +4486,19 @@ mod tests {
                 video_request: Some(VideoRequestMessage {
                     requests: vec![
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            demux_id: Some(2),
                             height: Some(1080),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            demux_id: Some(3),
                             height: Some(80),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            demux_id: Some(4),
                             height: Some(0),
                         },
                     ],
-                    max_kbps: Some(NORMAL_MAX_RECEIVE_RATE_KBPS as u32),
+                    max_kbps: Some(NORMAL_MAX_RECEIVE_RATE.as_kbps() as u32),
                 }),
                 ..Default::default()
             },
@@ -4643,15 +4547,15 @@ mod tests {
                 video_request: Some(VideoRequestMessage {
                     requests: vec![
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            demux_id: Some(2),
                             height: Some(1080),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            demux_id: Some(3),
                             height: Some(80),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            demux_id: Some(4),
                             height: Some(0),
                         },
                     ],
@@ -4672,15 +4576,15 @@ mod tests {
                 video_request: Some(VideoRequestMessage {
                     requests: vec![
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            demux_id: Some(2),
                             height: Some(1080),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            demux_id: Some(3),
                             height: Some(80),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            demux_id: Some(4),
                             height: Some(0),
                         },
                     ],
@@ -4701,15 +4605,15 @@ mod tests {
                 video_request: Some(VideoRequestMessage {
                     requests: vec![
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(2)),
+                            demux_id: Some(2),
                             height: Some(1080),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(3)),
+                            demux_id: Some(3),
                             height: Some(80),
                         },
                         VideoRequestProto {
-                            short_device_id: Some(demux_id_to_short_device_id(4)),
+                            demux_id: Some(4),
                             height: Some(0),
                         },
                     ],
@@ -4819,13 +4723,13 @@ mod tests {
         client1.client.connect();
         client1.wait_for_client_to_process();
         let initial_count = client1.sfu_client.request_count();
-        let user_a = GroupMemberInfo {
+        let user_a = GroupMember {
             user_id: b"a".to_vec(),
-            user_id_ciphertext: b"A".to_vec(),
+            member_id: b"A".to_vec(),
         };
-        let user_b = GroupMemberInfo {
+        let user_b = GroupMember {
             user_id: b"b".to_vec(),
-            user_id_ciphertext: b"B".to_vec(),
+            member_id: b"B".to_vec(),
         };
         client1.set_remotes_and_wait_until_applied(&[]);
 
@@ -4858,12 +4762,10 @@ mod tests {
     fn full_call() {
         let client1 = TestClient::new(vec![1], 1, None);
         client1.client.connect();
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: vec![PeekDeviceInfo {
                 demux_id: 2,
                 user_id: None,
-                short_device_id: demux_id_to_short_device_id(2),
-                long_device_id: demux_id_to_long_device_id(2),
             }],
             device_count: 1,
             max_devices: Some(1),
@@ -4874,12 +4776,10 @@ mod tests {
         assert_eq!(EndReason::HasMaxDevices, client1.observer.ended.wait());
 
         let client1 = TestClient::new(vec![1], 1, None);
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: vec![PeekDeviceInfo {
                 demux_id: 2,
                 user_id: None,
-                short_device_id: demux_id_to_short_device_id(2),
-                long_device_id: demux_id_to_long_device_id(2),
             }],
             device_count: 1,
             max_devices: Some(2),
@@ -4894,12 +4794,10 @@ mod tests {
     #[ignore] // Because it's too slow
     fn membership_proof_requests() {
         let client1 = TestClient::new(vec![1], 1, None);
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: vec![PeekDeviceInfo {
                 demux_id: 2,
                 user_id: None,
-                short_device_id: demux_id_to_short_device_id(2),
-                long_device_id: demux_id_to_long_device_id(2),
             }],
             device_count: 1,
             max_devices: Some(2),
@@ -5136,12 +5034,10 @@ mod tests {
                 PeekDeviceInfo {
                     demux_id,
                     user_id: Some(user_id.as_bytes().to_vec()),
-                    short_device_id: demux_id_to_short_device_id(demux_id),
-                    long_device_id: demux_id_to_long_device_id(demux_id),
                 }
             })
             .collect();
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: vec![],
             device_count: 0,
             max_devices: None,
@@ -5158,7 +5054,7 @@ mod tests {
             client1.observer.send_rates()
         );
 
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: (&devices[..1]).to_vec(),
             device_count: 1,
             max_devices: None,
@@ -5175,7 +5071,7 @@ mod tests {
             client1.observer.send_rates()
         );
 
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: (&devices[..2]).to_vec(),
             device_count: 1,
             max_devices: None,
@@ -5192,7 +5088,7 @@ mod tests {
             client1.observer.send_rates()
         );
 
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: (&devices[..5]).to_vec(),
             device_count: 5,
             max_devices: None,
@@ -5209,7 +5105,7 @@ mod tests {
             client1.observer.send_rates()
         );
 
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: (&devices[..20]).to_vec(),
             device_count: 20,
             max_devices: None,
@@ -5221,7 +5117,7 @@ mod tests {
             Some(SendRates {
                 min: None,
                 start: None,
-                max: Some(DataRate::from_kbps(500)),
+                max: Some(DataRate::from_kbps(671)),
             }),
             client1.observer.send_rates()
         );
@@ -5243,12 +5139,12 @@ mod tests {
             Some(SendRates {
                 min: None,
                 start: None,
-                max: Some(DataRate::from_kbps(500)),
+                max: Some(DataRate::from_kbps(671)),
             }),
             client1.observer.send_rates()
         );
 
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: (&devices[..0]).to_vec(),
             device_count: 0,
             max_devices: None,
@@ -5276,7 +5172,7 @@ mod tests {
             client1.observer.send_rates()
         );
 
-        client1.client.set_peek_info(Ok(PeekInfo {
+        client1.client.set_peek_result(Ok(PeekInfo {
             devices: (&devices[..20]).to_vec(),
             device_count: 20,
             max_devices: None,
@@ -5622,34 +5518,6 @@ mod remote_devices_tests {
     }
 
     #[test]
-    fn find_by_long_device_id_mut_when_key_is_not_found() {
-        let device_1 = remote_device_state(1, None);
-        let device_2 = remote_device_state(2, None);
-        let device_3 = remote_device_state(3, None);
-        let absent_id = "not present".to_string();
-        let mut remote_devices = RemoteDevices::from_iter(vec![device_1, device_2, device_3]);
-        let device_state = remote_devices.find_by_long_device_id_mut(&absent_id);
-        assert_eq!(None, device_state);
-    }
-
-    #[test]
-    fn find_by_long_device_id_mut_and_edit_is_persisted() {
-        let device_1 = remote_device_state(1, None);
-        let device_2 = remote_device_state(2, None);
-        let device_3 = remote_device_state(3, None);
-        let device_2_long_id = device_2.long_device_id.clone();
-        let mut remote_devices = RemoteDevices::from_iter(vec![device_1, device_2, device_3]);
-        let device_state = remote_devices
-            .find_by_long_device_id_mut(&device_2_long_id)
-            .unwrap();
-        device_state.speaker_time = Some(time(300));
-        let device_state = remote_devices
-            .find_by_long_device_id_mut(&device_2_long_id)
-            .unwrap();
-        assert_eq!(Some(time(300)), device_state.speaker_time);
-    }
-
-    #[test]
     fn demux_id_set() {
         let device_1 = remote_device_state(1, None);
         let device_2 = remote_device_state(2, None);
@@ -5666,21 +5534,12 @@ mod remote_devices_tests {
     }
 
     fn remote_device_state(id: u32, spoken_at: Option<SystemTime>) -> RemoteDeviceState {
-        let mut remote_device_state = RemoteDeviceState::new(
-            id,
-            id.to_be_bytes().to_vec(),
-            long_device_id(id),
-            format!("long-{}", id),
-            time(1),
-        );
+        let mut remote_device_state =
+            RemoteDeviceState::new(id, id.to_be_bytes().to_vec(), time(1));
 
         remote_device_state.speaker_time = spoken_at;
 
         remote_device_state
-    }
-
-    fn long_device_id(id: u32) -> u64 {
-        ((id as u64) << 32) | (id as u64)
     }
 
     #[test]

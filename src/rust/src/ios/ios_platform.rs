@@ -5,28 +5,28 @@
 
 //! iOS Platform
 
-use std::collections::HashMap;
-use std::ffi::c_void;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::{
-    ApplicationEvent, CallDirection, CallId, CallMediaType, DeviceId, HttpMethod, Result,
-};
+use crate::common::{ApplicationEvent, CallDirection, CallId, CallMediaType, DeviceId, Result};
 use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call::Call;
 use crate::core::connection::{Connection, ConnectionType};
 use crate::core::platform::{Platform, PlatformItem};
 use crate::core::{group_call, signaling};
 use crate::ios::api::call_manager_interface::{
-    AppByteSlice, AppCallContext, AppConnectionInterface, AppHeader, AppHeaderArray,
-    AppIceCandidateArray, AppInterface, AppObject, AppOptionalBool, AppOptionalUInt32,
-    AppReceivedAudioLevel, AppReceivedAudioLevelArray, AppRemoteDeviceState,
-    AppRemoteDeviceStateArray, AppUuidArray,
+    AppByteSlice, AppCallContext, AppConnectionInterface, AppIceCandidateArray, AppInterface,
+    AppObject, AppOptionalBool, AppOptionalUInt32, AppReceivedAudioLevel,
+    AppReceivedAudioLevelArray, AppRemoteDeviceState, AppRemoteDeviceStateArray, AppUuidArray,
 };
 use crate::ios::error::IosError;
 use crate::ios::ios_media_stream::IosMediaStream;
+use crate::lite::{
+    sfu,
+    sfu::{DemuxId, PeekInfo, PeekResult, UserId},
+};
 use crate::webrtc;
 use crate::webrtc::media::{MediaStream, VideoTrack};
 use crate::webrtc::peer_connection::{
@@ -417,44 +417,6 @@ impl Platform for IosPlatform {
         Ok(())
     }
 
-    fn send_http_request(
-        &self,
-        request_id: u32,
-        url: String,
-        method: HttpMethod,
-        headers: HashMap<String, String>,
-        body: Option<Vec<u8>>,
-    ) -> Result<()> {
-        info!("send_http_request(): request_id: {}", request_id);
-
-        let mut app_headers: Vec<AppHeader> = Vec::new();
-
-        for (name, value) in headers.iter() {
-            let app_header = AppHeader {
-                name: app_slice_from_str(Some(name)),
-                value: app_slice_from_str(Some(value)),
-            };
-
-            app_headers.push(app_header);
-        }
-
-        let app_header_array = AppHeaderArray {
-            headers: app_headers.as_ptr(),
-            count: app_headers.len(),
-        };
-
-        (self.app_interface.sendHttpRequest)(
-            self.app_interface.object,
-            request_id,
-            app_slice_from_str(Some(&url)),
-            method as i32,
-            app_header_array,
-            app_slice_from_bytes(body.as_ref()),
-        );
-
-        Ok(())
-    }
-
     fn create_incoming_media(
         &self,
         connection: &Connection<Self>,
@@ -540,7 +502,7 @@ impl Platform for IosPlatform {
         &self,
         group_id: group_call::GroupId,
         ring_id: group_call::RingId,
-        sender: group_call::UserId,
+        sender: UserId,
         update: group_call::RingUpdate,
     ) {
         let group_id = app_slice_from_bytes(Some(&group_id));
@@ -551,44 +513,6 @@ impl Platform for IosPlatform {
             ring_id.into(),
             sender,
             update as i32,
-        );
-    }
-
-    fn handle_peek_response(
-        &self,
-        request_id: u32,
-        joined_members: &[group_call::UserId],
-        creator: Option<group_call::UserId>,
-        era_id: Option<&str>,
-        max_devices: Option<u32>,
-        device_count: u32,
-    ) {
-        let mut app_joined_members: Vec<AppByteSlice> = Vec::new();
-
-        for member in joined_members {
-            let app_joined_member = app_slice_from_bytes(Some(member));
-            app_joined_members.push(app_joined_member);
-        }
-
-        let app_joined_members_array = AppUuidArray {
-            uuids: app_joined_members.as_ptr(),
-            count: app_joined_members.len(),
-        };
-
-        let app_creator = app_slice_from_bytes(creator.as_ref());
-        let era_id = era_id.map(String::from);
-        let app_era_id = app_slice_from_str(era_id.as_ref());
-
-        let app_max_devices = app_option_from_u32(max_devices);
-
-        (self.app_interface.handlePeekResponse)(
-            self.app_interface.object,
-            request_id,
-            app_joined_members_array,
-            app_creator,
-            app_era_id,
-            app_max_devices,
-            device_count,
         );
     }
 
@@ -711,7 +635,7 @@ impl Platform for IosPlatform {
     fn handle_incoming_video_track(
         &self,
         client_id: group_call::ClientId,
-        remote_demux_id: group_call::DemuxId,
+        remote_demux_id: DemuxId,
         incoming_video_track: VideoTrack,
     ) {
         (self.app_interface.handleIncomingVideoTrack)(
@@ -726,11 +650,8 @@ impl Platform for IosPlatform {
     fn handle_peek_changed(
         &self,
         client_id: group_call::ClientId,
-        joined_members: &[group_call::UserId],
-        creator: Option<group_call::UserId>,
-        era_id: Option<&str>,
-        max_devices: Option<u32>,
-        device_count: u32,
+        peek_info: &PeekInfo,
+        joined_members: &HashSet<UserId>,
     ) {
         let mut app_joined_members: Vec<AppByteSlice> = Vec::new();
 
@@ -744,11 +665,11 @@ impl Platform for IosPlatform {
             count: app_joined_members.len(),
         };
 
-        let app_creator = app_slice_from_bytes(creator.as_ref());
-        let era_id = era_id.map(String::from);
-        let app_era_id = app_slice_from_str(era_id.as_ref());
+        let app_creator = app_slice_from_bytes(peek_info.creator.as_ref());
+        let app_era_id = app_slice_from_str(peek_info.era_id.as_ref());
 
-        let app_max_devices = app_option_from_u32(max_devices);
+        let app_max_devices = app_option_from_u32(peek_info.max_devices);
+        let device_count = peek_info.devices.len() as u32;
 
         (self.app_interface.handlePeekChanged)(
             self.app_interface.object,
@@ -766,16 +687,20 @@ impl Platform for IosPlatform {
     }
 }
 
+impl sfu::Delegate for IosPlatform {
+    fn handle_peek_result(&self, _request_id: u32, _peek_result: PeekResult) {
+        // This shouldn't happen on iOS because peek calls
+        // should be called directly on a lite::sfu::ios::Client
+        // which should end up passing the result through
+        // the SfuClient in SFU.swift.
+        error!("Peek result got routed to IosPlatform.  This shouldn't happen.");
+    }
+}
+
 impl IosPlatform {
     /// Create a new IOSPlatform object.
-    pub fn new(
-        app_call_manager_interface: *mut c_void,
-        app_interface: AppInterface,
-    ) -> Result<Self> {
-        debug!(
-            "IOSPlatform::new: {:?} {:?}",
-            app_call_manager_interface, app_interface
-        );
+    pub fn new(app_interface: AppInterface) -> Result<Self> {
+        debug!("IOSPlatform::new: {:?}", app_interface);
 
         Ok(Self { app_interface })
     }

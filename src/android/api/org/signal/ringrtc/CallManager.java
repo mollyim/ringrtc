@@ -201,52 +201,40 @@ public class CallManager {
   }
 
   /// Defines the method to use for audio processing of AEC and NS.
-  ///
-  /// If `Default` is specified, the device's hardware will be used unless the
-  /// device is in the BLOCKLIST.
   public enum AudioProcessingMethod {
     Default,
     ForceHardware,
-    ForceSoftware
+    ForceSoftwareAec3,
+    ForceSoftwareAecM
   }
 
   static JavaAudioDeviceModule createAudioDeviceModule(AudioProcessingMethod audioProcessingMethod) {
-    Set<String> HARDWARE_AUDIO_PROCESSING_BLOCKLIST = new HashSet<String>() {{
-      add("Pixel");
-      add("Pixel XL");
-      add("Moto G5");
-      add("Moto G (5S) Plus");
-      add("Moto G4");
-      add("TA-1053");
-      add("Mi A1");
-      add("Mi A2");
-      add("E5823"); // Sony z5 compact
-      add("Redmi Note 5");
-      add("FP2"); // Fairphone FP2
-      add("MI 5");
-    }};
-
     // We'll set both AEC and NS equally to be either both hardware or
     // both software, assuming that they are co-tuned.
     boolean useHardware;
+    boolean useAecM;
 
     switch(audioProcessingMethod) {
-      case ForceHardware:
-        useHardware = true;
-        break;
-      case ForceSoftware:
+      case ForceSoftwareAecM:
         useHardware = false;
+        useAecM = true;
+        break;
+      case ForceSoftwareAec3:
+        useHardware = false;
+        useAecM = false;
         break;
       default:
-        useHardware = !HARDWARE_AUDIO_PROCESSING_BLOCKLIST.contains(Build.MODEL);
+        useHardware = true;
+        useAecM = false;
         break;
     }
 
-    Log.i(TAG, "createAudioDeviceModule(): useHardware: " + useHardware);
+    Log.i(TAG, "createAudioDeviceModule(): useHardware: " + useHardware + " useAecM: " + useAecM);
 
     return JavaAudioDeviceModule.builder(ContextUtils.getApplicationContext())
       .setUseHardwareAcousticEchoCanceler(useHardware)
       .setUseHardwareNoiseSuppressor(useHardware)
+      .setUseAecm(useAecM)
       .createAudioDeviceModule();
   }
 
@@ -1323,7 +1311,7 @@ public class CallManager {
   }
 
   @CalledByNative
-  private void handleAudioLevels(long clientId, int capturedLevel, List<ReceivedAudioLevel> receivedLevels) {
+  private void handleAudioLevels(long clientId, int capturedLevel, List<GroupCall.ReceivedAudioLevel> receivedLevels) {
     Log.d(TAG, "handleAudioLevels():");
 
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
@@ -1503,21 +1491,6 @@ public class CallManager {
       }
 
       factory.dispose();
-    }
-  }
-
-  /**
-   *
-   * A way to pass a list of (demuxId, level) through the FFI.
-   *
-   */
-  public class ReceivedAudioLevel {
-    public long demuxId;
-    public int level;  // Range of 0-32767, where 0 is silence
-
-    public ReceivedAudioLevel(long demuxId, int level) {
-      this.demuxId = demuxId;
-      this.level = level;
     }
   }
 
