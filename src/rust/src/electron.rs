@@ -528,7 +528,7 @@ fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
             crate::webrtc::logging::set_logger(log::LevelFilter::Debug);
 
             #[cfg(not(debug_assertions))]
-            crate::webrtc::logging::set_logger(log::LevelFilter::Off);
+            crate::webrtc::logging::set_logger(log::LevelFilter::Warn);
         }
     }
 
@@ -961,7 +961,10 @@ fn receivedHttpResponse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let status_code = cx.argument::<JsNumber>(1)?.value(&mut cx) as u16;
     let body = cx.argument::<JsBuffer>(2)?;
     let body = cx.borrow(&body, |handle| handle.as_slice().to_vec());
-    let response = http::Response { status_code, body };
+    let response = http::Response {
+        status: status_code.into(),
+        body,
+    };
 
     with_call_endpoint(&mut cx, |endpoint| {
         endpoint
@@ -1767,10 +1770,12 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                     EndReason::Declined => "Declined",
                     EndReason::Busy => "Busy",
                     EndReason::Glare => "Glare",
+                    EndReason::ReCall => "ReCall",
                     EndReason::ReceivedOfferExpired { .. } => "ReceivedOfferExpired",
                     EndReason::ReceivedOfferWhileActive => "ReceivedOfferWhileActive",
                     EndReason::ReceivedOfferWithGlare => "ReceivedOfferWithGlare",
                     EndReason::SignalingFailure => "SignalingFailure",
+                    EndReason::GlareFailure => "GlareFailure",
                     EndReason::ConnectionFailure => "ConnectionFailure",
                     EndReason::InternalFailure => "InternalFailure",
                     EndReason::Timeout => "Timeout",
