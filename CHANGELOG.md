@@ -1,5 +1,51 @@
 # Changelog
 
+## v2.20.5
+
+- Fix a deadlock when calling set_network_route
+
+## v2.20.4
+
+- Remove old video frames when re-enabling video
+
+- Use less bandwidth when using TURN relays
+
+- Improve support when developing on M1 chips
+
+- Avoid notifying remote ringing in case of accepted before connected 
+
+- Process remote status events received before the call is accepted
+
+- Android: Allow local video recording to be started while ringing
+
+- Reference signalapp/webrtc@4896a
+  - Fix issue with opus frame length for AudioSendStream
+
+- Adjust logging
+
+## v2.20.3
+
+- iOS: Fix mapping of log output
+
+## v2.20.2
+
+- Update to WebRTC 4896 (M100)
+
+- Disable transport-cc for audio
+
+## v2.20.1
+
+- Add VP9 codec support and enable for Android hardware/Electron
+
+- Add state for ConnectingAfterAccepted to fix connect/accept race on caller's end
+
+- Group Calls: Fire peek changed events even if the call is empty
+
+- Reference signalapp/webrtc@4638j
+  - Reduce more noise from error/warning logs
+
+- Update dependencies, builds, and ci
+
 ## v2.20.0
 
 - Clean up "lite" interfaces

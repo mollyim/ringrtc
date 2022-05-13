@@ -90,11 +90,11 @@ pub enum ConnectionEvent {
     /// Receive sender status change from remote peer.
     /// Source: RTP data
     /// Action: Bubble up to app, which should change the "in call" screen.
-    ReceivedSenderStatusViaRtpData(CallId, signaling::SenderStatus, Option<u64>),
+    ReceivedSenderStatusViaRtpData(CallId, signaling::SenderStatus, u64),
     /// Receive receiver status change from remote peer.
     /// Source: RTP data
     /// Action: Make adjustments in connection if necessary.
-    ReceivedReceiverStatusViaRtpData(CallId, DataRate, Option<u64>),
+    ReceivedReceiverStatusViaRtpData(CallId, DataRate, u64),
     /// Send sender status message via RTP data
     /// Source: app (user action)
     /// Action: Accumulate and send a sender status message via RTP data.
@@ -151,16 +151,16 @@ impl fmt::Display for ConnectionEvent {
             ConnectionEvent::ReceivedAcceptedViaRtpData(id) => {
                 format!("ReceivedAcceptedViaRtpData, call_id: {}", id)
             }
-            ConnectionEvent::ReceivedSenderStatusViaRtpData(id, status, sequence_number) => {
+            ConnectionEvent::ReceivedSenderStatusViaRtpData(id, status, seqnum) => {
                 format!(
                     "ReceivedSenderStatusViaRtpData, call_id: {}, status: {:?}, seqnum: {:?}",
-                    id, status, sequence_number
+                    id, status, seqnum
                 )
             }
-            ConnectionEvent::ReceivedReceiverStatusViaRtpData(id, max_bitrate, sequence_number) => {
+            ConnectionEvent::ReceivedReceiverStatusViaRtpData(id, max_bitrate, seqnum) => {
                 format!(
                     "ReceivedReceiverStatusViaRtpData, call_id: {}, max_bitrate: {:?}, seqnum: {:?}",
-                    id, max_bitrate, sequence_number
+                    id, max_bitrate, seqnum
                 )
             }
             ConnectionEvent::ReceivedIce(_) => "RemoteIceCandidates".to_string(),
@@ -223,12 +223,14 @@ where
     worker_runtime: Option<TaskQueueRuntime>,
     /// Runtime for processing observer notification events.
     notify_runtime: Option<TaskQueueRuntime>,
-    /// The sequence number of the last received remote sender status
-    /// We process remote sender status messages larger than this value.
-    last_remote_sender_status_sequence_number: Option<u64>,
-    /// The sequence number of the last received remote receiver status
-    /// We process remote receiver status messages larger than this value.
-    last_remote_receiver_status_sequence_number: Option<u64>,
+    /// The sequence number and last received remote sender status.
+    /// We process remote sender status messages larger than the seqnum
+    /// and fire events when the status changes.
+    last_remote_sender_status: Option<(u64, signaling::SenderStatus)>,
+    /// The sequence number of the last received remote receiver bitrate.
+    /// We process remote receiver status messages larger than the seqnum
+    /// and use the bitrate when it changes.
+    last_remote_receiver_status: Option<(u64, DataRate)>,
 }
 
 impl<T> fmt::Display for ConnectionStateMachine<T>
@@ -296,8 +298,8 @@ where
             event_stream,
             worker_runtime: Some(TaskQueueRuntime::new("connection-fsm-worker")?),
             notify_runtime: Some(TaskQueueRuntime::new("connection-fsm-notify")?),
-            last_remote_sender_status_sequence_number: None,
-            last_remote_receiver_status_sequence_number: None,
+            last_remote_sender_status: None,
+            last_remote_receiver_status: None,
         };
 
         if let Some(worker_runtime) = &mut fsm.worker_runtime {
@@ -374,14 +376,9 @@ where
             _ => {}
         }
 
-        // If in the process of terminating the call, drop all other
-        // events.
-        match state {
-            ConnectionState::Terminating | ConnectionState::Terminated => {
-                debug!("handle_event(): dropping event {} while terminating", event);
-                return Ok(());
-            }
-            _ => (),
+        if state.terminating_or_terminated() {
+            debug!("handle_event(): dropping event {} while terminating", event);
+            return Ok(());
         }
 
         match event {
@@ -392,23 +389,16 @@ where
             ConnectionEvent::ReceivedAcceptedViaRtpData(id) => {
                 self.handle_received_accepted_via_rtp_data(connection, state, id)
             }
-            ConnectionEvent::ReceivedSenderStatusViaRtpData(id, status, sequence_number) => self
-                .handle_received_sender_status_via_rtp_data(
-                    connection,
-                    state,
-                    id,
-                    status,
-                    sequence_number,
-                ),
-            ConnectionEvent::ReceivedReceiverStatusViaRtpData(id, max_bitrate, sequence_number) => {
-                self.handle_received_receiver_status_via_rtp_data(
+            ConnectionEvent::ReceivedSenderStatusViaRtpData(id, status, seqnum) => self
+                .handle_received_sender_status_via_rtp_data(connection, state, id, status, seqnum),
+            ConnectionEvent::ReceivedReceiverStatusViaRtpData(id, max_bitrate, seqnum) => self
+                .handle_received_receiver_status_via_rtp_data(
                     connection,
                     state,
                     id,
                     max_bitrate,
-                    sequence_number,
-                )
-            }
+                    seqnum,
+                ),
             ConnectionEvent::ReceivedIce(ice) => self.handle_received_ice(connection, state, ice),
             ConnectionEvent::UpdateSenderStatus(status) => {
                 self.handle_update_sender_status(connection, state, status)
@@ -450,6 +440,58 @@ where
         self.notify_spawn(notify_observer_future);
     }
 
+    fn handle_connected_and_accepted_for_the_first_time(
+        &mut self,
+        connection: Connection<T>,
+    ) -> Result<()> {
+        connection.set_state(ConnectionState::ConnectedAndAccepted)?;
+        // We may have received status messages while ringing, which we now must
+        // process because they are ignored before the call is accepted.
+        if let Some((_, max_bitrate)) = self.last_remote_receiver_status {
+            Self::handle_remote_receiver_status_changed(&connection, max_bitrate)?;
+        }
+        if let Some((_, status)) = self.last_remote_sender_status {
+            Self::handle_remote_sender_status_changed(&connection, status)?;
+        }
+        if connection.direction() == CallDirection::InComing {
+            self.send_accepted_via_rtp_data(connection);
+        }
+        Ok(())
+    }
+
+    // This can happen either when it changes or when we process a cached one
+    // when we are first ConnectedAndAccepted.
+    fn handle_remote_receiver_status_changed(
+        connection: &Connection<T>,
+        max_bitrate: DataRate,
+    ) -> Result<()> {
+        connection.set_remote_max_bitrate(max_bitrate)
+    }
+
+    // This can happen either when it changes or when we process a cached one
+    // when we are first ConnectedAndAccepted.
+    fn handle_remote_sender_status_changed(
+        connection: &Connection<T>,
+        status: signaling::SenderStatus,
+    ) -> Result<()> {
+        connection.notify_observer(ConnectionObserverEvent::RemoteSenderStatusChanged(status))
+    }
+
+    fn send_accepted_via_rtp_data(&mut self, connection: Connection<T>) {
+        let mut err_connection = connection.clone();
+        let connected_future = lazy(move |_| {
+            if connection.terminating()? {
+                return Ok(());
+            }
+            connection.send_accepted_via_rtp_data()?;
+            Ok(())
+        })
+        .map_err(move |err| {
+            err_connection.inject_internal_error(err, "Sending Connected failed");
+        });
+        self.worker_spawn(connected_future);
+    }
+
     fn handle_received_hangup(
         &mut self,
         connection: Connection<T>,
@@ -467,15 +509,11 @@ where
             warn!("Remote hangup for non-active call");
             return Ok(());
         }
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted
-            | ConnectionState::ConnectedAndAccepted => {
-                self.notify_observer(connection, ConnectionObserverEvent::ReceivedHangup(hangup))
-            }
-            _ => self.unexpected_state(state, "RemoteHangup"),
-        };
+        if state.connecting_or_connected() {
+            self.notify_observer(connection, ConnectionObserverEvent::ReceivedHangup(hangup))
+        } else {
+            self.unexpected_state(state, "RemoteHangup");
+        }
         Ok(())
     }
 
@@ -490,24 +528,46 @@ where
             return Ok(());
         }
         match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ConnectedBeforeAccepted => {
+            ConnectionState::NotYetStarted
+            | ConnectionState::Starting
+            | ConnectionState::IceGathering => {
+                // It shouldn't be possible to receive anything over RTP yet.
+                self.unexpected_state(state, "ReceivedAcceptedViaRtpData");
+            }
+            ConnectionState::ConnectingBeforeAccepted => {
                 ringbench!(
                     RingBench::WebRtc,
                     RingBench::Conn,
-                    format!("dc(accepted)\t{}", connection.connection_id())
+                    format!(
+                        "dc(accepted)\t{} (before connected)",
+                        connection.connection_id()
+                    )
                 );
-                connection.set_state(ConnectionState::ConnectedAndAccepted)?;
-                self.notify_observer(
-                    connection,
-                    ConnectionObserverEvent::ReceivedAcceptedViaRtpData,
-                );
+                connection.set_state(ConnectionState::ConnectingAfterAccepted)?;
             }
-            ConnectionState::ConnectedAndAccepted | ConnectionState::ReconnectingAfterAccepted => {
+            ConnectionState::ConnectedBeforeAccepted => {
+                ringbench!(
+                    RingBench::WebRtc,
+                    RingBench::Conn,
+                    format!(
+                        "dc(accepted)\t{} (after connected)",
+                        connection.connection_id()
+                    )
+                );
+                self.handle_connected_and_accepted_for_the_first_time(connection)?;
+            }
+            ConnectionState::ConnectingAfterAccepted
+            | ConnectionState::ConnectedAndAccepted
+            | ConnectionState::ReconnectingAfterAccepted => {
                 // Ignore Accepted notifications in already-accepted state. These may arise
                 // because of expected RTP data retransmissions.
             }
-            _ => self.unexpected_state(state, "ReceivedAcceptedViaRtpData"),
+            ConnectionState::IceFailed
+            | ConnectionState::Terminating
+            | ConnectionState::Terminated => {
+                // It might be possible, but definitely unexpected.
+                self.unexpected_state(state, "ReceivedAcceptedViaRtpData");
+            }
         }
         Ok(())
     }
@@ -518,11 +578,11 @@ where
         state: ConnectionState,
         call_id: CallId,
         status: signaling::SenderStatus,
-        sequence_number: Option<u64>,
+        seqnum: u64,
     ) -> Result<()> {
         debug!(
-            "handle_received_sender_status_via_rtp_data(): status: {:?}, sequence_number: {:?}",
-            status, sequence_number
+            "handle_received_sender_status_via_rtp_data(): status: {:?}, seqnum: {:?}",
+            status, seqnum
         );
 
         if connection.call_id() != call_id {
@@ -530,55 +590,47 @@ where
             return Ok(());
         }
 
-        let out_of_order = match (
-            sequence_number,
-            self.last_remote_sender_status_sequence_number,
-        ) {
-            // If no sequence number was sent, we assume this is a legacy client that is only
-            // using ordered delivery.
-            (None, _) => false,
+        let changed = match self.last_remote_sender_status {
             // This is the first sequence number
-            (Some(_), None) => false,
-            // If they are equal, we treat it as out of order as well.
-            (Some(seqnum), Some(last_seqnum)) => {
+            None => true,
+            Some((last_seqnum, last_status)) => {
                 if seqnum < last_seqnum {
-                    // Warn only when packets arrive out of order, but not on expected retransmits with the same
-                    // sequence number.
+                    // Warn only when packets arrive out of order, but not on expected retransmits
+                    // with the same sequence number.
                     warn!("Dropped remote sender status message because it arrived out of order.");
                 };
-                seqnum <= last_seqnum
-            }
-        };
-        if out_of_order {
-            // Just ignore out of order status messages.
-            return Ok(());
-        }
-        if sequence_number.is_some() {
-            self.last_remote_sender_status_sequence_number = sequence_number;
-        }
 
-        match (state, sequence_number) {
-            (
-                ConnectionState::ConnectedAndAccepted | ConnectionState::ReconnectingAfterAccepted,
-                Some(_),
-            ) => {
-                self.notify_observer(
-                    connection,
-                    ConnectionObserverEvent::ReceivedSenderStatusViaRtpData(status),
-                );
-            }
-            (
-                ConnectionState::ConnectingBeforeAccepted
-                | ConnectionState::ConnectedBeforeAccepted,
-                Some(_),
-            ) => {
-                // Ignore before accepted
-            }
-            (_, Some(_)) => self.unexpected_state(state, "ReceivedSenderStatusViaRtpData"),
-            (_, None) => {
-                // Ignore old messages
+                // If they are equal, we treat it as out of order as well.
+                if seqnum <= last_seqnum {
+                    // Just ignore out of order status messages.
+                    return Ok(());
+                }
+
+                last_status != status
             }
         };
+        self.last_remote_sender_status = Some((seqnum, status));
+
+        match state {
+            ConnectionState::ConnectedAndAccepted | ConnectionState::ReconnectingAfterAccepted => {
+                if changed {
+                    Self::handle_remote_sender_status_changed(&connection, status)?;
+                }
+            }
+            ConnectionState::ConnectingBeforeAccepted
+            | ConnectionState::ConnectingAfterAccepted
+            | ConnectionState::ConnectedBeforeAccepted => {
+                // Ignore before active
+            }
+            ConnectionState::NotYetStarted
+            | ConnectionState::Starting
+            | ConnectionState::IceGathering
+            | ConnectionState::IceFailed
+            | ConnectionState::Terminating
+            | ConnectionState::Terminated => {
+                self.unexpected_state(state, "ReceivedSenderStatusViaRtpData");
+            }
+        }
         Ok(())
     }
 
@@ -588,11 +640,11 @@ where
         state: ConnectionState,
         call_id: CallId,
         max_bitrate: DataRate,
-        sequence_number: Option<u64>,
+        seqnum: u64,
     ) -> Result<()> {
         debug!(
-            "handle_received_receiver_status_via_rtp_data(): max_bitrate: {:?}, sequence_number: {:?}",
-            max_bitrate, sequence_number
+            "handle_received_receiver_status_via_rtp_data(): max_bitrate: {:?}, seqnum: {:?}",
+            max_bitrate, seqnum
         );
 
         if connection.call_id() != call_id {
@@ -600,52 +652,47 @@ where
             return Ok(());
         }
 
-        let out_of_order = match (
-            sequence_number,
-            self.last_remote_receiver_status_sequence_number,
-        ) {
-            // If no sequence number was sent, we assume this is a legacy client that is only
-            // using ordered delivery.
-            (None, _) => false,
+        let changed = match self.last_remote_receiver_status {
             // This is the first sequence number
-            (Some(_), None) => false,
-            // If they are equal, we treat it as out of order as well.
-            (Some(seqnum), Some(last_seqnum)) => {
+            None => true,
+            Some((last_seqnum, last_max_bitrate)) => {
                 if seqnum < last_seqnum {
-                    // Warn only when packets arrive out of order, but not on expected retransmits with the same
-                    // sequence number.
+                    // Warn only when packets arrive out of order, but not on expected retransmits
+                    // with the same sequence number.
                     warn!(
                         "Dropped remote receiver status message because it arrived out of order."
                     );
                 };
-                seqnum <= last_seqnum
+
+                // If they are equal, we treat it as out of order as well.
+                if seqnum <= last_seqnum {
+                    // Just ignore out of order status messages.
+                    return Ok(());
+                }
+
+                max_bitrate != last_max_bitrate
             }
         };
-        if out_of_order {
-            // Just ignore out of order status messages.
-            return Ok(());
-        }
-        if sequence_number.is_some() {
-            self.last_remote_receiver_status_sequence_number = sequence_number;
-        }
+        self.last_remote_receiver_status = Some((seqnum, max_bitrate));
 
-        match (state, sequence_number) {
-            (
-                ConnectionState::ConnectedAndAccepted | ConnectionState::ReconnectingAfterAccepted,
-                Some(_),
-            ) => {
-                connection.set_remote_max_bitrate(max_bitrate)?;
+        match state {
+            ConnectionState::ConnectedAndAccepted | ConnectionState::ReconnectingAfterAccepted => {
+                if changed {
+                    Self::handle_remote_receiver_status_changed(&connection, max_bitrate)?;
+                }
             }
-            (
-                ConnectionState::ConnectingBeforeAccepted
-                | ConnectionState::ConnectedBeforeAccepted,
-                Some(_),
-            ) => {
-                // Ignore before accepted
+            ConnectionState::ConnectingBeforeAccepted
+            | ConnectionState::ConnectingAfterAccepted
+            | ConnectionState::ConnectedBeforeAccepted => {
+                // Ignore before active
             }
-            (_, Some(_)) => self.unexpected_state(state, "ReceivedReceiverStatusViaRtpData"),
-            (_, None) => {
-                // Ignore old messages
+            ConnectionState::NotYetStarted
+            | ConnectionState::Starting
+            | ConnectionState::IceGathering
+            | ConnectionState::IceFailed
+            | ConnectionState::Terminating
+            | ConnectionState::Terminated => {
+                self.unexpected_state(state, "ReceivedReceiverStatusViaRtpData");
             }
         };
         Ok(())
@@ -657,45 +704,25 @@ where
         state: ConnectionState,
         ice: signaling::Ice,
     ) -> Result<()> {
-        if let ConnectionState::NotYetStarted = state {
+        if state == ConnectionState::NotYetStarted {
             warn!("Connection has not yet started, so ignoring remote ICE candidates...");
             return Ok(());
         }
 
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted
-            | ConnectionState::ConnectedAndAccepted => {
-                connection.handle_received_ice(ice)?;
-            }
-            _ => self.unexpected_state(state, "RemoteIceCandidate"),
+        if state.can_receive_ice_candidates() {
+            connection.handle_received_ice(ice)?;
+        } else {
+            self.unexpected_state(state, "RemoteIceCandidate");
         }
 
         Ok(())
     }
 
     fn handle_accept(&mut self, connection: Connection<T>, state: ConnectionState) -> Result<()> {
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted => {
-                // notify the peer via an RTP data message.
-                let mut err_connection = connection.clone();
-                let connected_future = lazy(move |_| {
-                    if connection.terminating()? {
-                        return Ok(());
-                    }
-                    connection.set_state(ConnectionState::ConnectedAndAccepted)?;
-                    connection.send_accepted_via_rtp_data()
-                })
-                .map_err(move |err| {
-                    err_connection.inject_internal_error(err, "Sending Connected failed");
-                });
-
-                self.worker_spawn(connected_future);
-            }
-            _ => self.unexpected_state(state, "AcceptCall"),
+        if state.can_be_accepted_locally() {
+            self.handle_connected_and_accepted_for_the_first_time(connection)?;
+        } else {
+            self.unexpected_state(state, "AcceptCall");
         }
         Ok(())
     }
@@ -706,17 +733,16 @@ where
         state: ConnectionState,
         hangup: signaling::Hangup,
     ) -> Result<()> {
-        match state {
-            ConnectionState::NotYetStarted => self.unexpected_state(state, "SendHangupViaRtpData"),
-            _ => {
-                let mut err_connection = connection.clone();
-                let hangup_future = lazy(move |_| connection.send_hangup_via_rtp_data(hangup))
-                    .map_err(move |err| {
-                        err_connection.inject_internal_error(err, "Sending Hangup failed");
-                    });
+        if state.can_send_hangup_via_rtp() {
+            let mut err_connection = connection.clone();
+            let hangup_future =
+                lazy(move |_| connection.send_hangup_via_rtp_data(hangup)).map_err(move |err| {
+                    err_connection.inject_internal_error(err, "Sending Hangup failed");
+                });
 
-                self.worker_spawn(hangup_future);
-            }
+            self.worker_spawn(hangup_future);
+        } else {
+            self.unexpected_state(state, "SendHangupViaRtpData");
         }
         Ok(())
     }
@@ -727,26 +753,22 @@ where
         state: ConnectionState,
         sender_status: signaling::SenderStatus,
     ) -> Result<()> {
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted
-            | ConnectionState::ConnectedAndAccepted => {
-                // notify the peer via an RTP data message.
-                let mut err_connection = connection.clone();
-                let send_sender_status_future = lazy(move |_| {
-                    if connection.terminating()? {
-                        return Ok(());
-                    }
-                    connection.update_sender_status_from_fsm(sender_status)
-                })
-                .map_err(move |err| {
-                    err_connection.inject_internal_error(err, "Sending local sender status failed");
-                });
+        if state.connected_or_reconnecting() {
+            // notify the peer via an RTP data message.
+            let mut err_connection = connection.clone();
+            let send_sender_status_future = lazy(move |_| {
+                if connection.terminating()? {
+                    return Ok(());
+                }
+                connection.update_sender_status_from_fsm(sender_status)
+            })
+            .map_err(move |err| {
+                err_connection.inject_internal_error(err, "Sending local sender status failed");
+            });
 
-                self.worker_spawn(send_sender_status_future);
-            }
-            _ => self.unexpected_state(state, "UpdateSenderStatus"),
+            self.worker_spawn(send_sender_status_future);
+        } else {
+            self.unexpected_state(state, "UpdateSenderStatus");
         };
         Ok(())
     }
@@ -757,26 +779,20 @@ where
         state: ConnectionState,
         bandwidth_mode: BandwidthMode,
     ) -> Result<()> {
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted
-            | ConnectionState::ConnectedAndAccepted => {
-                let mut err_connection = connection.clone();
-                let update_bandwidth_mode_future = lazy(move |_| {
-                    if connection.terminating()? {
-                        return Ok(());
-                    }
+        if state.connecting_or_connected() {
+            let mut err_connection = connection.clone();
+            let update_bandwidth_mode_future = lazy(move |_| {
+                if connection.terminating()? {
+                    return Ok(());
+                }
 
-                    connection.update_bandwidth_mode(bandwidth_mode)
-                })
-                .map_err(move |err| {
-                    err_connection.inject_internal_error(err, "Updating bandwidth mode failed");
-                });
+                connection.update_bandwidth_mode(bandwidth_mode)
+            })
+            .map_err(move |err| {
+                err_connection.inject_internal_error(err, "Updating bandwidth mode failed");
+            });
 
-                self.worker_spawn(update_bandwidth_mode_future);
-            }
-            _ => self.unexpected_state(state, "UpdateBandwidthMode"),
+            self.worker_spawn(update_bandwidth_mode_future);
         };
         Ok(())
     }
@@ -793,28 +809,23 @@ where
             format!("ice_candidate()\t{}", connection.id())
         );
 
-        match state {
-            ConnectionState::NotYetStarted
-            | ConnectionState::Terminating
-            | ConnectionState::Terminated => {
-                warn!("State is now idle or terminating, ignoring local ICE candidate...");
-            }
-            _ => {
-                // send signal message to the other side with the ICE
-                // candidate.
-                let mut err_connection = connection.clone();
-                let ice_future = lazy(move |_| {
-                    if connection.terminating()? {
-                        return Ok(());
-                    }
-                    connection.buffer_local_ice_candidates(candidates)
-                })
-                .map_err(move |err| {
-                    err_connection.inject_internal_error(err, "IceFuture failed");
-                });
+        if state.can_send_ice_candidates() {
+            // send signal message to the other side with the ICE
+            // candidate.
+            let mut err_connection = connection.clone();
+            let ice_future = lazy(move |_| {
+                if connection.terminating()? {
+                    return Ok(());
+                }
+                connection.buffer_local_ice_candidates(candidates)
+            })
+            .map_err(move |err| {
+                err_connection.inject_internal_error(err, "IceFuture failed");
+            });
 
-                self.worker_spawn(ice_future);
-            }
+            self.worker_spawn(ice_future);
+        } else {
+            self.unexpected_state(state, "LocalIceCandidate");
         }
         Ok(())
     }
@@ -825,34 +836,34 @@ where
         state: ConnectionState,
     ) -> Result<()> {
         match state {
+            ConnectionState::NotYetStarted
+            | ConnectionState::Starting
+            | ConnectionState::IceGathering => {
+                // This shouldn't be possible.
+                self.unexpected_state(state, "IceConnected");
+            }
             ConnectionState::ConnectingBeforeAccepted => {
                 connection.set_state(ConnectionState::ConnectedBeforeAccepted)?;
-                match connection.direction() {
-                    CallDirection::OutGoing => {
-                        self.notify_observer(
-                            connection,
-                            ConnectionObserverEvent::ConnectedBeforeAccepted,
-                        );
-                    }
-                    CallDirection::InComing => {
-                        self.notify_observer(
-                            connection,
-                            ConnectionObserverEvent::ConnectedBeforeAccepted,
-                        );
-                    }
-                }
+            }
+            ConnectionState::ConnectingAfterAccepted => {
+                self.handle_connected_and_accepted_for_the_first_time(connection)?;
+            }
+            ConnectionState::ConnectedBeforeAccepted | ConnectionState::ConnectedAndAccepted => {
+                // Already connected, so this shouldn't happen.
+                self.unexpected_state(state, "IceConnected");
             }
             ConnectionState::ReconnectingAfterAccepted => {
                 // ICE has reconnected after the call was
                 // previously accepted (and connected).  Return to that state
                 // now.
                 connection.set_state(ConnectionState::ConnectedAndAccepted)?;
-                self.notify_observer(
-                    connection,
-                    ConnectionObserverEvent::ReconnectedAfterAccepted,
-                );
             }
-            _ => self.unexpected_state(state, "IceConnected"),
+            ConnectionState::IceFailed
+            | ConnectionState::Terminating
+            | ConnectionState::Terminated => {
+                // This shouldn't be possible.
+                self.unexpected_state(state, "IceConnected");
+            }
         }
         Ok(())
     }
@@ -862,17 +873,12 @@ where
         connection: Connection<T>,
         state: ConnectionState,
     ) -> Result<()> {
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted
-            | ConnectionState::ConnectedAndAccepted => {
-                connection.set_state(ConnectionState::IceFailed)?;
-                // For callee -- the call was disconnected while answering/local_ringing
-                // For caller -- the recipient was unreachable
-                self.notify_observer(connection, ConnectionObserverEvent::IceFailed);
-            }
-            _ => self.unexpected_state(state, "IceFailed"),
+        if state.connecting_or_connected() {
+            // For callee -- the call was disconnected while answering/local_ringing
+            // For caller -- the recipient was unreachable
+            connection.set_state(ConnectionState::IceFailed)?;
+        } else {
+            self.unexpected_state(state, "IceFailed");
         };
         Ok(())
     }
@@ -883,17 +889,27 @@ where
         state: ConnectionState,
     ) -> Result<()> {
         match state {
+            ConnectionState::NotYetStarted
+            | ConnectionState::Starting
+            | ConnectionState::IceGathering
+            | ConnectionState::ConnectingBeforeAccepted
+            | ConnectionState::ConnectingAfterAccepted => {
+                // This shouldn't be possible.
+                self.unexpected_state(state, "IceConnected");
+            }
             ConnectionState::ConnectedBeforeAccepted => {
                 connection.set_state(ConnectionState::ConnectingBeforeAccepted)?;
             }
             ConnectionState::ConnectedAndAccepted => {
                 connection.set_state(ConnectionState::ReconnectingAfterAccepted)?;
-                self.notify_observer(
-                    connection,
-                    ConnectionObserverEvent::ReconnectingAfterAccepted,
-                );
             }
-            _ => self.unexpected_state(state, "IceDisconnected"),
+            ConnectionState::ReconnectingAfterAccepted
+            | ConnectionState::IceFailed
+            | ConnectionState::Terminating
+            | ConnectionState::Terminated => {
+                // This shouldn't be possible.
+                self.unexpected_state(state, "IceConnected");
+            }
         };
         Ok(())
     }
@@ -903,6 +919,7 @@ where
         connection: Connection<T>,
         network_route: NetworkRoute,
     ) -> Result<()> {
+        connection.set_network_route(network_route)?;
         self.notify_observer(
             connection,
             ConnectionObserverEvent::IceNetworkRouteChanged(network_route),
@@ -936,25 +953,21 @@ where
         state: ConnectionState,
         stream: MediaStream,
     ) -> Result<()> {
-        match state {
-            ConnectionState::ConnectingBeforeAccepted
-            | ConnectionState::ReconnectingAfterAccepted
-            | ConnectionState::ConnectedBeforeAccepted
-            | ConnectionState::ConnectedAndAccepted => {
-                let mut err_connection = connection.clone();
-                let add_stream_future = lazy(move |_| {
-                    if connection.terminating()? {
-                        return Ok(());
-                    }
-                    connection.handle_received_incoming_media(stream)
-                })
-                .map_err(move |err| {
-                    err_connection.inject_internal_error(err, "Add Media Stream Future failed");
-                });
+        if state.connecting_or_connected() {
+            let mut err_connection = connection.clone();
+            let add_stream_future = lazy(move |_| {
+                if connection.terminating()? {
+                    return Ok(());
+                }
+                connection.handle_received_incoming_media(stream)
+            })
+            .map_err(move |err| {
+                err_connection.inject_internal_error(err, "Add Media Stream Future failed");
+            });
 
-                self.worker_spawn(add_stream_future);
-            }
-            _ => self.unexpected_state(state, "ReceivedIncomingMedia"),
+            self.worker_spawn(add_stream_future);
+        } else {
+            self.unexpected_state(state, "ReceivedIncomingMedia");
         }
         Ok(())
     }

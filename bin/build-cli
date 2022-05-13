@@ -61,7 +61,7 @@ get_default_platform()
     hash rustup 2>/dev/null || { echo >&2 "Make sure you have rustup installed and properly configured! Aborting."; exit 1; }
 
     case "$(rustup show active-toolchain)" in 
-        *"x86_64-apple-darwin"* )
+        *"x86_64-apple-darwin"* | *"aarch64-apple-darwin"* )
             echo "darwin"
             ;;
         *"x86_64-pc-windows"* )
@@ -87,7 +87,7 @@ export MACOSX_DEPLOYMENT_TARGET="10.10"
 # Build WebRTC.
 (
     cd src/webrtc/src
-    WEBRTC_ARGS="rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_use_x11=false rtc_enable_sctp=false"
+    WEBRTC_ARGS="rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_use_x11=false rtc_enable_sctp=false rtc_libvpx_build_vp9=true rtc_include_ilbc=false"
 
     if [ "${BUILD_TYPE}" = "debug" ]
     then

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use prost::Message;
 use ringrtc::common::{
-    ApplicationEvent, CallId, CallMediaType, CallState, ConnectionState, DeviceId,
+    units::DataRate, ApplicationEvent, CallId, CallMediaType, CallState, ConnectionState, DeviceId,
 };
 use ringrtc::core::bandwidth_mode::BandwidthMode;
 use ringrtc::core::{group_call, signaling};
@@ -24,6 +24,7 @@ use ringrtc::protobuf;
 use ringrtc::sim::error::SimError;
 use ringrtc::webrtc;
 use ringrtc::webrtc::media::MediaStream;
+use ringrtc::webrtc::peer_connection_observer::{NetworkAdapterType, NetworkRoute};
 
 #[macro_use]
 mod common;
@@ -292,6 +293,193 @@ fn connected_and_accepted_outbound_call() -> TestContext {
     assert!(cm.busy());
 
     context
+}
+
+// Create an outbound call session up to the Accepted state,
+// but with the remote accept happening before ICE connected.
+//
+// - create an offer
+// - send offer
+// - receive answer
+// - media stream added
+// - call accepted
+// - ice connected
+//
+// Now in the ConnectedAndAccepted state.
+#[test]
+fn accepted_and_connected_outbound_call_one_callee() {
+    let context = start_outbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingBeforeAccepted
+    );
+    assert_eq!(context.event_count(ApplicationEvent::RemoteRinging), 0);
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+
+    info!("test: inject incoming stream");
+    active_connection
+        .inject_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    info!("test: injecting accepted");
+    active_connection
+        .inject_received_accepted_via_rtp_data(active_call.call_id())
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectingAfterAccepted
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingAfterAccepted
+    );
+
+    info!("test: injecting ice connected");
+    active_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectedAndAccepted
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectedAndAccepted
+    );
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteRinging), 1);
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteAccepted), 1);
+    assert_eq!(context.stream_count(), 1);
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+    assert!(cm.busy());
+}
+
+#[test]
+fn accepted_and_connected_outbound_call_two_callees() {
+    let context = start_outbound_n_remote_call(2);
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = active_call.get_connection(1).unwrap();
+    let mut inactive_connection = active_call.get_connection(2).unwrap();
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+    assert_eq!(
+        inactive_connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingBeforeAccepted
+    );
+    assert_eq!(context.event_count(ApplicationEvent::RemoteRinging), 0);
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+
+    info!("test: inject incoming stream");
+    active_connection
+        .inject_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
+        .expect(error_line!());
+    inactive_connection
+        .inject_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    info!("test: injecting ice connected for inactive connection");
+    inactive_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+    assert_eq!(
+        inactive_connection.state().expect(error_line!()),
+        ConnectionState::ConnectedBeforeAccepted
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectedBeforeAccepted
+    );
+
+    cm.synchronize().expect(error_line!());
+
+    info!("test: injecting accepted for active connection");
+    active_connection
+        .inject_received_accepted_via_rtp_data(active_call.call_id())
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectingAfterAccepted
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingAfterAccepted
+    );
+
+    info!("test: injecting ice connected for active connection");
+    active_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(
+        active_connection.state().expect(error_line!()),
+        ConnectionState::ConnectedAndAccepted
+    );
+    assert_eq!(
+        inactive_connection.state().expect(error_line!()),
+        ConnectionState::Terminated
+    );
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectedAndAccepted
+    );
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteRinging), 1);
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteAccepted), 1);
+    assert_eq!(context.stream_count(), 1);
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+    assert!(cm.busy());
 }
 
 #[test]
@@ -733,6 +921,14 @@ fn update_bandwidth_mode_default() {
     let mut cm = context.cm();
     let active_connection = context.active_connection();
 
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
     active_connection
         .update_bandwidth_mode(BandwidthMode::Normal)
         .expect(error_line!());
@@ -740,8 +936,22 @@ fn update_bandwidth_mode_default() {
     cm.synchronize().expect(error_line!());
     assert_eq!(context.error_count(), 0);
 
-    // TODO -- verify that the bitrate was changed
-    // TODO -- verify that the a message was sent via RTP data
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    // It's not sent because that's what it starts as.
+    assert_eq!(
+        None,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    )
 }
 
 #[test]
@@ -759,8 +969,126 @@ fn update_bandwidth_mode_low() {
     cm.synchronize().expect(error_line!());
     assert_eq!(context.error_count(), 0);
 
-    // TODO -- verify that the bitrate was changed
-    // TODO -- verify that the a message was sent via RTP data
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    )
+}
+
+#[test]
+fn update_bandwidth_when_relayed() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_ice_network_route_changed(NetworkRoute {
+            local_adapter_type: NetworkAdapterType::Unknown,
+            relayed: true,
+        })
+        .unwrap();
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(1_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        None,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Low)
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Normal)
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(1_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    // Even though we limit what we *send* when using TURN, we don't
+    // limit what we *request to be sent to us*.
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .inject_ice_network_route_changed(NetworkRoute {
+            local_adapter_type: NetworkAdapterType::Unknown,
+            relayed: false,
+        })
+        .unwrap();
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
 }
 
 #[test]
@@ -1177,8 +1505,21 @@ fn received_remote_video_status() {
 
     let mut enable_count = 0;
     let mut disable_count = 0;
+    let mut old_enable = None;
     for i in 0..20 {
         let enable = context.prng.gen::<bool>();
+        match (old_enable, enable) {
+            (None | Some(false), true) => {
+                enable_count += 1;
+            }
+            (None | Some(true), false) => {
+                disable_count += 1;
+            }
+            (Some(true), true) | (Some(false), false) => {
+                // Nothing changed
+            }
+        }
+        old_enable = Some(enable);
 
         active_connection
             .inject_received_sender_status_via_rtp_data(
@@ -1187,16 +1528,10 @@ fn received_remote_video_status() {
                     video_enabled: Some(enable),
                     sharing_screen: None,
                 },
-                Some(i),
+                i,
             )
             .expect(error_line!());
         cm.synchronize().expect(error_line!());
-
-        if enable {
-            enable_count += 1;
-        } else {
-            disable_count += 1;
-        }
 
         assert_eq!(context.error_count(), 0);
         assert_eq!(
@@ -1225,7 +1560,7 @@ fn received_remote_video_status() {
                 video_enabled: Some(true),
                 sharing_screen: None,
             },
-            Some(1),
+            1,
         )
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
@@ -1236,7 +1571,7 @@ fn received_remote_video_status() {
                 video_enabled: Some(false),
                 sharing_screen: None,
             },
-            Some(2),
+            2,
         )
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
@@ -1260,6 +1595,68 @@ fn received_remote_video_status() {
 }
 
 #[test]
+fn ignore_duplicate_remote_video_status() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(true),
+                sharing_screen: None,
+            },
+            0,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(true),
+                sharing_screen: None,
+            },
+            1,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(false),
+                sharing_screen: None,
+            },
+            2,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(false),
+                sharing_screen: None,
+            },
+            3,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 1);
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoDisable), 1);
+}
+
+#[test]
 fn received_remote_sharing_screen_status() {
     test_init();
 
@@ -1270,8 +1667,21 @@ fn received_remote_sharing_screen_status() {
 
     let mut enable_count = 0;
     let mut disable_count = 0;
+    let mut old_enable = None;
     for i in 0..20 {
         let enable = context.prng.gen::<bool>();
+        match (old_enable, enable) {
+            (None | Some(false), true) => {
+                enable_count += 1;
+            }
+            (None | Some(true), false) => {
+                disable_count += 1;
+            }
+            (Some(true), true) | (Some(false), false) => {
+                // Nothing changed
+            }
+        }
+        old_enable = Some(enable);
 
         active_connection
             .inject_received_sender_status_via_rtp_data(
@@ -1280,16 +1690,10 @@ fn received_remote_sharing_screen_status() {
                     video_enabled: None,
                     sharing_screen: Some(enable),
                 },
-                Some(i),
+                i,
             )
             .expect(error_line!());
         cm.synchronize().expect(error_line!());
-
-        if enable {
-            enable_count += 1;
-        } else {
-            disable_count += 1;
-        }
 
         assert_eq!(context.error_count(), 0);
         assert_eq!(
@@ -1312,7 +1716,7 @@ fn received_remote_sharing_screen_status() {
                 video_enabled: None,
                 sharing_screen: Some(true),
             },
-            Some(1),
+            1,
         )
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
@@ -1323,7 +1727,7 @@ fn received_remote_sharing_screen_status() {
                 video_enabled: None,
                 sharing_screen: Some(false),
             },
-            Some(2),
+            2,
         )
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
@@ -1338,6 +1742,74 @@ fn received_remote_sharing_screen_status() {
     );
     assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 0);
     assert_eq!(context.event_count(ApplicationEvent::RemoteVideoDisable), 0);
+}
+
+#[test]
+fn ignore_duplicate_remote_screen_sharing_status() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: None,
+                sharing_screen: Some(true),
+            },
+            0,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: None,
+                sharing_screen: Some(true),
+            },
+            1,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: None,
+                sharing_screen: Some(false),
+            },
+            2,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: None,
+                sharing_screen: Some(false),
+            },
+            3,
+        )
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(
+        context.event_count(ApplicationEvent::RemoteSharingScreenEnable),
+        1
+    );
+    assert_eq!(
+        context.event_count(ApplicationEvent::RemoteSharingScreenDisable),
+        1
+    );
 }
 
 #[test]
@@ -1357,7 +1829,7 @@ fn received_remote_multiple_status() {
                 video_enabled: Some(false),
                 sharing_screen: Some(true),
             },
-            Some(1),
+            1,
         )
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
@@ -1368,7 +1840,7 @@ fn received_remote_multiple_status() {
                 video_enabled: Some(true),
                 sharing_screen: Some(false),
             },
-            Some(2),
+            2,
         )
         .expect(error_line!());
     cm.synchronize().expect(error_line!());
@@ -1384,6 +1856,70 @@ fn received_remote_multiple_status() {
     assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 1);
     assert_eq!(context.event_count(ApplicationEvent::RemoteVideoDisable), 1);
 }
+
+#[test]
+fn received_status_before_accepted() {
+    let context = start_outbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(true),
+                sharing_screen: None,
+            },
+            1,
+        )
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_receiver_status_via_rtp_data(
+            active_call.call_id(),
+            DataRate::from_bps(50_000),
+            1,
+        )
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    active_connection
+        .inject_received_accepted_via_rtp_data(active_call.call_id())
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 1);
+
+    assert_eq!(
+        Some(50_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+}
+
 #[test]
 fn call_timeout_before_connect() {
     test_init();

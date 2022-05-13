@@ -982,6 +982,7 @@ public class CallManager {
     PeerConnection.RTCConfiguration configuration = new PeerConnection.RTCConfiguration(callContext.iceServers);
 
     configuration.proxyInfo = callContext.proxyInfo;
+    configuration.sdpSemantics  = PeerConnection.SdpSemantics.PLAN_B;
     configuration.bundlePolicy  = PeerConnection.BundlePolicy.MAXBUNDLE;
     configuration.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
     configuration.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
@@ -990,7 +991,6 @@ public class CallManager {
     if (callContext.hideIp) {
       configuration.iceTransportsType = PeerConnection.IceTransportsType.RELAY;
     }
-    configuration.enableDtlsSrtp = false;
 
     PeerConnectionFactory factory       = callContext.factory;
     CameraControl         cameraControl = callContext.cameraControl;

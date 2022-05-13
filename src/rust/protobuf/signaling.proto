@@ -48,13 +48,14 @@ message SocketAddr {
 
 enum VideoCodecType {
   VP8 = 8;
+  VP9 = 9;
   H264_CONSTRAINED_BASELINE = 40;
   H264_CONSTRAINED_HIGH = 46;
 }
 
 message VideoCodec {
   optional VideoCodecType type = 1;
-  // Used for H264; Not used for VP8
+  // Used for H264; Not used for VP8 or VP9
   optional uint32 level = 2;
 }
 
@@ -64,7 +65,8 @@ message ConnectionParametersV4 {
   optional string ice_pwd = 3;
   // In other words, the video codecs the sender can receive.
   repeated VideoCodec receive_video_codecs = 4;
-  // Used at call establishment to convey the bitrate that should be used for sending.
+  /// Used at call establishment to convey the bitrate that the signaling sender (media receiver)
+  /// wants the signaling receiver (media sender) to send.
   optional uint64 max_bitrate_bps = 5;
 }
 

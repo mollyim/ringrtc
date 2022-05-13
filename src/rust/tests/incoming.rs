@@ -13,7 +13,7 @@ extern crate log;
 use std::time::Duration;
 
 use prost::Message;
-use ringrtc::common::{ApplicationEvent, CallId, CallState, ConnectionState};
+use ringrtc::common::{units::DataRate, ApplicationEvent, CallId, CallState, ConnectionState};
 use ringrtc::core::bandwidth_mode::BandwidthMode;
 use ringrtc::core::call_manager::MAX_MESSAGE_AGE;
 use ringrtc::core::group_call;
@@ -21,6 +21,7 @@ use ringrtc::core::signaling;
 use ringrtc::protobuf;
 use ringrtc::webrtc;
 use ringrtc::webrtc::media::MediaStream;
+use ringrtc::webrtc::peer_connection_observer::{NetworkAdapterType, NetworkRoute};
 
 #[macro_use]
 mod common;
@@ -454,6 +455,184 @@ fn inbound_call_drop_accepted() {
     assert_eq!(context.declined_hangups_sent(), 0);
     assert_eq!(context.normal_hangups_sent(), 0);
     assert_eq!(context.need_permission_hangups_sent(), 0);
+}
+
+#[test]
+fn update_bandwidth_mode_default() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let active_connection = context.active_connection();
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Normal)
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    // It's not sent because that's what it starts as.
+    assert_eq!(
+        None,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    )
+}
+
+#[test]
+fn update_bandwidth_mode_low() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let active_connection = context.active_connection();
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Low)
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    )
+}
+
+#[test]
+fn update_bandwidth_when_relayed() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_ice_network_route_changed(NetworkRoute {
+            local_adapter_type: NetworkAdapterType::Unknown,
+            relayed: true,
+        })
+        .unwrap();
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(1_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        None,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Low)
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Normal)
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(1_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    // Even though we limit what we *send* when using TURN, we don't
+    // limit what we *request to be sent to us*.
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .inject_ice_network_route_changed(NetworkRoute {
+            local_adapter_type: NetworkAdapterType::Unknown,
+            relayed: false,
+        })
+        .unwrap();
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
 }
 
 #[test]
@@ -1143,5 +1322,66 @@ fn group_call_ring_timeout() {
     assert_eq!(
         &[] as &[ringrtc::sim::sim_platform::OutgoingCallMessage],
         &messages[..]
+    );
+}
+
+#[test]
+fn received_status_before_accepted() {
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+
+    active_connection
+        .handle_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(true),
+                sharing_screen: None,
+            },
+            1,
+        )
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_receiver_status_via_rtp_data(
+            active_call.call_id(),
+            DataRate::from_bps(50_000),
+            1,
+        )
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    cm.accept_call(active_call.call_id()).expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 1);
+
+    assert_eq!(
+        Some(50_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
     );
 }

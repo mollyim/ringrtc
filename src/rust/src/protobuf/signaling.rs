@@ -45,7 +45,7 @@ pub struct SocketAddr {
 pub struct VideoCodec {
     #[prost(enumeration="VideoCodecType", optional, tag="1")]
     pub r#type: ::core::option::Option<i32>,
-    /// Used for H264; Not used for VP8
+    /// Used for H264; Not used for VP8 or VP9
     #[prost(uint32, optional, tag="2")]
     pub level: ::core::option::Option<u32>,
 }
@@ -60,7 +60,8 @@ pub struct ConnectionParametersV4 {
     /// In other words, the video codecs the sender can receive.
     #[prost(message, repeated, tag="4")]
     pub receive_video_codecs: ::prost::alloc::vec::Vec<VideoCodec>,
-    /// Used at call establishment to convey the bitrate that should be used for sending.
+    /// Used at call establishment to convey the bitrate that the signaling sender (media receiver)
+    /// wants the signaling receiver (media sender) to send.
     #[prost(uint64, optional, tag="5")]
     pub max_bitrate_bps: ::core::option::Option<u64>,
 }
@@ -123,6 +124,7 @@ pub mod call_message {
 #[repr(i32)]
 pub enum VideoCodecType {
     Vp8 = 8,
+    Vp9 = 9,
     H264ConstrainedBaseline = 40,
     H264ConstrainedHigh = 46,
 }

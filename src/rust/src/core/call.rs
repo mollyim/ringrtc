@@ -118,6 +118,10 @@ where
     terminate_condvar: Arc<(Mutex<bool>, Condvar)>,
     /// Whether or not an offer has been sent via messaging for this call.
     did_send_offer: Arc<AtomicBool>,
+    /// Whether or not the application has already been notified of ApplicationEvent::RemoteRinging.
+    /// It's a little ugly, but we need to handle the case where we get ConnectionState::ConnectedBeforeAccepted
+    /// before a ConnectionState::ConnectingAfterAccepted and not notify the application twice.
+    did_notify_application_of_remote_ringing: Arc<AtomicBool>,
     /// When doing call forking, the parent that must be kept alive to keep
     /// ICE candidates and signaling alive.
     /// And we also need to keep around that parent's offer that it created.
@@ -199,6 +203,9 @@ where
             connection_map: Arc::clone(&self.connection_map),
             terminate_condvar: Arc::clone(&self.terminate_condvar),
             did_send_offer: Arc::clone(&self.did_send_offer),
+            did_notify_application_of_remote_ringing: Arc::clone(
+                &self.did_notify_application_of_remote_ringing,
+            ),
             forking: Arc::clone(&self.forking),
         }
     }
@@ -243,6 +250,7 @@ where
             connection_map: Arc::new(CallMutex::new(HashMap::new(), "connection_map")),
             terminate_condvar: Arc::new((Mutex::new(false), Condvar::new())),
             did_send_offer: Arc::new(AtomicBool::new(false)),
+            did_notify_application_of_remote_ringing: Arc::new(AtomicBool::new(false)),
             forking: Arc::new(CallMutex::new(None, "forking")),
         };
 
@@ -411,10 +419,42 @@ where
         call_manager.start_call(&*remote_peer, self.call_id, self.direction, self.media_type)
     }
 
+    /// Enable media flowing through the active connection and notify the application.
+    pub fn accept_locally(&self) -> Result<()> {
+        let mut connection = self.active_connection()?;
+        connection.inject_accept()?;
+        connection.enable_media()?;
+        connection.start_tick()?;
+        self.notify_application(ApplicationEvent::LocalAccepted)?;
+        Ok(())
+    }
+
+    /// Enable media flowing through the active connection and notify the application.
+    pub fn accept_remotely(&self) -> Result<()> {
+        let connection = self.active_connection()?;
+        connection.enable_media()?;
+        connection.start_tick()?;
+        self.notify_application(ApplicationEvent::RemoteAccepted)?;
+        // Now that we've picked a connection, we can notify the app of the
+        // network route.
+        self.notify_network_route_changed(connection.network_route()?)?;
+        Ok(())
+    }
+
     /// Notify application of an event.
     ///
     /// This is a pass through to the CallManager.
     pub fn notify_application(&self, event: ApplicationEvent) -> Result<()> {
+        if event == ApplicationEvent::RemoteRinging {
+            let did_notify = self
+                .did_notify_application_of_remote_ringing
+                .swap(true, Ordering::SeqCst);
+            if did_notify {
+                // Don't notify the application of RemoteRinging more than once for the same call.
+                return Ok(());
+            }
+        }
+
         let call_manager = self.call_manager()?;
         let remote_peer = self.remote_peer()?;
 
@@ -688,6 +728,15 @@ where
         }
     }
 
+    /// Send a Hangup to all callees via signal messaging.
+    pub fn send_hangup_via_signaling_to_all(&self, hangup: signaling::Hangup) -> Result<()> {
+        self.call_manager()?.send_hangup(
+            self.clone(),
+            self.call_id(),
+            signaling::SendHangup { hangup },
+        )
+    }
+
     /// Send a Hangup on all underlying Connections via RTP data
     pub fn send_hangup_via_rtp_data_to_all(&self, hangup: signaling::Hangup) -> Result<()> {
         info!(
@@ -744,13 +793,7 @@ where
     ) -> Result<()> {
         // Send hangup via RTP data
         self.send_hangup_via_rtp_data_to_all_except(hangup, excluded_remote_device_id)?;
-
-        // Send hangup via signaling.
-        self.call_manager()?.send_hangup(
-            self.clone(),
-            self.call_id(),
-            signaling::SendHangup { hangup },
-        )
+        self.send_hangup_via_signaling_to_all(hangup)
     }
 
     /// ICE failed for a specific connection
