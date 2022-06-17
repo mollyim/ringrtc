@@ -380,6 +380,11 @@ public class CallManager {
     checkCallManagerExists();
 
     Log.i(TAG, "proceed(): callId: " + callId + ", hideIp: " + hideIp);
+    for (PeerConnection.IceServer iceServer : iceServers) {
+      for (String url : iceServer.urls) {
+        Log.i(TAG, "  server: " + url);
+      }
+    }
 
     PeerConnectionFactory factory = this.createPeerConnectionFactory(eglBase, audioProcessingMethod);
 
@@ -731,25 +736,6 @@ public class CallManager {
 
   /**
    *
-   * Notification from application to enable audio playback of remote
-   * audio stream and enable recording of local audio stream.
-   *
-   * @throws CallException for native code failures
-   *
-   */
-  public void setCommunicationMode()
-    throws CallException
-  {
-    checkCallManagerExists();
-
-    Connection connection = ringrtcGetActiveConnection(nativeCallManager);
-    connection.setAudioPlayout(true);
-    connection.setAudioRecording(true);
-
-  }
-
-  /**
-   *
    * Notification from application to enable/disable local audio
    * recording and transmission.
    *
@@ -763,7 +749,6 @@ public class CallManager {
   {
     checkCallManagerExists();
 
-    Log.i(TAG, "#outgoing_audio_enabled: " + enable);
     Connection connection = ringrtcGetActiveConnection(nativeCallManager);
     connection.setAudioEnabled(enable);
   }
