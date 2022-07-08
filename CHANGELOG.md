@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.20.10
+
+- Group Calls: Enable audio recording properly
+
+## v2.20.9
+
+- Reference signalapp/webrtc@4896d
+  - Have one default port allocator flags instead of two
+
+## v2.20.8
+
+- Reference signalapp/webrtc@4896c
+  - Remove bitrate multiplier
+
+- Electron: Add logging to video support
+
 ## v2.20.7
 
 - Log PeerConnection ICE gathering errors
