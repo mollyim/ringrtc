@@ -24,7 +24,9 @@ use ringrtc::protobuf;
 use ringrtc::sim::error::SimError;
 use ringrtc::webrtc;
 use ringrtc::webrtc::media::MediaStream;
-use ringrtc::webrtc::peer_connection_observer::{NetworkAdapterType, NetworkRoute};
+use ringrtc::webrtc::peer_connection_observer::{
+    NetworkAdapterType, NetworkRoute, TransportProtocol,
+};
 
 #[macro_use]
 mod common;
@@ -986,8 +988,7 @@ fn update_bandwidth_mode_low() {
     )
 }
 
-#[test]
-fn update_bandwidth_when_relayed() {
+fn update_bandwidth_when_relayed(local: bool) {
     test_init();
 
     let context = connected_and_accepted_outbound_call();
@@ -998,7 +999,9 @@ fn update_bandwidth_when_relayed() {
         .inject_ice_network_route_changed(NetworkRoute {
             local_adapter_type: NetworkAdapterType::Unknown,
             local_adapter_type_under_vpn: NetworkAdapterType::Unknown,
-            relayed: true,
+            local_relayed: local,
+            local_relay_protocol: TransportProtocol::Unknown,
+            remote_relayed: !local,
         })
         .unwrap();
     cm.synchronize().expect(error_line!());
@@ -1070,7 +1073,9 @@ fn update_bandwidth_when_relayed() {
         .inject_ice_network_route_changed(NetworkRoute {
             local_adapter_type: NetworkAdapterType::Unknown,
             local_adapter_type_under_vpn: NetworkAdapterType::Unknown,
-            relayed: false,
+            local_relayed: false,
+            local_relay_protocol: TransportProtocol::Unknown,
+            remote_relayed: false,
         })
         .unwrap();
     cm.synchronize().expect(error_line!());
@@ -1091,6 +1096,16 @@ fn update_bandwidth_when_relayed() {
             .unwrap()
             .last_sent_max_bitrate_bps()
     );
+}
+
+#[test]
+fn update_bandwidth_when_relayed_local() {
+    update_bandwidth_when_relayed(true);
+}
+
+#[test]
+fn update_bandwidth_when_relayed_remote() {
+    update_bandwidth_when_relayed(false);
 }
 
 #[test]
@@ -2835,7 +2850,7 @@ fn group_call_ring_message_age_does_not_affect_ring_expiration() {
 }
 
 #[test]
-fn group_call_ring_first_ring_wins() {
+fn group_call_ring_last_ring_wins() {
     test_init();
 
     let context = TestContext::new();
@@ -2906,7 +2921,7 @@ fn group_call_ring_first_ring_wins() {
                 protobuf::signaling::CallMessage {
                     ring_response: Some(protobuf::signaling::call_message::RingResponse {
                         group_id: Some(group_id.to_vec()),
-                        ring_id: Some(first_ring_id.into()),
+                        ring_id: Some(second_ring_id.into()),
                         r#type: Some(
                             protobuf::signaling::call_message::ring_response::Type::Accepted.into()
                         ),

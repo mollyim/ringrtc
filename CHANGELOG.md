@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.20.12
+
+- Group Calls: Prefer recently received group call rings
+
+- Reduce binary size by dropping unicode support from the regex crate
+
+- Enforce that errors are handled on background tokio runtimes
+
+- Update Android builds
+  - Update gradle dependencies
+  - Use `-C linker` instead of ndk toolchains
+
+## v2.20.11
+
+- Add support for TURN over TLS
+
+- Android: Add echo likelihood to logs
+
+- Reference signalapp/webrtc@4896f
+  - Add support for TURN over TLS
+  - Enable echo detection
+
+- Update Rust
+
+- Update builds
+
 ## v2.20.10
 
 - Group Calls: Enable audio recording properly

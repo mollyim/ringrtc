@@ -208,7 +208,7 @@ pub enum ConnectionType {
     // This is like "signaling mode == unicast".
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectionId {
     call_id: CallId,
     remote_device_id: DeviceId,
@@ -294,7 +294,7 @@ impl BandwidthController {
     }
 
     fn relay_max(&self) -> Option<DataRate> {
-        if self.network_route.relayed {
+        if self.network_route.local_relayed || self.network_route.remote_relayed {
             Some(RELAYED_MAX_SEND_RATE)
         } else {
             None
@@ -496,7 +496,9 @@ where
                     network_route: NetworkRoute {
                         local_adapter_type: NetworkAdapterType::Unknown,
                         local_adapter_type_under_vpn: NetworkAdapterType::Unknown,
-                        relayed: false,
+                        local_relayed: false,
+                        local_relay_protocol: TransportProtocol::Unknown,
+                        remote_relayed: false,
                     },
                 },
                 "webrtc",
@@ -530,7 +532,7 @@ where
         if let Some(fsm_receiver) = self.fsm_receiver.take() {
             info!("Starting Connection FSM for {}", self.connection_id);
             let connection_fsm = ConnectionStateMachine::new(fsm_receiver)?
-                .map_err(|e| info!("connection state machine returned error: {}", e));
+                .unwrap_or_else(|e| info!("connection state machine returned error: {}", e));
             context.worker_runtime.spawn(connection_fsm);
         } else {
             warn!(
@@ -575,6 +577,13 @@ where
                 "Outgoing offer codecs: {:?}, max_bitrate: {:?}",
                 v4_offer.receive_video_codecs, v4_offer.max_bitrate_bps
             );
+
+            if v4_offer.receive_video_codecs.is_empty() {
+                warn!(
+                    "No receive video codecs in outgoing offer. SDP:\n{}",
+                    redact_string(offer.to_sdp().as_deref().unwrap_or("None"))
+                );
+            }
 
             // The only purpose of this is to start gathering ICE candidates.
             // But we need to call set_local_description before we munge it.
@@ -2180,7 +2189,9 @@ mod tests {
             network_route: NetworkRoute {
                 local_adapter_type: NetworkAdapterType::Unknown,
                 local_adapter_type_under_vpn: NetworkAdapterType::Unknown,
-                relayed,
+                local_relayed: relayed,
+                local_relay_protocol: TransportProtocol::Unknown,
+                remote_relayed: false,
             },
         };
         (
