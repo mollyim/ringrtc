@@ -108,19 +108,18 @@ afterEvaluate {
             }
         }
     }
-}
 
+    tasks.withType(AbstractPublishToMaven) {
+        dependsOn assembleRelease
+    }
 
-tasks.withType(AbstractPublishToMaven) {
-    dependsOn assembleRelease
-}
+    task installArchives {
+        dependsOn publishMavenJavaPublicationToMavenLocal
+    }
 
-task installArchives {
-    dependsOn publishMavenJavaPublicationToMavenLocal
-}
-
-task uploadArchives {
-    dependsOn publishMavenJavaPublicationToGitHubPackagesRepository
+    task uploadArchives {
+        dependsOn publishMavenJavaPublicationToGitHubPackagesRepository
+    }
 }
 
 def getCommitTag() {
