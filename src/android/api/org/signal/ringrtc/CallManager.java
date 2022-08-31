@@ -1300,8 +1300,6 @@ public class CallManager {
 
   @CalledByNative
   private void handleAudioLevels(long clientId, int capturedLevel, List<GroupCall.ReceivedAudioLevel> receivedLevels) {
-    Log.d(TAG, "handleAudioLevels():");
-
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
     if (groupCall == null) {
       Log.w(TAG, "groupCall not found by clientId: " + clientId);
