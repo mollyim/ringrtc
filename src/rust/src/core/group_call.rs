@@ -828,10 +828,13 @@ struct State {
     // once per second, you get an "on demand" one.  Any more than that and you
     // wait for the next tick.
     video_requests: Option<Vec<VideoRequest>>,
+    active_speaker_height: Option<u16>,
     on_demand_video_request_sent_since_last_heartbeat: bool,
     speaker_rtp_timestamp: Option<rtp::Timestamp>,
 
     send_rates: SendRates,
+    // If set, will always overide the send_rates.  Intended for testing.
+    send_rates_override: Option<SendRates>,
     max_receive_rate: Option<DataRate>,
     forwarding_video_demux_ids: HashSet<DemuxId>,
 
@@ -996,10 +999,12 @@ impl Client {
                     media_send_key_rotation_state: KeyRotationState::Applied,
 
                     video_requests: None,
+                    active_speaker_height: None,
                     on_demand_video_request_sent_since_last_heartbeat: false,
                     speaker_rtp_timestamp: None,
 
                     send_rates: SendRates::default(),
+                    send_rates_override: None,
                     // If the client never calls set_bandwidth_mode, use the normal max receive rate.
                     max_receive_rate: Some(NORMAL_MAX_RECEIVE_RATE),
                     forwarding_video_demux_ids: HashSet::default(),
@@ -1021,6 +1026,14 @@ impl Client {
                 .initialize(client_clone_to_init_peer_connection_observer_impl);
         });
         Ok(client)
+    }
+
+    // Should only be used for testing
+    pub fn override_send_rates(&self, send_rates_override: SendRates) {
+        self.actor.send(move |state| {
+            state.send_rates_override = Some(send_rates_override.clone());
+            Self::set_send_rates_inner(state, send_rates_override);
+        });
     }
 
     // Pulled into a named private method so we can call it recursively.
@@ -1584,7 +1597,10 @@ impl Client {
         });
     }
 
-    fn set_send_rates_inner(state: &mut State, send_rates: SendRates) {
+    fn set_send_rates_inner(state: &mut State, mut send_rates: SendRates) {
+        if let Some(send_rates_override) = &state.send_rates_override {
+            send_rates = send_rates_override.clone();
+        }
         if state.send_rates != send_rates {
             if send_rates.max == Some(ALL_ALONE_MAX_SEND_RATE) {
                 info!("Disable audio and outgoing media because there are no other devices.");
@@ -1608,10 +1624,10 @@ impl Client {
         }
     }
 
-    pub fn request_video(&self, requests: Vec<VideoRequest>) {
+    pub fn request_video(&self, requests: Vec<VideoRequest>, active_speaker_height: u16) {
         debug!(
-            "group_call::Client(outer)::request_video(client_id: {}, requests: {:?})",
-            self.client_id, requests,
+            "group_call::Client(outer)::request_video(client_id: {}, requests: {:?}, active_speaker_height: {})",
+            self.client_id, requests, active_speaker_height,
         );
         self.actor.send(move |state| {
             debug!(
@@ -1619,6 +1635,7 @@ impl Client {
                 state.client_id
             );
             state.video_requests = Some(requests);
+            state.active_speaker_height = Some(active_speaker_height);
             if !state.on_demand_video_request_sent_since_last_heartbeat {
                 Self::send_video_requests_to_sfu(state);
                 state.on_demand_video_request_sent_since_last_heartbeat = true;
@@ -1677,6 +1694,7 @@ impl Client {
                     // ),
                     max_kbps: state.max_receive_rate.map(|rate| rate.as_kbps() as u32),
                     requests,
+                    active_speaker_height: state.active_speaker_height.map(|height| height.into()),
                 }),
                 ..Default::default()
             }) {
@@ -4722,7 +4740,7 @@ mod tests {
                 framerate: None,
             },
         ];
-        client1.client.request_video(requests.clone());
+        client1.client.request_video(requests.clone(), 0);
         let (header, payload) = receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("Get RTP packet to SFU");
@@ -4745,16 +4763,17 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(NORMAL_MAX_RECEIVE_RATE.as_kbps() as u32),
+                    active_speaker_height: None,
                 }),
                 ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
 
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
+        client1.client.request_video(requests.clone(), 0);
+        client1.client.request_video(requests.clone(), 0);
+        client1.client.request_video(requests.clone(), 0);
+        client1.client.request_video(requests.clone(), 0);
 
         let before = Instant::now();
         let _ = receiver
@@ -4764,10 +4783,10 @@ mod tests {
         assert!(elapsed > Duration::from_millis(980));
         assert!(elapsed < Duration::from_millis(1020));
 
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests);
+        client1.client.request_video(requests.clone(), 1080);
+        client1.client.request_video(requests.clone(), 1080);
+        client1.client.request_video(requests.clone(), 1080);
+        client1.client.request_video(requests, 1080);
 
         let before = Instant::now();
         let _ = receiver
@@ -4806,6 +4825,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(1),
+                    active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
             },
@@ -4835,6 +4855,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(500),
+                    active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
             },
@@ -4864,6 +4885,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(20_000_000),
+                    active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
             },

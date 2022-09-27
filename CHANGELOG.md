@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.21.0
+
+- Update to WebRTC 5005 (m102)
+
+- Allow clients to specify the active speaker's height
+
+- Reference signalapp/webrtc@5005a
+  - Add logging for audio device timing
+
+## v2.20.14
+
+- Reference signalapp/webrtc@4896g
+  - Windows: Support multi-channel output
+
 ## v2.20.13
 
 - Android: Remove audio level debug logging
