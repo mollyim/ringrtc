@@ -52,7 +52,7 @@ public final class GroupCall {
     // Whenever the local or remote device states are updated, a new
     // object will be created to update the object value.
     @NonNull  private LocalDeviceState                   localDeviceState;
-    @Nullable private LongSparseArray<RemoteDeviceState> remoteDeviceStates;
+    @NonNull  private LongSparseArray<RemoteDeviceState> remoteDeviceStates;
 
     @Nullable private PeekInfo                           peekInfo;
 
@@ -88,6 +88,7 @@ public final class GroupCall {
         this.disconnectCalled = false;
 
         this.localDeviceState = new LocalDeviceState();
+        this.remoteDeviceStates = new LongSparseArray<>();
 
         MediaConstraints audioConstraints = new MediaConstraints();
 
@@ -270,7 +271,7 @@ public final class GroupCall {
      * Returns an array of RemoteDeviceState objects as updated
      * from the SFU. Keyed by the demuxId.
      */
-    @Nullable
+    @NonNull
     public LongSparseArray<RemoteDeviceState> getRemoteDeviceStates()
     {
         Log.i(TAG, "getRemoteDevices():");
@@ -569,12 +570,10 @@ public final class GroupCall {
             remoteDeviceState.userId = Util.getUuidFromBytes(remoteDeviceState.userIdByteArray);
 
             // Maintain the video track and audio level if one already exists.
-            if (this.remoteDeviceStates != null) {
-                RemoteDeviceState existingDeviceState = this.remoteDeviceStates.get(remoteDeviceState.demuxId);
-                if (existingDeviceState != null) {
-                    remoteDeviceState.videoTrack = existingDeviceState.videoTrack;
-                    remoteDeviceState.audioLevel = existingDeviceState.audioLevel;
-                }
+            RemoteDeviceState existingDeviceState = this.remoteDeviceStates.get(remoteDeviceState.demuxId);
+            if (existingDeviceState != null) {
+                remoteDeviceState.videoTrack = existingDeviceState.videoTrack;
+                remoteDeviceState.audioLevel = existingDeviceState.audioLevel;
             }
 
             // Build the mapped version of the array with demuxId as the key.
@@ -829,7 +828,7 @@ public final class GroupCall {
         long                 addedTime;   // unix millis
         long                 speakerTime; // unix millis; 0 if was never the speaker
         @Nullable Boolean    forwardingVideo;
-        @Nullable Long       clientDecodedHeight;
+                  boolean    isHigherResolutionPending;
 
         @Nullable VideoTrack videoTrack;
         @NonNull  int        audioLevel;
@@ -844,7 +843,7 @@ public final class GroupCall {
                                            long    addedTime,
                                            long    speakerTime,
                                  @Nullable Boolean forwardingVideo,
-                                 @Nullable Long    clientDecodedHeight) {
+                                           boolean isHigherResolutionPending) {
             this.demuxId = demuxId;
             this.userIdByteArray = userIdByteArray;
             this.mediaKeysReceived = mediaKeysReceived;
@@ -856,7 +855,7 @@ public final class GroupCall {
             this.addedTime = addedTime;
             this.speakerTime = speakerTime;
             this.forwardingVideo = forwardingVideo;
-            this.clientDecodedHeight = clientDecodedHeight;
+            this.isHigherResolutionPending = isHigherResolutionPending;
             this.audioLevel = 0;
         }
 
@@ -902,8 +901,8 @@ public final class GroupCall {
             return forwardingVideo;
         }
 
-        public @Nullable Long getClientDecodedHeight() {
-            return clientDecodedHeight;
+        public boolean isHigherResolutionPending() {
+            return isHigherResolutionPending;
         }
 
         public @Nullable VideoTrack getVideoTrack() {
