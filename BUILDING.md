@@ -14,6 +14,10 @@ The following is derived from the depot_tools tutorial: https://commondatastorag
     git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
     export PATH=<somewhere>/depot_tools:"$PATH"
 
+### Protobuf
+
+The protobuf compiler, protoc, is needed to build RingRTC. Installation is platform specific and can be found [here](https://grpc.io/docs/protoc-installation/).
+
 ### Rust Components
 
 Install rustup, the Rust management system:
@@ -204,6 +208,13 @@ the dependencies, at least once:
     cd src/ios/SignalRingRTC
     bundle install
     bundle exec pod install
+
+Some of the tests rely on creating incoming connections, which your system "Firewall Options" may
+prevent. All tests should pass if you do not have "Block all incoming connections" on and `xctest`
+appears in the list of software allowed to receive incoming connections. If it isn't, you can add it
+manually by dragging it in from
+
+    open -R $(xcrun --show-sdk-platform-path --sdk iphonesimulator)/Developer/Library/Xcode/Agents/xctest
 
 ### Formatting
 

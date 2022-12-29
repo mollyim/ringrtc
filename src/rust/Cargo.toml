@@ -5,7 +5,7 @@
 
 [package]
 name = "ringrtc"
-version = "2.21.2"
+version = "2.22.0"
 authors = ["Calling Team <callingteam@signal.org>"]
 edition = "2018"
 description = "A Rust interface for WebRTC"
@@ -27,32 +27,30 @@ required-features = ["native", "http"]
 [dependencies]
 regex-aot         = { path = "regex-aot" }
 
-aes               = { version = "0.7", features = ["ctr"] }
+aes               = { version = "0.8"    }
 anyhow            = { version = "1.0"    }
 base64            = { version = "0.13"   }
 bytes             = { version = "1.0"    }
+ctr               = { version = "0.9"    }
 futures           = { version = "0.3"    }
-hmac              = { version = "0.11"   }
+hmac              = { version = "0.12"   }
 lazy_static       = { version = "1.4"    }
 libc              = { version = "0.2"    }
 log               = { version = "0.4", features = ["std", "max_level_trace", "release_max_level_info"] }
 num_enum          = { version = "0.5"    }
-prost             = { version = "0.8"    }
+prost             = { version = "0.11"   }
 rand              = { version = "0.7", features = [] }
 regex-automata    = { version = "0.1.10" }
-hkdf              = { version = "0.11"   }
+hkdf              = { version = "0.12"   }
 serde_json        = { version = "1.0"    }
 serde             = { version = "1.0", features = ["derive"] }
 hex               = { version = "0.4", features = ["serde"] }
-sha2              = { version = "0.9"    }
+sha2              = { version = "0.10"   }
 static_assertions = { version = "1.1.0"  }
 subtle            = { version = "2.3.0"  }
 thiserror         = { version = "1.0.20" }
 tokio             = { version = "1.13.0", features = ["rt-multi-thread", "time"] }
 x25519-dalek      = { version = "1.1"    }
-
-# Optional, needed by the 'sim' feature
-rand_chacha = { version = "0.2", optional = true }
 
 # Optional, needed by the "electron" feature
 neon = { version = "0.10.1", optional = true, default-features = false, features = ["napi-6", "channel-api"] }
@@ -67,7 +65,7 @@ webpki = { version = "0.21", optional = true }
 
 [features]
 default = []
-sim = ["rand_chacha"]
+sim = []
 electron = ["neon", "native"]
 native = []  # We have this so we can more easily disable things only native clients need
 simnet = []  # We have this so we can more easily disable things only simulated native client need
@@ -88,7 +86,8 @@ required-features = ["sim"]
 jni = { version = "0.19.0", default-features = false }
 
 [build-dependencies]
-prost-build = { version = "0.8" }
+prost-build = { version = "0.11" }
 
 [dev-dependencies]
-env_logger = { version = "0.8.1" }
+env_logger = { version = "0.9" }
+rand_chacha = { version = "0.2" }

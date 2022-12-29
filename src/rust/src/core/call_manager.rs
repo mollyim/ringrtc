@@ -141,6 +141,7 @@ where
     /// The type of message the item corresponds to.
     message_type: signaling::MessageType,
     /// The closure to be called which will send the message.
+    #[allow(clippy::type_complexity)]
     message_closure: Box<dyn FnOnce(&CallManager<T>) -> Result<MessageSendResult> + Send>,
 }
 
@@ -282,6 +283,62 @@ impl PendingCallMessages {
 impl Default for PendingCallMessages {
     fn default() -> Self {
         Self::None
+    }
+}
+
+#[derive(Debug)]
+pub enum OfferValidationError {
+    Expired,
+}
+
+/// Statelessly evaluate the given offer.
+pub fn validate_offer(
+    received: &signaling::ReceivedOffer,
+) -> std::result::Result<(), OfferValidationError> {
+    if received.age > MAX_MESSAGE_AGE {
+        return Err(OfferValidationError::Expired);
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub enum OpaqueRingValidationError {
+    NotARing,
+    Expired,
+    RejectedByCallback,
+}
+
+pub fn validate_call_message_as_opaque_ring(
+    message: &protobuf::signaling::CallMessage,
+    message_age: Duration,
+    validate_group_ring: impl FnOnce(group_call::GroupIdRef, group_call::RingId) -> bool,
+) -> std::result::Result<(), OpaqueRingValidationError> {
+    match message {
+        protobuf::signaling::CallMessage {
+            ring_intention:
+                Some(protobuf::signaling::call_message::RingIntention {
+                    group_id: Some(group_id),
+                    r#type: Some(ring_type),
+                    ring_id: Some(ring_id),
+                }),
+            ..
+        } => {
+            // Must match the implementation of handle_received_call_message for RingIntentions.
+            use protobuf::signaling::call_message::ring_intention::Type as IntentionType;
+            if IntentionType::from_i32(*ring_type) != Some(IntentionType::Ring) {
+                return Err(OpaqueRingValidationError::NotARing);
+            }
+            if message_age > MAX_MESSAGE_AGE {
+                return Err(OpaqueRingValidationError::Expired);
+            }
+            if !validate_group_ring(group_id, group_call::RingId::from(*ring_id)) {
+                // Gives the app an opportunity to reject the ring based on group,
+                // or on prior remembered cancellations.
+                return Err(OpaqueRingValidationError::RejectedByCallback);
+            }
+            Ok(())
+        }
+        _ => Err(OpaqueRingValidationError::NotARing),
     }
 }
 
@@ -921,7 +978,7 @@ where
             let remote_peer = call.remote_peer()?;
 
             let platform = cm.platform.lock()?;
-            platform.on_send_hangup(&*remote_peer, call_id, send)?;
+            platform.on_send_hangup(&remote_peer, call_id, send)?;
 
             Ok(MessageSendResult::Sent)
         });
@@ -957,7 +1014,7 @@ where
 
         if let Some(event) = event {
             let remote_peer = call.remote_peer()?;
-            self.notify_application(&*remote_peer, call_id, event)?;
+            self.notify_application(&remote_peer, call_id, event)?;
         }
 
         if let Some(hangup) = hangup {
@@ -982,7 +1039,7 @@ where
             error!("Conclude call future failed: {}", err);
             if let Ok(remote_peer) = call_error.remote_peer() {
                 let _ = cm_error.notify_application(
-                    &*remote_peer,
+                    &remote_peer,
                     call_id,
                     ApplicationEvent::EndedInternalFailure,
                 );
@@ -1252,9 +1309,13 @@ where
             )
         );
 
-        if received.age > MAX_MESSAGE_AGE {
-            ringbenchx!(RingBench::Cm, RingBench::App, "offer expired");
-            self.notify_offer_expired(&remote_peer, incoming_call_id, received.age)?;
+        if let Err(e) = validate_offer(&received) {
+            match e {
+                OfferValidationError::Expired => {
+                    ringbenchx!(RingBench::Cm, RingBench::App, "offer expired");
+                    self.notify_offer_expired(&remote_peer, incoming_call_id, received.age)?;
+                }
+            }
             // Notify application we are completely done with this remote.
             self.notify_call_concluded(&remote_peer, incoming_call_id)?;
             return Ok(());
@@ -1565,28 +1626,14 @@ where
 
         let message = protobuf::signaling::CallMessage::decode(Bytes::from(message))?;
         match message {
-            protobuf::signaling::CallMessage {
-                group_call_message: Some(group_call_message),
-                ..
-            } => {
-                if let Some(group_id) = group_call_message.group_id.as_ref() {
-                    let group_calls = self
-                        .group_call_by_client_id
-                        .lock()
-                        .expect("lock group_call_by_client_id");
-                    let group_call = group_calls.values().find(|c| &c.group_id == group_id);
-                    match group_call {
-                        Some(call) => {
-                            call.on_signaling_message_received(sender_uuid, group_call_message)
-                        }
-                        None => warn!("Received signaling message for unknown group ID"),
-                    };
-                }
-            }
+            // Handle cases in the same order as classify_received_call_message_for_ringing,
+            // so that a CallMessage that mistakenly has multiple fields populated
+            // isn't treated differently between the two.
             protobuf::signaling::CallMessage {
                 ring_intention: Some(mut ring_intention),
                 ..
             } => {
+                // Must be compatible with validate_received_call_message_for_ringing.
                 use protobuf::signaling::call_message::ring_intention::Type as IntentionType;
                 match (
                     &mut ring_intention.group_id,
@@ -1596,7 +1643,7 @@ where
                     (Some(group_id), Some(ring_type), Some(ring_id)) => {
                         let ring_update = match ring_type {
                             IntentionType::Ring => {
-                                if message_age >= MAX_MESSAGE_AGE {
+                                if message_age > MAX_MESSAGE_AGE {
                                     group_call::RingUpdate::ExpiredRequest
                                 } else if *self.busy.lock()? {
                                     // Let your other devices know.
@@ -1686,6 +1733,24 @@ where
                     }
                 }
             }
+            protobuf::signaling::CallMessage {
+                group_call_message: Some(group_call_message),
+                ..
+            } => {
+                if let Some(group_id) = group_call_message.group_id.as_ref() {
+                    let group_calls = self
+                        .group_call_by_client_id
+                        .lock()
+                        .expect("lock group_call_by_client_id");
+                    let group_call = group_calls.values().find(|c| &c.group_id == group_id);
+                    match group_call {
+                        Some(call) => {
+                            call.on_signaling_message_received(sender_uuid, group_call_message)
+                        }
+                        None => warn!("Received signaling message for unknown group ID"),
+                    };
+                }
+            }
             _ => {
                 warn!("Received unknown CallMessage - ignoring");
             }
@@ -1713,6 +1778,17 @@ where
                     received: Instant::now(),
                 },
             );
+        }
+
+        {
+            if let Ok(mut group_calls) = self.group_call_by_client_id.lock() {
+                group_calls
+                    .values_mut()
+                    .filter(|call| call.group_id == group_id)
+                    .for_each(|call| call.provide_ring_id_if_absent(ring_id))
+            } else {
+                // Ignore the failure to lock; it's more important that we cancel the ring.
+            }
         }
 
         let mut self_for_timeout = self.clone();
@@ -1803,7 +1879,7 @@ where
             let remote_peer = call.remote_peer()?;
 
             let platform = cm.platform.lock()?;
-            platform.on_send_busy(&*remote_peer, call_id)?;
+            platform.on_send_busy(&remote_peer, call_id)?;
 
             Ok(MessageSendResult::Sent)
         });
@@ -2297,7 +2373,7 @@ where
 
             if connection.can_send_messages() {
                 let platform = cm.platform.lock()?;
-                platform.on_send_offer(&*remote_peer, call_id, offer)?;
+                platform.on_send_offer(&remote_peer, call_id, offer)?;
                 Ok(MessageSendResult::Sent)
             } else {
                 Ok(MessageSendResult::NotSent)
@@ -2338,7 +2414,7 @@ where
 
             if connection.can_send_messages() {
                 let platform = cm.platform.lock()?;
-                platform.on_send_answer(&*remote_peer, call_id, send)?;
+                platform.on_send_answer(&remote_peer, call_id, send)?;
                 Ok(MessageSendResult::Sent)
             } else {
                 Ok(MessageSendResult::NotSent)
@@ -2385,7 +2461,7 @@ where
 
             let platform = cm.platform.lock()?;
             platform.on_send_ice(
-                &*remote_peer,
+                &remote_peer,
                 call_id,
                 signaling::SendIce {
                     receiver_device_id: if broadcast {
@@ -2832,5 +2908,170 @@ where
     pub fn set_membership_proof(&mut self, client_id: group_call::ClientId, proof: Vec<u8>) {
         info!("set_membership_proof(): id: {}", client_id);
         group_call_api_handler!(self, client_id, set_membership_proof, proof);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use protobuf::signaling::call_message::ring_intention::Type as IntentionType;
+    use protobuf::signaling::{call_message::RingIntention, CallMessage};
+
+    use super::*;
+
+    #[test]
+    fn test_validate_offer() {
+        fn offer_with_age(age: Duration) -> ReceivedOffer {
+            ReceivedOffer {
+                offer: signaling::Offer::new(CallMediaType::Audio, vec![]).expect("valid"),
+                age,
+                sender_device_id: 1,
+                receiver_device_id: 1,
+                receiver_device_is_primary: true,
+                sender_identity_key: vec![],
+                receiver_identity_key: vec![],
+            }
+        }
+
+        validate_offer(&offer_with_age(Duration::ZERO)).expect("valid");
+        validate_offer(&offer_with_age(MAX_MESSAGE_AGE - Duration::from_secs(1))).expect("valid");
+        validate_offer(&offer_with_age(MAX_MESSAGE_AGE)).expect("valid");
+        assert!(matches!(
+            validate_offer(&offer_with_age(MAX_MESSAGE_AGE + Duration::from_secs(1))),
+            Err(OfferValidationError::Expired)
+        ));
+    }
+
+    #[test]
+    fn test_validate_group_ring_intention_based_on_age() {
+        let valid_message = CallMessage {
+            ring_intention: Some(RingIntention {
+                r#type: Some(IntentionType::Ring.into()),
+                group_id: Some(vec![1, 2]),
+                ring_id: Some(5),
+            }),
+            ..Default::default()
+        };
+        fn check_group_and_ring_id(
+            group_id: group_call::GroupIdRef,
+            ring_id: group_call::RingId,
+        ) -> bool {
+            assert_eq!(group_id, &[1, 2]);
+            assert_eq!(ring_id, 5.into());
+            true
+        }
+
+        validate_call_message_as_opaque_ring(
+            &valid_message,
+            Duration::ZERO,
+            check_group_and_ring_id,
+        )
+        .expect("valid");
+        validate_call_message_as_opaque_ring(
+            &valid_message,
+            MAX_MESSAGE_AGE - Duration::from_secs(1),
+            check_group_and_ring_id,
+        )
+        .expect("valid");
+        validate_call_message_as_opaque_ring(
+            &valid_message,
+            MAX_MESSAGE_AGE,
+            check_group_and_ring_id,
+        )
+        .expect("valid");
+
+        assert!(matches!(
+            validate_call_message_as_opaque_ring(
+                &valid_message,
+                MAX_MESSAGE_AGE + Duration::from_secs(1),
+                check_group_and_ring_id,
+            ),
+            Err(OpaqueRingValidationError::Expired)
+        ));
+    }
+
+    #[test]
+    fn test_validate_group_ring_intention_based_on_callback() {
+        let valid_message = CallMessage {
+            ring_intention: Some(RingIntention {
+                r#type: Some(IntentionType::Ring.into()),
+                group_id: Some(vec![1, 2]),
+                ring_id: Some(5),
+            }),
+            ..Default::default()
+        };
+
+        validate_call_message_as_opaque_ring(&valid_message, Duration::ZERO, |_, _| true)
+            .expect("valid");
+
+        assert!(matches!(
+            validate_call_message_as_opaque_ring(&valid_message, Duration::ZERO, |_, _| { false }),
+            Err(OpaqueRingValidationError::RejectedByCallback)
+        ));
+    }
+
+    #[test]
+    fn test_validate_group_ring_intention_for_non_rings() {
+        #[track_caller]
+        fn assert_rejected(message: CallMessage, description: &str) {
+            assert!(
+                matches!(
+                    validate_call_message_as_opaque_ring(&message, Duration::ZERO, |_, _| { true }),
+                    Err(OpaqueRingValidationError::NotARing)
+                ),
+                "{}",
+                description
+            );
+        }
+
+        assert_rejected(
+            CallMessage {
+                ring_intention: Some(RingIntention {
+                    r#type: Some(IntentionType::Ring.into()),
+                    group_id: Some(vec![1, 2]),
+                    ring_id: None,
+                }),
+                ..Default::default()
+            },
+            "missing ring ID",
+        );
+        assert_rejected(
+            CallMessage {
+                ring_intention: Some(RingIntention {
+                    r#type: Some(IntentionType::Ring.into()),
+                    group_id: None,
+                    ring_id: Some(5),
+                }),
+                ..Default::default()
+            },
+            "missing group ID",
+        );
+        assert_rejected(
+            CallMessage {
+                ring_intention: Some(RingIntention {
+                    r#type: None,
+                    group_id: Some(vec![1, 2]),
+                    ring_id: Some(5),
+                }),
+                ..Default::default()
+            },
+            "missing type",
+        );
+        assert_rejected(
+            CallMessage {
+                ring_intention: Some(RingIntention {
+                    r#type: Some(IntentionType::Cancelled.into()),
+                    group_id: Some(vec![1, 2]),
+                    ring_id: Some(5),
+                }),
+                ..Default::default()
+            },
+            "cancellation, not ring",
+        );
+        assert_rejected(
+            CallMessage {
+                ..Default::default()
+            },
+            "not a ring intention",
+        );
     }
 }

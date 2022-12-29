@@ -1,5 +1,39 @@
 # Changelog
 
+## v2.22.0
+
+- Group Calls: Only allow ringing if you are the call creator
+
+- Electron: Add callId to the call ended notification function
+
+- Improve display of stats in logs
+
+- Update dependencies
+
+- Electron: Save debug information when building
+
+## v2.21.5
+
+- Group Calls: Improve ring handling
+
+- Group Calls: Update group membership upon unknown media keys 
+
+- Improve display of stats in logs
+
+- Update builds and documentation
+
+- Update Rust
+
+## v2.21.4
+
+- iOS: Add isValidOfferMessage and isValidOpaqueRing to the API
+
+## v2.21.3
+
+- iOS: Allow WebRTC field trials to be set
+
+- Update dependencies, builds
+
 ## v2.21.2
 
 - Android: Fix possible crash from AndroidNetworkMonitor
