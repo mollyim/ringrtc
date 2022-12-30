@@ -34,6 +34,9 @@ jobs:
       env:
         DEPOT_TOOLS_GIT_HASH: 5fb99f65c0eacadf2f72618936a3264e72942756
 
+    - name: Install protoc
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
     - name: Install Clippy
       run: rustup component add clippy
 
