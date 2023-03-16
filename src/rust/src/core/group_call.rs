@@ -22,7 +22,7 @@ use rand::{rngs::OsRng, Rng};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-use crate::core::util::uuid_to_string;
+use crate::{common::CallId, core::util::uuid_to_string};
 use crate::{
     common::{
         actor::{Actor, Stopper},
@@ -669,8 +669,6 @@ const SCREENSHARE_MIN_SEND_RATE: DataRate = DataRate::from_mbps(2);
 const SCREENSHARE_START_SEND_RATE: DataRate = DataRate::from_mbps(2);
 const SCREENSHARE_MAX_SEND_RATE: DataRate = DataRate::from_mbps(5);
 
-const AUDIO_ONLY_MAX_RECEIVE_RATE: DataRate = DataRate::from_kbps(1);
-
 const LOW_MAX_RECEIVE_RATE: DataRate = DataRate::from_kbps(500);
 
 const NORMAL_MAX_RECEIVE_RATE: DataRate = DataRate::from_mbps(20);
@@ -987,6 +985,15 @@ impl Client {
                         observer.handle_ended(client_id, EndReason::FailedToCreatePeerConnection);
                         e
                     })?;
+                let call_id_for_stats = CallId::from(client_id as u64);
+                info!(
+                    "ringrtc_stats!,\
+                        sfu,\
+                        recv,\
+                        target_send_rate,\
+                        ideal_send_rate,\
+                        allocated_send_rate"
+                );
                 Ok(State {
                     client_id,
                     group_id,
@@ -1021,7 +1028,7 @@ impl Client {
                     next_heartbeat_time: None,
 
                     next_stats_time: None,
-                    stats_observer: create_stats_observer(STATS_INTERVAL),
+                    stats_observer: create_stats_observer(call_id_for_stats, STATS_INTERVAL),
 
                     audio_levels_interval,
                     next_audio_levels_time: None,
@@ -1673,7 +1680,6 @@ impl Client {
             );
 
             state.max_receive_rate = Some(match bandwidth_mode {
-                BandwidthMode::VeryLow => AUDIO_ONLY_MAX_RECEIVE_RATE,
                 BandwidthMode::Low => LOW_MAX_RECEIVE_RATE,
                 BandwidthMode::Normal => NORMAL_MAX_RECEIVE_RATE,
             });
@@ -1965,10 +1971,12 @@ impl Client {
 
                         if creator.is_some() {
                             // Check if we're permitted to ring
-                            let self_uuid_guard = state.self_uuid.lock();
-                            let creator_is_self = self_uuid_guard
-                                .map(|guarded_uuid| creator == *guarded_uuid)
-                                .unwrap_or(false);
+                            let creator_is_self = {
+                                let self_uuid_guard = state.self_uuid.lock();
+                                self_uuid_guard
+                                    .map(|guarded_uuid| creator == *guarded_uuid)
+                                    .unwrap_or(false)
+                            };
                             let new_ring_state = if creator_is_self {
                                 OutgoingRingState::PermittedToRing
                             } else {
@@ -2502,11 +2510,13 @@ impl Client {
                     "Adding media receive key from {}. client_id: {}",
                     device.demux_id, state.client_id
                 );
-                let mut frame_crypto_context = state
-                    .frame_crypto_context
-                    .lock()
-                    .expect("Get lock for frame encryption context to add media receive key");
-                frame_crypto_context.add_receive_secret(demux_id, ratchet_counter, secret);
+                {
+                    let mut frame_crypto_context = state
+                        .frame_crypto_context
+                        .lock()
+                        .expect("Get lock for frame encryption context to add media receive key");
+                    frame_crypto_context.add_receive_secret(demux_id, ratchet_counter, secret);
+                }
                 let had_media_keys = std::mem::replace(&mut device.media_keys_received, true);
                 if !had_media_keys {
                     state.observer.handle_remote_devices_changed(
@@ -5018,36 +5028,6 @@ mod tests {
             .expect("Get RTP packet to SFU");
         let elapsed = Instant::now() - before;
         assert!(elapsed > Duration::from_millis(1000));
-
-        client1.client.set_bandwidth_mode(BandwidthMode::VeryLow);
-        let (header, payload) = receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("Get RTP packet to SFU");
-        assert_eq!(1, header.ssrc);
-        assert_eq!(
-            DeviceToSfu {
-                video_request: Some(VideoRequestMessage {
-                    requests: vec![
-                        VideoRequestProto {
-                            demux_id: Some(2),
-                            height: Some(1080),
-                        },
-                        VideoRequestProto {
-                            demux_id: Some(3),
-                            height: Some(80),
-                        },
-                        VideoRequestProto {
-                            demux_id: Some(4),
-                            height: Some(0),
-                        },
-                    ],
-                    max_kbps: Some(1),
-                    active_speaker_height: Some(1080),
-                }),
-                ..Default::default()
-            },
-            DeviceToSfu::decode(&payload[..]).unwrap()
-        );
 
         client1.client.set_bandwidth_mode(BandwidthMode::Low);
         let (header, payload) = receiver

@@ -19,6 +19,7 @@ const Native = require('../../build/' +
 
 class Config {
   use_new_audio_device_module: boolean = false;
+  field_trials: Record<string, string> | undefined;
 }
 
 // tslint:disable-next-line no-unnecessary-class
@@ -35,13 +36,31 @@ class NativeCallManager {
   }
 
   private createCallEndpoint(config: Config) {
-    const callEndpoint = Native.createCallEndpoint(
-      this,
-      config.use_new_audio_device_module
-    );
+    const fieldTrialsString =
+      Object.entries(config.field_trials || {})
+        .map(([k, v]) => `${k}/${v}`)
+        .join('/') + '/';
     Object.defineProperty(this, Native.callEndpointPropertyKey, {
-      value: callEndpoint,
       configurable: true, // allows it to be changed
+      get() {
+        const callEndpoint = Native.createCallEndpoint(
+          this,
+          config.use_new_audio_device_module,
+          fieldTrialsString
+        );
+
+        if (process.platform === 'darwin') {
+          // Preload devices to work around
+          // https://bugs.chromium.org/p/chromium/issues/detail?id=1287628
+          window.navigator.mediaDevices.enumerateDevices();
+        }
+
+        Object.defineProperty(this, Native.callEndpointPropertyKey, {
+          configurable: true, // allows it to be changed
+          value: callEndpoint,
+        });
+        return callEndpoint;
+      },
     });
   }
 }
@@ -250,8 +269,8 @@ export class RingRTCType {
   handleOutgoingSignaling:
     | ((remoteUserId: UserId, message: CallingMessage) => Promise<boolean>)
     | null = null;
-  handleIncomingCall: ((call: Call) => Promise<CallSettings | null>) | null =
-    null;
+  handleIncomingCall: ((call: Call) => Promise<boolean>) | null = null;
+  handleStartCall: ((call: Call) => Promise<boolean>) | null = null;
   handleAutoEndedIncomingCallRequest:
     | ((
         callId: CallId,
@@ -319,8 +338,7 @@ export class RingRTCType {
   startOutgoingCall(
     remoteUserId: UserId,
     isVideoCall: boolean,
-    localDeviceId: DeviceId,
-    settings: CallSettings
+    localDeviceId: DeviceId
   ): Call {
     const callId = this.callManager.createOutgoingCall(
       remoteUserId,
@@ -334,7 +352,6 @@ export class RingRTCType {
       callId,
       isIncoming,
       isVideoCall,
-      settings,
       CallState.Prering
     );
     this._call = call;
@@ -358,12 +375,31 @@ export class RingRTCType {
   // Called by Rust
   onStartOutgoingCall(remoteUserId: UserId, callId: CallId): void {
     const call = this._call;
-    if (!call || call.remoteUserId !== remoteUserId || !call.settings) {
+    if (!call || call.remoteUserId !== remoteUserId) {
       return;
     }
 
     call.callId = callId;
-    this.proceed(callId, call.settings);
+
+    const handleStartCall = this.handleStartCall;
+    if (!handleStartCall) {
+      call.ignore();
+      return;
+    }
+
+    handleStartCall(call)
+      .then(result => {
+        if (!result) {
+          this.logWarn(
+            'RingRTC.handleStartCall failed for outgoing call. Call ignored.'
+          );
+          call.ignore();
+        }
+      })
+      .catch(e => {
+        this.logError('RingRTC.handleStartCall exception: ' + e.toString());
+        call.ignore();
+      });
   }
 
   // Called by Rust
@@ -400,31 +436,48 @@ export class RingRTCType {
       callId,
       isIncoming,
       isVideoCall,
-      null,
       CallState.Prering
     );
-    // Callback to UX not set
     const handleIncomingCall = this.handleIncomingCall;
-    if (!handleIncomingCall) {
+    const handleStartCall = this.handleStartCall;
+    if (!handleIncomingCall || !handleStartCall) {
       call.ignore();
       return;
     }
     this._call = call;
 
-    // tslint:disable no-floating-promises
-    (async () => {
-      const settings = await handleIncomingCall(call);
-      if (!settings) {
+    handleIncomingCall(call)
+      .then(success => {
+        if (!success) {
+          this.logWarn(
+            'RingRTC.handleIncomingCall failed for incoming call. Call ignored.'
+          );
+          call.ignore();
+        } else {
+          handleStartCall(call)
+            .then(success => {
+              if (!success) {
+                this.logWarn(
+                  'RingRTC.handleStartCall failed for incoming call. Call ignored.'
+                );
+                call.ignore();
+              }
+            })
+            .catch(e => {
+              this.logError(
+                'RingRTC.handleStartCall exception: ' + e.toString()
+              );
+              call.ignore();
+            });
+        }
+      })
+      .catch(e => {
+        this.logError('RingRTC.handleIncomingCall exception: ' + e.toString());
         call.ignore();
-        return;
-      }
-
-      call.settings = settings;
-      this.proceed(callId, settings);
-    })();
+      });
   }
 
-  private proceed(callId: CallId, settings: CallSettings): void {
+  proceed(callId: CallId, settings: CallSettings): void {
     silly_deadlock_protection(() => {
       this.callManager.proceed(
         callId,
@@ -1359,8 +1412,6 @@ export class Call {
   callId: CallId;
   private readonly _isIncoming: boolean;
   private readonly _isVideoCall: boolean;
-  // We can have a null CallSettings while we're waiting for the UX to give us one.
-  settings: CallSettings | null;
   private _state: CallState;
   private _outgoingAudioEnabled: boolean = false;
   private _outgoingVideoEnabled: boolean = false;
@@ -1391,7 +1442,6 @@ export class Call {
     callId: CallId,
     isIncoming: boolean,
     isVideoCall: boolean,
-    settings: CallSettings | null,
     state: CallState
   ) {
     this._callManager = callManager;
@@ -1399,7 +1449,6 @@ export class Call {
     this.callId = callId;
     this._isIncoming = isIncoming;
     this._isVideoCall = isVideoCall;
-    this.settings = settings;
     this._state = state;
   }
 
@@ -1517,14 +1566,18 @@ export class Call {
     format: VideoPixelFormatEnum,
     buffer: Buffer
   ): void {
-    // This assumes we only have one active all.
+    // This assumes we only have one active call.
     this._callManager.sendVideoFrame(width, height, format, buffer);
   }
 
   // With this method, a Call is a VideoFrameSource
-  receiveVideoFrame(buffer: Buffer): [number, number] | undefined {
-    // This assumes we only have one active all.
-    return this._callManager.receiveVideoFrame(buffer);
+  receiveVideoFrame(
+    buffer: Buffer,
+    maxWidth: number,
+    maxHeight: number
+  ): [number, number] | undefined {
+    // This assumes we only have one active call.
+    return this._callManager.receiveVideoFrame(buffer, maxWidth, maxHeight);
   }
 
   private enableOrDisableCapturer(): void {
@@ -1891,8 +1944,15 @@ export class GroupCall {
   }
 
   // Called by UI
-  requestVideo(resolutions: Array<VideoRequest>, activeSpeakerHeight: number): void {
-    this._callManager.requestVideo(this._clientId, resolutions, activeSpeakerHeight);
+  requestVideo(
+    resolutions: Array<VideoRequest>,
+    activeSpeakerHeight: number
+  ): void {
+    this._callManager.requestVideo(
+      this._clientId,
+      resolutions,
+      activeSpeakerHeight
+    );
   }
 
   // Called by UI
@@ -2001,7 +2061,7 @@ export class GroupCall {
     format: VideoPixelFormatEnum,
     buffer: Buffer
   ): void {
-    // This assumes we only have one active all.
+    // This assumes we only have one active call.
     this._callManager.sendVideoFrame(width, height, format, buffer);
   }
 
@@ -2042,12 +2102,18 @@ class GroupCallVideoFrameSource {
     this._remoteDemuxId = remoteDemuxId;
   }
 
-  receiveVideoFrame(buffer: Buffer): [number, number] | undefined {
-    // This assumes we only have one active all.
+  receiveVideoFrame(
+    buffer: Buffer,
+    maxWidth: number,
+    maxHeight: number
+  ): [number, number] | undefined {
+    // This assumes we only have one active call.
     const frame = this._callManager.receiveGroupCallVideoFrame(
       this._groupCall.clientId,
       this._remoteDemuxId,
-      buffer
+      buffer,
+      maxWidth,
+      maxHeight
     );
     if (!!frame) {
       const [width, height] = frame;
@@ -2138,9 +2204,8 @@ export enum HangupType {
 }
 
 export enum BandwidthMode {
-  VeryLow = 0,
-  Low = 1,
-  Normal = 2,
+  Low = 0,
+  Normal = 1,
 }
 
 /// Describes why a ring was cancelled.
@@ -2188,7 +2253,11 @@ export interface CallManager {
     format: VideoPixelFormatEnum,
     buffer: Buffer
   ): void;
-  receiveVideoFrame(buffer: Buffer): [number, number] | undefined;
+  receiveVideoFrame(
+    buffer: Buffer,
+    maxWidth: number,
+    maxHeight: number
+  ): [number, number] | undefined;
   receivedOffer(
     remoteUserId: UserId,
     remoteDeviceId: DeviceId,
@@ -2277,7 +2346,9 @@ export interface CallManager {
   receiveGroupCallVideoFrame(
     clientId: GroupCallClientId,
     remoteDemuxId: number,
-    buffer: Buffer
+    buffer: Buffer,
+    maxWidth: number,
+    maxHeight: number
   ): [number, number] | undefined;
   // Response comes back via handlePeekResponse
   peekGroupCall(

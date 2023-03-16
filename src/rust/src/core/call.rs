@@ -808,18 +808,20 @@ where
                 let mut call_manager = self.call_manager()?;
                 call_manager.connection_failure(self.call_id)?;
             }
-        } else if self.connection_map.lock()?.len() == 1 {
-            // Only one connection left for this call and it just
-            // failed.
-            info!("ice_failed(): last connection");
-            let mut call_manager = self.call_manager()?;
-            call_manager.connection_failure(self.call_id)?;
         } else {
-            // Close this connection and remove it from the map
             let mut connection_map = self.connection_map.lock()?;
-            if let Some(mut connection) = connection_map.remove(&remote_device) {
-                info!("ice_failed(): terminating inactive connection");
-                connection.terminate()?;
+            if connection_map.len() == 1 {
+                // Only one connection left for this call and it just
+                // failed.
+                info!("ice_failed(): last connection");
+                let mut call_manager = self.call_manager()?;
+                call_manager.connection_failure(self.call_id)?;
+            } else {
+                // Close this connection and remove it from the map
+                if let Some(mut connection) = connection_map.remove(&remote_device) {
+                    info!("ice_failed(): terminating inactive connection");
+                    connection.terminate()?;
+                }
             }
         }
 
@@ -844,14 +846,31 @@ where
 
     /// Terminate Connections for this Call.
     fn terminate_connections(&mut self) -> Result<()> {
+        // For each component that we terminate,
+        // we should continue terminating even if that individual component fails.
+
         // close any application specific resources
         if let Ok(call_context) = self.call_context() {
-            let call_manager = self.call_manager()?;
-            call_manager.disconnect_incoming_media(&call_context)?;
+            if let Err(e) = self
+                .call_manager()?
+                .disconnect_incoming_media(&call_context)
+            {
+                error!(
+                    "terminate_connections(): call_id: {} failed to disconnect incoming media: {}",
+                    self.call_id(),
+                    e
+                );
+            }
         }
 
         if let Some(mut forking) = self.forking.lock()?.take() {
-            forking.parent_connection.terminate()?;
+            if let Err(e) = forking.parent_connection.terminate() {
+                error!(
+                    "terminate_connections(): call_id: {} failed to terminate forking parent connection: {}",
+                    self.call_id(),
+                    e
+                );
+            }
         }
         let mut connection_map = self.connection_map.lock()?;
         for (_, mut connection) in connection_map.drain() {
@@ -861,9 +880,15 @@ where
                 connection.remote_device_id()
             );
             // blocks as connection FSM shutsdown
-            connection.terminate()?;
+            if let Err(e) = connection.terminate() {
+                error!(
+                    "terminate_connections(): call_id: {} remote_device_id: {} failed to terminate connection: {}",
+                    self.call_id(),
+                    connection.remote_device_id(),
+                    e
+                );
+            }
         }
-        connection_map.clear();
         Ok(())
     }
 

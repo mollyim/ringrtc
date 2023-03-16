@@ -305,12 +305,9 @@ impl BandwidthController {
     }
 
     // Since the remote side doesn't tell us what audio configuration to use, we have to infer it
-    // from the bandwidth sent.  But this should be used carefully.
+    // from the bandwidth sent. This should be used carefully.
     fn inferred_remote_mode(&self) -> BandwidthMode {
         match self.remote_max {
-            Some(remote_max) if remote_max < BandwidthMode::Low.max_bitrate() => {
-                BandwidthMode::VeryLow
-            }
             Some(remote_max) if remote_max < BandwidthMode::Normal.max_bitrate() => {
                 BandwidthMode::Low
             }
@@ -625,7 +622,7 @@ where
             let mut webrtc = self.webrtc.lock()?;
 
             // Create a stats observer object.
-            let stats_observer = create_stats_observer(POLL_STATS_INTERVAL);
+            let stats_observer = create_stats_observer(self.call_id(), POLL_STATS_INTERVAL);
             webrtc.stats_observer = Some(stats_observer);
 
             let peer_connection = webrtc.peer_connection()?;
@@ -726,7 +723,7 @@ where
             let mut webrtc = self.webrtc.lock()?;
 
             // Create a stats observer object.
-            let stats_observer = create_stats_observer(POLL_STATS_INTERVAL);
+            let stats_observer = create_stats_observer(self.call_id(), POLL_STATS_INTERVAL);
             webrtc.stats_observer = Some(stats_observer);
 
             let peer_connection = webrtc.peer_connection()?;
@@ -1202,13 +1199,9 @@ where
     /// Get the current local ICE candidates to send to the remote peer.
     pub fn take_buffered_local_ice_candidates(&self) -> Result<Vec<signaling::IceCandidate>> {
         info!("take_buffered_local_ice_candidates():");
-
-        let mut ice_candidates = self.buffered_local_ice_candidates.lock()?;
-
-        let copy_candidates = ice_candidates.clone();
-        ice_candidates.clear();
-
-        Ok(copy_candidates)
+        Ok(std::mem::take(
+            &mut *self.buffered_local_ice_candidates.lock()?,
+        ))
     }
 
     pub fn handle_received_ice(&self, ice: signaling::Ice) -> Result<()> {
@@ -1445,18 +1438,20 @@ where
             self.connection_id
         );
 
-        let call = self.call.lock()?;
-        // When PeerConnection::SetRemoteDescription triggers PeerConnectionObserver::OnAddStream,
-        // the MediaStream is wrapped via create_incoming_media, which does the following on different platforms:
-        // - Android: wraps it in layers of JavaMediaStream/jni::JavaMediaStream.
-        // - iOS: wraps it in layers of IosMediaStream/AppMediaStreamInterface/ConnectionMediaStream/RTCMediaStream.
-        // - Desktop: does no additional wrapping
-        // Later, when the call is accepted, the wrapped media
-        // is passed to connect_incoming_media, which does the following on different platforms:
-        // - iOS: The RTCMediaStream level of wrapping is passed to the app via onConnectMedia, which adds a sink to the first video track.
-        // - Android: The JavaMediaStream level of wrapping is passed to the app via onConnectMedia, which adds a sink to the first video track.
-        // - Desktop: Uses the PeerConnectionObserver for video sinks rather than adding its own.
-        let incoming_media = call.create_incoming_media(self, stream)?;
+        let incoming_media = {
+            let call = self.call.lock()?;
+            // When PeerConnection::SetRemoteDescription triggers PeerConnectionObserver::OnAddStream,
+            // the MediaStream is wrapped via create_incoming_media, which does the following on different platforms:
+            // - Android: wraps it in layers of JavaMediaStream/jni::JavaMediaStream.
+            // - iOS: wraps it in layers of IosMediaStream/AppMediaStreamInterface/ConnectionMediaStream/RTCMediaStream.
+            // - Desktop: does no additional wrapping
+            // Later, when the call is accepted, the wrapped media
+            // is passed to connect_incoming_media, which does the following on different platforms:
+            // - iOS: The RTCMediaStream level of wrapping is passed to the app via onConnectMedia, which adds a sink to the first video track.
+            // - Android: The JavaMediaStream level of wrapping is passed to the app via onConnectMedia, which adds a sink to the first video track.
+            // - Desktop: Uses the PeerConnectionObserver for video sinks rather than adding its own.
+            call.create_incoming_media(self, stream)?
+        };
         self.set_incoming_media(incoming_media)
     }
 
@@ -2209,14 +2204,13 @@ mod tests {
     #[test]
     fn bandwidth_controller() {
         use BandwidthMode::*;
+
         // Remote max can push down the audio and video, but only to a point.
         assert_eq!(expect(2_000_000, Normal), compute(Normal, 3_000_000, false));
         assert_eq!(expect(2_000_000, Normal), compute(Normal, 2_000_000, false));
         assert_eq!(expect(1_999_999, Low), compute(Normal, 1_999_999, false));
         assert_eq!(expect(1_000_000, Low), compute(Normal, 1_000_000, false));
         assert_eq!(expect(300_000, Low), compute(Normal, 300_000, false));
-        assert_eq!(expect(299_000, VeryLow), compute(Normal, 299_000, false));
-        assert_eq!(expect(30_000, VeryLow), compute(Normal, 1_000, false));
 
         // Local mode can also push it down
         assert_eq!(expect(300_000, Low), compute(Low, 3_000_000, false));
@@ -2224,15 +2218,6 @@ mod tests {
         assert_eq!(expect(300_000, Low), compute(Low, 1_999_999, false));
         assert_eq!(expect(300_000, Low), compute(Low, 1_000_000, false));
         assert_eq!(expect(300_000, Low), compute(Low, 300_000, false));
-        assert_eq!(expect(299_000, VeryLow), compute(Low, 299_000, false));
-        assert_eq!(expect(30_000, VeryLow), compute(Low, 1_000, false));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 3_000_000, false));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 2_000_000, false));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 1_999_999, false));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 1_000_000, false));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 300_000, false));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 299_000, false));
-        assert_eq!(expect(30_000, VeryLow), compute(VeryLow, 1_000, false));
 
         // Being relayed can also push it down, but it doesn't affect the audio.
         assert_eq!(expect(1_000_000, Normal), compute(Normal, 3_000_000, true));
@@ -2240,21 +2225,10 @@ mod tests {
         assert_eq!(expect(1_000_000, Low), compute(Normal, 1_999_999, true));
         assert_eq!(expect(1_000_000, Low), compute(Normal, 1_000_000, true));
         assert_eq!(expect(300_000, Low), compute(Normal, 300_000, true));
-        assert_eq!(expect(299_000, VeryLow), compute(Normal, 299_000, true));
-        assert_eq!(expect(30_000, VeryLow), compute(Normal, 1_000, true));
         assert_eq!(expect(300_000, Low), compute(Low, 3_000_000, true));
         assert_eq!(expect(300_000, Low), compute(Low, 2_000_000, true));
         assert_eq!(expect(300_000, Low), compute(Low, 1_999_999, true));
         assert_eq!(expect(300_000, Low), compute(Low, 1_000_000, true));
         assert_eq!(expect(300_000, Low), compute(Low, 300_000, true));
-        assert_eq!(expect(299_000, VeryLow), compute(Low, 299_000, true));
-        assert_eq!(expect(30_000, VeryLow), compute(Low, 1_000, true));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 3_000_000, true));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 2_000_000, true));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 1_999_999, true));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 1_000_000, true));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 300_000, true));
-        assert_eq!(expect(125_000, VeryLow), compute(VeryLow, 299_000, true));
-        assert_eq!(expect(30_000, VeryLow), compute(VeryLow, 1_000, true));
     }
 }

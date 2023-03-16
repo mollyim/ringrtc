@@ -1,47 +1,60 @@
 {
-  "name": "ringrtc",
-  "version": "2.22.0",
+  "name": "@signalapp/ringrtc",
+  "version": "2.25.1",
   "description": "Signal Messenger voice and video calling library.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist/ringrtc/*",
-    "build/*"
+    "dist/*",
+    "scripts/fetch-prebuild.js"
   ],
   "scripts": {
     "build": "tsc",
     "clean": "rimraf dist",
-    "test": "electron-mocha --recursive dist/test",
+    "test": "electron-mocha --renderer --recursive dist/test --timeout 10000",
     "eslint": "eslint --cache .",
     "lint": "yarn format --list-different && yarn eslint",
-    "format": "prettier --write \"*.{css,js,json,md,scss,ts,tsx}\" \"./**/*.{css,js,json,md,scss,ts,tsx}\""
+    "format": "prettier --write \"*.{css,js,json,md,scss,ts,tsx}\" \"./**/*.{css,js,json,md,scss,ts,tsx}\"",
+    "install": "node scripts/fetch-prebuild.js",
+    "prepublishOnly": "node scripts/prepublish.js"
+  },
+  "config": {
+    "prebuildUrl": "https://build-artifacts.signal.org/libraries/ringrtc-desktop-build-v${npm_package_version}.tar.gz",
+    "prebuildChecksum": ""
   },
   "author": "",
   "license": "AGPL-3.0-only",
-  "dependencies": {},
+  "dependencies": {
+    "tar": "^6.1.0"
+  },
   "devDependencies": {
-    "@types/chai": "4.2.18",
-    "@types/chai-as-promised": "^7.1.3",
-    "@types/dom-mediacapture-transform": "0.1.2",
-    "@types/mocha": "5.2.7",
-    "@types/node": "14.14.37",
-    "@types/offscreencanvas": "^2019.6.4",
-    "@types/react": "16.8.5",
-    "chai": "4.3.5",
+    "@types/chai": "4.3.4",
+    "@types/chai-as-promised": "^7.1.5",
+    "@types/dom-mediacapture-transform": "0.1.4",
+    "@types/long": "5.0.0",
+    "@types/mocha": "10.0.1",
+    "@types/node": "18.14.0",
+    "@types/offscreencanvas": "^2019.7.0",
+    "@types/react": "18.0.28",
+    "@types/sinon-chai": "^3.2.9",
+    "chai": "4.3.7",
     "chai-as-promised": "^7.1.1",
-    "electron": "15.3.2",
+    "electron": "22.2.0",
     "electron-mocha": "11.0.2",
-    "eslint": "7.32.0",
-    "eslint-config-airbnb-typescript-prettier": "4.2.0",
-    "eslint-config-prettier": "6.15.0",
-    "eslint-plugin-import": "2.25.4",
-    "eslint-plugin-mocha": "9.0.0",
+    "eslint": "8.34.0",
+    "eslint-config-airbnb-typescript-prettier": "5.0.0",
+    "eslint-config-prettier": "8.6.0",
+    "eslint-plugin-import": "2.27.5",
+    "eslint-plugin-mocha": "10.1.0",
     "eslint-plugin-more": "1.0.5",
-    "eslint-plugin-react": "7.28.0",
-    "mocha": "9.2.0",
-    "prettier": "^2.5.1",
-    "rimraf": "3.0.2",
-    "typescript": "4.5.2",
-    "yarn-audit-fix": "^9.2.2"
+    "eslint-plugin-react": "7.32.2",
+    "long": "5.2.1",
+    "mocha": "10.2.0",
+    "prettier": "^2.8.4",
+    "rimraf": "4.1.2",
+    "sinon": "^15.0.1",
+    "sinon-chai": "^3.7.0",
+    "typescript": "4.9.3",
+    "yarn-audit-fix": "^9.3.9"
   }
 }

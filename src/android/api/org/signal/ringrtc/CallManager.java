@@ -36,7 +36,9 @@ import org.webrtc.audio.JavaAudioDeviceModule;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.List;
 import java.util.UUID;
@@ -70,11 +72,6 @@ public class CallManager {
   private              PeerConnectionFactory      groupFactory;
 
   static {
-    if (Build.VERSION.SDK_INT < 21) {
-      Log.i(TAG, "Preloading ringrtc_rffi library for SDK: " + Build.VERSION.SDK_INT);
-      System.loadLibrary("ringrtc_rffi");
-    }
-
     Log.d(TAG, "Loading ringrtc library");
     System.loadLibrary("ringrtc");
   }
@@ -87,8 +84,9 @@ public class CallManager {
    *
    * @param applicationContext  The global application context
    * @param logger              An instance of the package specific logger class
+   * @param fieldTrials         Configuration to alter WebRTC's default behavior
    */
-  public static void initialize(Context applicationContext, Log.Logger logger) {
+  public static void initialize(Context applicationContext, Log.Logger logger, Map<String, String> fieldTrials) {
 
     try {
       Log.initialize(logger);
@@ -97,7 +95,8 @@ public class CallManager {
         .setNativeLibraryLoader(new NoOpLoader());
 
       BuildInfo buildInfo = ringrtcGetBuildInfo();
-      Log.i(TAG, "CallManager.initialize(): (" + (buildInfo.debug ? "debug" : "release") + " build)");
+      String fieldTrialsString = buildFieldTrialsString(fieldTrials);
+      Log.i(TAG, "CallManager.initialize(): (" + (buildInfo.debug ? "debug" : "release") + " build, field trials = " + fieldTrialsString + ")");
 
       if (buildInfo.debug) {
         // Show all WebRTC logs via application Logger while debugging.
@@ -106,6 +105,8 @@ public class CallManager {
         // Show WebRTC error and warning logs via application Logger for release builds.
         builder.setInjectableLogger(new WebRtcLogger(), Severity.LS_WARNING);
       }
+
+      builder.setFieldTrials(fieldTrialsString);
 
       PeerConnectionFactory.initialize(builder.createInitializationOptions());
       ringrtcInitialize();
@@ -125,6 +126,19 @@ public class CallManager {
     if (!CallManager.isInitialized) {
       throw new IllegalStateException("CallManager.initialize has not been called");
     }
+  }
+
+  private static String buildFieldTrialsString(Map<String, String> fieldTrials) {
+    StringBuilder builder = new StringBuilder();
+
+    for (Map.Entry<String, String> entry : fieldTrials.entrySet()) {
+      builder.append(entry.getKey());
+      builder.append('/');
+      builder.append(entry.getValue());
+      builder.append('/');
+    }
+
+    return builder.toString();
   }
 
   class PeerConnectionFactoryOptions extends PeerConnectionFactory.Options {
@@ -172,6 +186,9 @@ public class CallManager {
       add("SM-A320F/DS");
       add("SM-A320Y/DS");
       add("SM-A320Y");
+
+      // Samsung S22 5G with Exynos 2200 SoC
+      add("SM-S901B");
     }};
 
     VideoEncoderFactory encoderFactory;
@@ -977,6 +994,10 @@ public class CallManager {
       configuration.iceTransportsType = PeerConnection.IceTransportsType.RELAY;
     }
 
+    // Use the same buffer capacity as other platforms:
+    // https://webrtc.googlesource.com/src/+/647d5e6d9166be75324a2702cf18f8a270fa3ffa
+    configuration.audioJitterBufferMaxPackets = 200;
+
     PeerConnectionFactory factory       = callContext.factory;
     CameraControl         cameraControl = callContext.cameraControl;
     try {
@@ -1630,12 +1651,6 @@ public class CallManager {
    * Modes of operation when working with different bandwidth environments.
    */
   public enum BandwidthMode {
-
-    /**
-     * Intended for audio-only, to help ensure reliable audio over
-     * severely constrained networks.
-     */
-    VERY_LOW,
 
     /**
      * Intended for low bitrate video calls. Useful to reduce

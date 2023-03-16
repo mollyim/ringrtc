@@ -1,5 +1,81 @@
 # Changelog
 
+## v2.25.1
+
+- Update to WebRTC 5481 (m110)
+
+- Use default ptime for all bandwidth modes
+
+- Desktop: Add workaround for slow call to enumerateDevices
+
+- Update dependencies (Rust and Electron)
+
+## v2.25.0
+
+- Allow SFU to return multiple ICE candidates (for IPv6 support)
+
+- Android: Add more devices to hardware encoding blocklist
+
+- Android: Increase max jitter buffer size
+
+- Desktop: Initialize call endpoint lazily
+
+- Desktop: Allow explicitly rejecting very tall or very wide frames
+
+- Add cpu statistics to logging
+
+- Reference signalapp/webrtc@5359d
+  - Improved logging around network switch
+  - Allow TURN ports to be pruned
+
+- CI: Add "Slow Tests" that will run once every night
+
+- Update dependencies, logging, build improvements
+
+## v2.24.0
+
+- Desktop: Get TURN servers after call creation to improve glare handling
+
+- Desktop: Add test cases for glare handling
+
+- Desktop: Set a minimum frame rate for screenshare capture
+
+- Reference signalapp/webrtc@5359c
+  - Remove Android API 19 support
+  - Cleanup merge diffs
+  - Include candidate information for ICE route changes
+  - Allow any address ports to be disabled
+
+- Log when the selected ICE candidate pair changes
+
+- Add debuglogs notebook for analyzing logs
+
+- CI: Add builds and tests for all platforms
+
+- Build improvements
+
+## v2.23.1
+
+- Support fetching prebuilds from build-artifacts.signal.org
+
+- Add support for setting WebRTC field trials
+
+- Android: Add support non-vendored NDK
+
+- Update logging, builds
+
+## v2.23.0
+
+- Update to WebRTC 5359 (m108)
+
+- Enable Opus DTX and set default encoding bitrate to 32kbps
+
+- Desktop: Handle failure when entering PiP 
+
+- Desktop: Move builds to NPM
+
+- Update dependencies, builds
+
 ## v2.22.0
 
 - Group Calls: Only allow ringing if you are the call creator

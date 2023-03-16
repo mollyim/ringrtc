@@ -116,15 +116,12 @@ public struct NetworkRoute {
 /// Modes of operation when working with different bandwidth environments.
 @available(iOSApplicationExtension, unavailable)
 public enum BandwidthMode: Int32 {
-    /// Intended for audio-only, to help ensure reliable audio over
-    /// severely constrained networks.
-    case veryLow = 0
     /// Intended for low bitrate video calls. Useful to reduce
     /// bandwidth costs, especially on mobile networks.
-    case low = 1
+    case low = 0
     /// (Default) No specific constraints, but keep a relatively
     /// high bitrate to ensure good quality.
-    case normal = 2
+    case normal = 1
 }
 
 /// Type of hangup message.
@@ -320,7 +317,7 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
 
     private var videoCaptureController: VideoCaptureController?
 
-    public init(httpClient: HTTPClient, fieldTrials: [String: Bool] = [:]) {
+    public init(httpClient: HTTPClient, fieldTrials: [String: String] = [:]) {
         // Initialize the global object (mainly for logging).
         CallManagerGlobal.initialize(fieldTrials: fieldTrials)
 

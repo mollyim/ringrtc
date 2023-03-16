@@ -33,7 +33,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - uses: actions/checkout@v3
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component clippy --target aarch64-linux-android,aarch64-apple-ios
-    - run: shellcheck **/*.sh bin/build-aar bin/build-cli bin/build-electron bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-android-deps bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check src/rust/scripts/run-tests
+    - run: shellcheck **/*.sh bin/build-aar bin/build-cli bin/build-electron bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-artifact bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check bin/set-up-for-cocoapods src/rust/scripts/run-tests
     - name: Clippy
       run: cargo clippy --tests --features sim -- -D warnings
       working-directory: src/rust
@@ -55,6 +55,10 @@ jobs:
     - name: Check typescript
       run: yarn lint
       working-directory: src/node
+    - name: Check package.json for prebuildChecksum
+      run: >-
+        grep -q '"prebuildChecksum": ""' package.json
+      working-directory: src/node
 
   tests:
     name: Tests
@@ -66,3 +70,66 @@ jobs:
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
     - name: Run rust tests
       run: cd src/rust && ./scripts/run-tests
+
+  electron:
+    name: Electron Tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+        - os: ubuntu-latest
+          install-deps: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          test-runner: xvfb-run --auto-servernum
+        - os: windows-latest
+          install-deps: choco install protoc
+        - os: macos-latest
+          install-deps: brew install protobuf coreutils
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash # as opposed to PowerShell
+    steps:
+    - name: Install dependencies
+      run: ${{ matrix.install-deps }}
+    - uses: actions/checkout@v3
+    - uses: actions/setup-node@v3
+      with:
+        node-version-file: 'src/node/.nvmrc'
+    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
+    - run: bin/fetch-artifact -p desktop
+    - run: bin/build-electron --release --ringrtc-only
+    - run: yarn install --frozen-lockfile
+      working-directory: src/node
+    - run: yarn build
+      working-directory: src/node
+    - run: ${{ matrix.test-runner }} yarn test
+      working-directory: src/node
+
+  android:
+    name: Android Build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install protoc
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - uses: actions/checkout@v3
+    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+    - run: bin/fetch-artifact -p android
+    - run: bin/build-aar --release --ringrtc-only
+
+  ios:
+    name: iOS Tests
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v3
+    - run: brew install protobuf coreutils # for grealpath
+    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target x86_64-apple-ios
+    - run: bin/fetch-artifact -p ios
+    - run: bin/build-ios --release --ringrtc-only --host-sim-only
+    - run: pod install
+      working-directory: src/ios/SignalRingRTC
+    # Pick a phone model here that's likely to work on recent Xcodes.
+    - run: xcodebuild test -workspace SignalRingRTC.xcworkspace -scheme SignalRingRTC -destination 'platform=iOS Simulator,name=iPhone 13'
+      working-directory: src/ios/SignalRingRTC
+      env:
+        TEST_RUNNER_RINGRTC_MAX_LOG_LEVEL: 2 # warnings only

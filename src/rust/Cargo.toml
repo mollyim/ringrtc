@@ -5,9 +5,9 @@
 
 [package]
 name = "ringrtc"
-version = "2.22.0"
+version = "2.25.1"
 authors = ["Calling Team <callingteam@signal.org>"]
-edition = "2018"
+edition = "2021"
 description = "A Rust interface for WebRTC"
 license = "AGPL-3.0-only"
 
@@ -48,6 +48,7 @@ hex               = { version = "0.4", features = ["serde"] }
 sha2              = { version = "0.10"   }
 static_assertions = { version = "1.1.0"  }
 subtle            = { version = "2.3.0"  }
+sysinfo           = { version = "0.28.0", default-features = false }
 thiserror         = { version = "1.0.20" }
 tokio             = { version = "1.13.0", features = ["rt-multi-thread", "time"] }
 x25519-dalek      = { version = "1.1"    }
@@ -59,9 +60,9 @@ neon = { version = "0.10.1", optional = true, default-features = false, features
 jni = { version = "0.19.0", optional = true, default-features = false }
 
 # Optional, needed by the "http" feature
-ureq = { version = "=2.2", optional = true }
-rustls = { version = "0.19.1", optional = true, features = ["dangerous_configuration"] }
-webpki = { version = "0.21", optional = true }
+ureq = { version = "2.5", optional = true }
+rustls = { version = "0.20.7", optional = true, features = ["dangerous_configuration"] }
+webpki = { version = "0.22", optional = true }
 
 [features]
 default = []
