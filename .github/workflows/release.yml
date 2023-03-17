@@ -11,19 +11,13 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Free up disk space
-      run: sudo rm -rf /usr/share/dotnet /opt/ghc
-
     - uses: actions/checkout@v3
 
-    - name: Set up JDK 11
-      uses: actions/setup-java@v3
-      with:
-        distribution: temurin
-        java-version: 11
-
     - name: Validate Gradle Wrapper
-      uses: gradle/wrapper-validation-action@master
+      uses: gradle/wrapper-validation-action@v1
+
+    - name: Install protoc
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
     - name: Install depot_tools
       run: |
@@ -32,41 +26,32 @@ jobs:
         git checkout "$DEPOT_TOOLS_GIT_HASH^{commit}"
         echo "/opt/depot_tools" >> "$GITHUB_PATH"
       env:
-        DEPOT_TOOLS_GIT_HASH: 5fb99f65c0eacadf2f72618936a3264e72942756
-
-    - name: Install protoc
-      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-    - name: Install Clippy
-      run: rustup component add clippy
+        DEPOT_TOOLS_GIT_HASH: 3f3e2f789e27d41d3c20a555fd60a39ebd631e15
 
     - name: Install Rust targets
-      run: rustup target add armv7-linux-androideabi aarch64-linux-android x86_64-linux-android
+      run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
     - name: Prepare workspace for Android
-      run: ./bin/prepare-workspace android
+      run: bin/prepare-workspace android
       env:
         DEPOT_TOOLS_UPDATE: 0
 
-    - name: Accept all SDK licenses
-      run: yes | src/webrtc/src/third_party/android_sdk/public/cmdline-tools/latest/bin/sdkmanager --licenses
-
     - name: Build library
-      run: ./bin/build-aar --arch arm arm64 x64 --release-build
+      run: bin/build-aar --arch arm arm64 x64 --release-build
       env:
-        ORG_GRADLE_PROJECT_ci: 1
+        OVERRIDE_VERSION: ${{ github.ref_name }}
 
     - name: Log checksums
-      run: sha256sum out/gradle/outputs/aar/*
+      run: find out/release/libs -type f -exec sha256sum '{}' +
 
     - name: Upload AARs
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
-        name: ringrtc-aar
-        path: out/gradle/outputs/aar
+        name: libs
+        path: out/release/libs/
 
     - name: Publish to GitHub Packages
       run: ./bin/build-aar --arch arm arm64 x64 --release-build --publish
       env:
-        ORG_GRADLE_PROJECT_ci: 1
+        OVERRIDE_VERSION: ${{ github.ref_name }}
         GITHUB_TOKEN: ${{ secrets.PUBLISH_PAT }}
