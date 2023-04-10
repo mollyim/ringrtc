@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+import { RingRTCType } from './ringrtc/Service';
+
 export {
   AudioDevice,
   BandwidthMode,
@@ -36,6 +38,8 @@ export {
   VideoCapturer,
   VideoRenderer,
   VideoRequest,
+  callIdFromEra,
+  callIdFromRingId,
 } from './ringrtc/Service';
 
 export {
@@ -48,5 +52,4 @@ export {
   MAX_VIDEO_CAPTURE_WIDTH,
 } from './ringrtc/VideoSupport';
 
-import { RingRTCType } from './ringrtc/Service';
 export const RingRTC = new RingRTCType();

@@ -1,20 +1,23 @@
 {
   "name": "@signalapp/ringrtc",
-  "version": "2.25.1",
+  "version": "2.26.1",
   "description": "Signal Messenger voice and video calling library.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist/*",
+    "dist/*.js",
+    "dist/*.d.ts",
+    "dist/ringrtc/*.js",
+    "dist/ringrtc/*.d.ts",
     "scripts/fetch-prebuild.js"
   ],
   "scripts": {
     "build": "tsc",
     "clean": "rimraf dist",
-    "test": "electron-mocha --renderer --recursive dist/test --timeout 10000",
+    "test": "electron-mocha --renderer --recursive dist/test --timeout 10000 --require source-map-support/register",
     "eslint": "eslint --cache .",
     "lint": "yarn format --list-different && yarn eslint",
-    "format": "prettier --write \"*.{css,js,json,md,scss,ts,tsx}\" \"./**/*.{css,js,json,md,scss,ts,tsx}\"",
+    "format": "prettier --write .",
     "install": "node scripts/fetch-prebuild.js",
     "prepublishOnly": "node scripts/prepublish.js"
   },
@@ -35,7 +38,6 @@
     "@types/mocha": "10.0.1",
     "@types/node": "18.14.0",
     "@types/offscreencanvas": "^2019.7.0",
-    "@types/react": "18.0.28",
     "@types/sinon-chai": "^3.2.9",
     "chai": "4.3.7",
     "chai-as-promised": "^7.1.1",
@@ -47,13 +49,13 @@
     "eslint-plugin-import": "2.27.5",
     "eslint-plugin-mocha": "10.1.0",
     "eslint-plugin-more": "1.0.5",
-    "eslint-plugin-react": "7.32.2",
     "long": "5.2.1",
     "mocha": "10.2.0",
     "prettier": "^2.8.4",
     "rimraf": "4.1.2",
     "sinon": "^15.0.1",
     "sinon-chai": "^3.7.0",
+    "source-map-support": "^0.5.19",
     "typescript": "4.9.3",
     "yarn-audit-fix": "^9.3.9"
   }

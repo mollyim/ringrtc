@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.26.1
+
+- Revert "Android: Increase max jitter buffer size" (from v2.25.0)
+
+## v2.26.0
+
+- Adjustments to CallId, EraId, RingId and derivations/conversions
+
+- Group Calls: Limit bitrate for the lowest layer
+
+- Reference signalapp/webrtc@5481b
+  - VideoAdapter: Fix scaling of very large frames
+  - Log more info when video input starts
+
+- Reference signalapp/webrtc@5481a
+  - Set inactive timeout to 30s
+  - rffi: Set a bandwidth limit on the lowest layer of a group call
+  - Allow tcp candidates in group calls
+
+- Log notebook improvements
+
+- Build improvements
+
+## v2.25.2
+
+- Node: Ensure that a frame is fully copied before sending it to WebRTC
+
+- Node: Clean up our eslint config, and fix uncovered issues
+
+- Log stats 2sec into a call, then every 10sec after
+
+- Build improvements
+
 ## v2.25.1
 
 - Update to WebRTC 5481 (m110)

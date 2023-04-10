@@ -114,10 +114,10 @@ public class CallManager {
       Log.i(TAG, "CallManager.initialize() returned");
     } catch (UnsatisfiedLinkError e) {
       Log.w(TAG, "Unable to load ringrtc library", e);
-      throw new AssertionError("Unable to load ringrtc library");
+      throw new AssertionError("Unable to load ringrtc library", e);
     } catch  (CallException e) {
       Log.w(TAG, "Unable to initialize ringrtc library", e);
-      throw new AssertionError("Unable to initialize ringrtc library");
+      throw new AssertionError("Unable to initialize ringrtc library", e);
     }
 
   }
@@ -993,10 +993,6 @@ public class CallManager {
     if (callContext.hideIp) {
       configuration.iceTransportsType = PeerConnection.IceTransportsType.RELAY;
     }
-
-    // Use the same buffer capacity as other platforms:
-    // https://webrtc.googlesource.com/src/+/647d5e6d9166be75324a2702cf18f8a270fa3ffa
-    configuration.audioJitterBufferMaxPackets = 200;
 
     PeerConnectionFactory factory       = callContext.factory;
     CameraControl         cameraControl = callContext.cameraControl;
