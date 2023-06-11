@@ -36,6 +36,7 @@ import org.webrtc.audio.JavaAudioDeviceModule;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -51,25 +52,29 @@ import java.util.UUID;
 public class CallManager {
 
   @NonNull
-  private static final String                     TAG = CallManager.class.getSimpleName();
+  private static final String  TAG = CallManager.class.getSimpleName();
 
-  private static       boolean                    isInitialized;
+  private static       boolean isInitialized;
 
-  private              long                       nativeCallManager;
+
+  private long                                nativeCallManager;
 
   @NonNull
-  private              Observer                   observer;
+  private Observer                            observer;
 
   // Keep a hash/mapping of a callId to a GroupCall object. CallId is a u32
   // and will fit in to the long type.
   @NonNull
-  private              LongSparseArray<GroupCall> groupCallByClientId;
+  private LongSparseArray<GroupCall>          groupCallByClientId;
 
   @NonNull
-  private              Requests<PeekInfo>         peekInfoRequests;
+  private Requests<HttpResult<PeekInfo>>      peekRequests;
+
+  @NonNull
+  private Requests<HttpResult<CallLinkState>> callLinkRequests;
 
   @Nullable
-  private              PeerConnectionFactory      groupFactory;
+  private PeerConnectionFactory               groupFactory;
 
   static {
     Log.d(TAG, "Loading ringrtc library");
@@ -95,7 +100,13 @@ public class CallManager {
         .setNativeLibraryLoader(new NoOpLoader());
 
       BuildInfo buildInfo = ringrtcGetBuildInfo();
-      String fieldTrialsString = buildFieldTrialsString(fieldTrials);
+
+      Map<String, String> fieldTrialsWithDefaults = new HashMap<>();
+      fieldTrialsWithDefaults.put("WebRTC-Audio-OpusSetSignalVoiceWithDtx", "Enabled");
+      fieldTrialsWithDefaults.putAll(fieldTrials);
+
+      String fieldTrialsString = buildFieldTrialsString(fieldTrialsWithDefaults);
+
       Log.i(TAG, "CallManager.initialize(): (" + (buildInfo.debug ? "debug" : "release") + " build, field trials = " + fieldTrialsString + ")");
 
       if (buildInfo.debug) {
@@ -251,7 +262,12 @@ public class CallManager {
 
     Log.i(TAG, "createAudioDeviceModule(): useHardware: " + useHardware + " useAecM: " + useAecM);
 
-    return JavaAudioDeviceModule.builder(ContextUtils.getApplicationContext())
+    // ContextUtils.getApplicationContext() is deprecated;
+    // we're supposed to have a Context on hand instead.
+    @SuppressWarnings("deprecation")
+    Context context = ContextUtils.getApplicationContext();
+
+    return JavaAudioDeviceModule.builder(context)
       .setUseHardwareAcousticEchoCanceler(useHardware)
       .setUseHardwareNoiseSuppressor(useHardware)
       .setUseAecm(useAecM)
@@ -270,7 +286,8 @@ public class CallManager {
     this.observer            = observer;
     this.nativeCallManager   = 0;
     this.groupCallByClientId = new LongSparseArray<>();
-    this.peekInfoRequests    = new Requests<>();
+    this.peekRequests        = new Requests<>();
+    this.callLinkRequests    = new Requests<>();
   }
 
   @Nullable
@@ -372,7 +389,7 @@ public class CallManager {
    * @param camera                 camera control to use for this Call
    * @param iceServers             list of ICE servers to use for this Call
    * @param hideIp                 if true hide caller's IP by using a TURN server
-   * @param bandwidthMode          desired bandwidth mode to start the session with
+   * @param dataMode               desired data mode to start the session with
    * @param audioLevelsIntervalMs  if greater than 0, enable audio levels with this interval (in milliseconds)
    * @param enableCamera           if true, enable the local camera video track when created
    *
@@ -389,7 +406,7 @@ public class CallManager {
                       @NonNull  List<PeerConnection.IceServer> iceServers,
                       @Nullable PeerConnection.ProxyInfo       proxyInfo,
                                 boolean                        hideIp,
-                                BandwidthMode                  bandwidthMode,
+                                DataMode                       dataMode,
                       @Nullable Integer                        audioLevelsIntervalMs,
                                 boolean                        enableCamera)
     throws CallException
@@ -421,7 +438,7 @@ public class CallManager {
     ringrtcProceed(nativeCallManager,
                    callId.longValue(),
                    callContext,
-                   bandwidthMode.ordinal(),
+                   dataMode.ordinal(),
                    audioLevelsIntervalMillis);
   }
 
@@ -793,20 +810,19 @@ public class CallManager {
 
   /**
    *
-   * Allows the application to constrain bandwidth if so configured
-   * by the user.
+   * Sets a data mode, allowing the client to limit the media bandwidth used.
    *
-   * @param bandwidthMode  one of the BandwidthMode enumerated values
+   * @param dataMode  one of the DataMode enumerated values
    *
    * @throws CallException for native code failures
    *
    */
-  public void updateBandwidthMode(BandwidthMode bandwidthMode)
+  public void updateDataMode(DataMode dataMode)
     throws CallException
   {
     checkCallManagerExists();
 
-    ringrtcUpdateBandwidthMode(nativeCallManager, bandwidthMode.ordinal());
+    ringrtcUpdateDataMode(nativeCallManager, dataMode.ordinal());
   }
 
   /**
@@ -855,15 +871,47 @@ public class CallManager {
     ringrtcCancelGroupRing(nativeCallManager, groupId, ringId, rawReason);
   }
 
-  // Group Calls
+  // Group Calls and Call Links
 
   public interface ResponseHandler<T> {
     void handleResponse(T response);
   }
 
+  public static class HttpResult<T> {
+    @Nullable
+    private final T value;
+    private final short status;
+  
+    @CalledByNative
+    HttpResult(@NonNull T value) {
+      this.value = value;
+      this.status = 200;
+    }
+
+    @CalledByNative
+    HttpResult(short status) {
+      this.value = null;
+      this.status = status;
+    }
+
+    @Nullable
+    public T getValue() {
+      return value;
+    }
+
+    /** Note that this includes "artificial" error codes in the 6xx and 7xx range used by RingRTC. */
+    public short getStatus() {
+      return status;
+    }
+
+    public boolean isSuccess() {
+      return value != null;
+    }
+  }
+
   static class Requests<T> {
     private long nextId = 1;
-    @NonNull private LongSparseArray<ResponseHandler<T>> handlerById = new LongSparseArray();
+    @NonNull private LongSparseArray<ResponseHandler<T>> handlerById = new LongSparseArray<>();
   
     long add(ResponseHandler<T> handler) {
       long id = this.nextId++;
@@ -880,6 +928,212 @@ public class CallManager {
       this.handlerById.delete(id);
       return true;
     }
+  }
+
+  /**
+   *
+   * Asynchronous request to get information about a call link.
+   *
+   * @param sfuUrl                     the URL to use when accessing the SFU
+   * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey                the root key for the call link
+   * @param handler                    a handler function which is invoked with the room's current state, or an error status code
+   *
+   * Expected failure codes include:
+   * <ul>
+   *   <li>404: the room does not exist (or expired so long ago that it has been removed from the server)
+   * </ul>
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void readCallLink(
+    @NonNull String                                     sfuUrl,
+    @NonNull byte[]                                     authCredentialPresentation,
+    @NonNull CallLinkRootKey                            linkRootKey,
+    @NonNull ResponseHandler<HttpResult<CallLinkState>> handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+    Log.i(TAG, "readCallLink():");
+
+    long requestId = this.callLinkRequests.add(handler);
+    ringrtcReadCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), requestId);
+  }
+
+  /**
+   *
+   * Asynchronous request to create a new call link.
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * <pre>
+   * CallLinkRootKey linkKey = CallLinkRootKey.generate();
+   * byte[] adminPasskey = CallLinkRootKey.generateAdminPasskey();
+   * byte[] roomId = linkKey.deriveRoomId();
+   * CreateCallLinkCredential credential = requestCreateCredentialFromChatServer(roomId); // using libsignal
+   * CallLinkSecretParams secretParams = CallLinkSecretParams.deriveFromRootKey(linkKey.getKeyBytes());
+   * byte[] credentialPresentation = credential.present(roomId, secretParams).serialize();
+   * byte[] serializedPublicParams = secretParams.getPublicParams().serialize();
+   * callManager.createCallLink(sfuUrl, credentialPresentation, linkKey, adminPasskey, serializedPublicParams, result -> {
+   *   if (result.isSuccess()) {
+   *     CallLinkState state = result.getValue();
+   *     // In actuality you may not want to do this until the user clicks Done.
+   *     saveToDatabase(linkKey.getKeyBytes(), adminPasskey, state);
+   *     syncToOtherDevices(linkKey.getKeyBytes(), adminPasskey);
+   *   } else {
+   *     switch (result.getStatus()) {
+   *     case 409:
+   *       // The room already exists (and isn't yours), i.e. you've hit a 1-in-a-billion conflict.
+   *       // Fall through to kicking the user out to try again later.
+   *     default:
+   *       // Unexpected error, kick the user out for now.
+   *     }
+   *   }
+   * });
+   * </pre>
+   *
+   * @param sfuUrl                       the URL to use when accessing the SFU
+   * @param createCredentialPresentation a serialized CreateCallLinkCredentialPresentation
+   * @param linkRootKey                  the root key for the call link
+   * @param adminPasskey                 the arbitrary passkey to use for the new room
+   * @param callLinkPublicParams         the serialized CallLinkPublicParams for the new room
+   * @param handler                      a handler function which is invoked with the newly-created room's initial state, or an error status code
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void createCallLink(
+    @NonNull String                                     sfuUrl,
+    @NonNull byte[]                                     createCredentialPresentation,
+    @NonNull CallLinkRootKey                            linkRootKey,
+    @NonNull byte[]                                     adminPasskey,
+    @NonNull byte[]                                     callLinkPublicParams,
+    @NonNull ResponseHandler<HttpResult<CallLinkState>> handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+    Log.i(TAG, "createCallLink():");
+
+    long requestId = this.callLinkRequests.add(handler);
+    ringrtcCreateCallLink(nativeCallManager, sfuUrl, createCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, callLinkPublicParams, requestId);
+  }
+
+  /**
+   *
+   * Asynchronous request to update a call link's name.
+   *
+   * Possible failure codes include:
+   * <ul>
+   *   <li>401: the room does not exist (and this is the wrong API to create a new room)
+   *   <li>403: the admin passkey is incorrect
+   * </ul>
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @param sfuUrl                     the URL to use when accessing the SFU
+   * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey                the root key for the call link
+   * @param adminPasskey               the passkey specified when the link was created
+   * @param newName                    the new name to use
+   * @param handler                    a handler function which is invoked with the room's updated state, or an error status code
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void updateCallLinkName(
+    @NonNull String                                     sfuUrl,
+    @NonNull byte[]                                     authCredentialPresentation,
+    @NonNull CallLinkRootKey                            linkRootKey,
+    @NonNull byte[]                                     adminPasskey,
+    @NonNull String                                     newName,
+    @NonNull ResponseHandler<HttpResult<CallLinkState>> handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+    Log.i(TAG, "updateCallLinkName():");
+
+    long requestId = this.callLinkRequests.add(handler);
+    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, newName, -1, -1, requestId);
+  }
+
+  /**
+   *
+   * Asynchronous request to update a call link's restrictions.
+   *
+   * Possible failure codes include:
+   * <ul>
+   *   <li>401: the room does not exist (and this is the wrong API to create a new room)
+   *   <li>403: the admin passkey is incorrect
+   * </ul>
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @param sfuUrl                     the URL to use when accessing the SFU
+   * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey                the root key for the call link
+   * @param adminPasskey               the passkey specified when the link was created
+   * @param restrictions               the new restrictions to use
+   * @param handler                    a handler function which is invoked with the room's updated state, or an error status code
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void updateCallLinkRestrictions(
+    @NonNull String                                     sfuUrl,
+    @NonNull byte[]                                     authCredentialPresentation,
+    @NonNull CallLinkRootKey                            linkRootKey,
+    @NonNull byte[]                                     adminPasskey,
+    @NonNull CallLinkState.Restrictions                 restrictions,
+    @NonNull ResponseHandler<HttpResult<CallLinkState>> handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+    Log.i(TAG, "updateCallLinkRestrictions():");
+    if (restrictions == CallLinkState.Restrictions.UNKNOWN) {
+      throw new IllegalArgumentException("cannot set a call link's restrictions to UNKNOWN");
+    }
+
+    long requestId = this.callLinkRequests.add(handler);
+    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, null, restrictions.ordinal(), -1, requestId);
+  }
+
+  /**
+   *
+   * Asynchronous request to revoke or un-revoke a call link.
+   *
+   * Possible failure codes include:
+   * <ul>
+   *   <li>401: the room does not exist (and this is the wrong API to create a new room)
+   *   <li>403: the admin passkey is incorrect
+   * </ul>
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @param sfuUrl                     the URL to use when accessing the SFU
+   * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey                the root key for the call link
+   * @param adminPasskey               the passkey specified when the link was created
+   * @param revoked                    whether the link should now be revoked
+   * @param handler                    a handler function which is invoked with the room's updated state, or an error status code
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void updateCallLinkRevoked(
+    @NonNull String                                     sfuUrl,
+    @NonNull byte[]                                     authCredentialPresentation,
+    @NonNull CallLinkRootKey                            linkRootKey,
+    @NonNull byte[]                                     adminPasskey,
+             boolean                                    revoked,
+    @NonNull ResponseHandler<HttpResult<CallLinkState>> handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+    Log.i(TAG, "updateCallLinkRevoked():");
+
+    long requestId = this.callLinkRequests.add(handler);
+    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, null, -1, revoked ? 1 : 0, requestId);
   }
 
   /**
@@ -905,8 +1159,50 @@ public class CallManager {
 
     Log.i(TAG, "peekGroupCall():");
 
-    long requestId = this.peekInfoRequests.add(handler);
+    long requestId = this.peekRequests.add(result -> {
+      if (result.isSuccess()) {
+        handler.handleResponse(result.getValue());
+      } else {
+        handler.handleResponse(new PeekInfo(Collections.emptyList(), null, null, null, 0));
+      }
+    });
     ringrtcPeekGroupCall(nativeCallManager, requestId, sfuUrl, membershipProof, Util.serializeFromGroupMemberInfo(groupMembers));
+  }
+
+  /**
+   *
+   * Asynchronous request for the active call state from the SFU for a particular
+   * call link. Does not require a group call object.
+   *
+   * Possible (synthetic) failure codes include:
+   * <ul>
+   *   <li>{@link PeekInfo#EXPIRED_CALL_LINK_STATUS}: the call link has expired or been revoked
+   *   <li>{@link PeekInfo#INVALID_CALL_LINK_STATUS}: the call link is invalid; it may have expired a long time ago
+   * </ul>
+   *
+   * Will produce an "empty" {@link PeekInfo} if the link is valid but no call is active.
+   *
+   * @param sfuUrl                     the URL to use when accessing the SFU
+   * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey                the root key for the call link
+   * @param handler                    a handler function which is invoked once the data is available
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void peekCallLinkCall(
+    @NonNull String                                sfuUrl,
+    @NonNull byte[]                                authCredentialPresentation,
+    @NonNull CallLinkRootKey                       linkRootKey,
+    @NonNull ResponseHandler<HttpResult<PeekInfo>> handler)
+    throws CallException
+  {
+    checkCallManagerExists();
+
+    Log.i(TAG, "peekCallLink():");
+
+    long requestId = this.peekRequests.add(handler);
+    ringrtcPeekCallLinkCall(nativeCallManager, requestId, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes());
   }
 
   /**
@@ -918,10 +1214,13 @@ public class CallManager {
    *
    * @param groupId                the unique identifier for the group
    * @param sfuUrl                 the URL to use when accessing the SFU
+   * @param hkdfExtraInfo          additional entropy to use for the connection with the SFU (it's okay if this is empty)
+   * @param audioLevelsIntervalMs  if provided, the observer will receive audio level callbacks at this interval
    * @param audioProcessingMethod  the method to use for audio processing
    * @param observer               the observer that the group call object will use for callback notifications
    *
    */
+  @Nullable
   public GroupCall createGroupCall(@NonNull  byte[]                groupId,
                                    @NonNull  String                sfuUrl,
                                    @NonNull  byte[]                hkdfExtraInfo,
@@ -940,22 +1239,64 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = new GroupCall(nativeCallManager, groupId, sfuUrl, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
 
-    if (groupCall.clientId != 0) {
+    if (groupCall != null) {
       // Add the groupCall to the map.
       this.groupCallByClientId.append(groupCall.clientId, groupCall);
-
-      return groupCall;
-    } else {
-      try {
-        groupCall.dispose();
-      } catch (CallException e) {
-        Log.e(TAG, "Unable to properly dispose of GroupCall", e);
-      }
-
-      return null;
     }
+
+    return groupCall;
+  }
+
+  /**
+   *
+   * Creates and returns a GroupCall object for a call link call.
+   *
+   * If there is any error when allocating resources for the object,
+   * null is returned.
+   *
+   * @param sfuUrl                     the URL to use when accessing the SFU
+   * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey                the root key for the call link
+   * @param adminPasskey               if present, the opaque passkey authorizing this user as an admin for the call link
+   * @param hkdfExtraInfo              additional entropy to use for the connection with the SFU (it's okay if this is empty)
+   * @param audioLevelsIntervalMs      if provided, the observer will receive audio level callbacks at this interval
+   * @param audioProcessingMethod      the method to use for audio processing
+   * @param observer                   the observer that the group call object will use for callback notifications
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  @Nullable
+  public GroupCall createCallLinkCall(@NonNull  String                sfuUrl,
+                                      @NonNull  byte[]                authCredentialPresentation,
+                                      @NonNull  CallLinkRootKey       linkRootKey,
+                                      @Nullable byte[]                adminPasskey,
+                                      @NonNull  byte[]                hkdfExtraInfo,
+                                      @Nullable Integer               audioLevelsIntervalMs,
+                                                AudioProcessingMethod audioProcessingMethod,
+                                      @NonNull  GroupCall.Observer    observer)
+  {
+    checkCallManagerExists();
+
+    if (this.groupFactory == null) {
+      // The first GroupCall object will create a factory that will be re-used.
+      this.groupFactory = this.createPeerConnectionFactory(null, audioProcessingMethod);
+      if (this.groupFactory == null) {
+        Log.e(TAG, "createPeerConnectionFactory failed");
+        return null;
+      }
+    }
+
+    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+
+    if (groupCall != null) {
+      // Add the groupCall to the map.
+      this.groupCallByClientId.append(groupCall.clientId, groupCall);
+    }
+
+    return groupCall;
   }
 
   /****************************************************************************
@@ -983,8 +1324,11 @@ public class CallManager {
     MediaConstraints                constraints   = new MediaConstraints();
     PeerConnection.RTCConfiguration configuration = new PeerConnection.RTCConfiguration(callContext.iceServers);
 
+    @SuppressWarnings("deprecation")
+    PeerConnection.SdpSemantics     sdpSemantics = PeerConnection.SdpSemantics.PLAN_B;
+
     configuration.proxyInfo = callContext.proxyInfo;
-    configuration.sdpSemantics  = PeerConnection.SdpSemantics.PLAN_B;
+    configuration.sdpSemantics  = sdpSemantics;
     configuration.bundlePolicy  = PeerConnection.BundlePolicy.MAXBUNDLE;
     configuration.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
     configuration.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
@@ -1242,23 +1586,16 @@ public class CallManager {
   }
 
   @CalledByNative
-  private void handlePeekResponse(long requestId, List<byte[]> joinedMembers, @Nullable byte[] creator, @Nullable String eraId, @Nullable Long maxDevices, long deviceCount) {
-    if (joinedMembers != null) {
-      Log.i(TAG, "handlePeekResponse(): joinedMembers.size = " + joinedMembers.size());
-    } else {
-      Log.i(TAG, "handlePeekResponse(): joinedMembers is null");
-    }
-
-    // Create the collection, converting each provided byte[] to a UUID.
-    Collection<UUID> joinedGroupMembers = new ArrayList<UUID>();
-    for (byte[] joinedMember : joinedMembers) {
-        joinedGroupMembers.add(Util.getUuidFromBytes(joinedMember));
-    }
-
-    PeekInfo info = new PeekInfo(joinedGroupMembers, creator == null ? null : Util.getUuidFromBytes(creator), eraId, maxDevices, deviceCount);
-
-    if (!this.peekInfoRequests.resolve(requestId, info)) {
+  private void handlePeekResponse(long requestId, HttpResult<PeekInfo> info) {
+    if (!this.peekRequests.resolve(requestId, info)) {
       Log.w(TAG, "Invalid requestId for handlePeekResponse: " + requestId);
+    }
+  }
+
+  @CalledByNative
+  private void handleCallLinkResponse(long requestId, HttpResult<CallLinkState> response) {
+    if (!this.callLinkRequests.resolve(requestId, response)) {
+      Log.w(TAG, "Invalid requestId for handleCallLinkResponse: " + requestId);
     }
   }
 
@@ -1370,27 +1707,12 @@ public class CallManager {
   }
 
   @CalledByNative
-  private void handlePeekChanged(long clientId, List<byte[]> joinedMembers, @Nullable byte[] creator, @Nullable String eraId, @Nullable Long maxDevices, long deviceCount) {
-    if (joinedMembers != null) {
-      Log.i(TAG, "handlePeekChanged(): joinedMembers.size = " + joinedMembers.size());
-    } else {
-      Log.i(TAG, "handlePeekChanged(): joinedMembers is null");
-    }
-
+  private void handlePeekChanged(long clientId, PeekInfo info) {
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
     if (groupCall == null) {
       Log.w(TAG, "groupCall not found by clientId: " + clientId);
       return;
     }
-
-    // Create the collection, converting each provided byte[] to a UUID.
-    Collection<UUID> joinedGroupMembers = new ArrayList<UUID>();
-    for (byte[] joinedMember : joinedMembers) {
-        joinedGroupMembers.add(Util.getUuidFromBytes(joinedMember));
-    }
-
-    PeekInfo info = new PeekInfo(joinedGroupMembers, creator == null ? null : Util.getUuidFromBytes(creator), eraId, maxDevices, deviceCount);
-
     groupCall.handlePeekChanged(info);
   }
 
@@ -1644,13 +1966,13 @@ public class CallManager {
   }
 
   /**
-   * Modes of operation when working with different bandwidth environments.
+   * The data mode allows the client to limit the media bandwidth used.
    */
-  public enum BandwidthMode {
+  public enum DataMode {
 
     /**
      * Intended for low bitrate video calls. Useful to reduce
-     * bandwidth costs, especially on mobile networks.
+     * bandwidth costs, especially on mobile data networks.
      */
     LOW,
 
@@ -1661,7 +1983,7 @@ public class CallManager {
     NORMAL;
 
     @CalledByNative
-    static BandwidthMode fromNativeIndex(int nativeIndex) {
+    static DataMode fromNativeIndex(int nativeIndex) {
         return values()[nativeIndex];
     }
   }
@@ -1929,7 +2251,7 @@ public class CallManager {
     void ringrtcProceed(long        nativeCallManager,
                         long        callId,
                         CallContext callContext,
-                        int         bandwidthMode,
+                        int         dataMode,
                         int         audioLevelsIntervalMillis)
     throws CallException;
 
@@ -2031,7 +2353,7 @@ public class CallManager {
     throws CallException;
 
   private native
-    void ringrtcUpdateBandwidthMode(long nativeCallManager, int bandwidthMode)
+    void ringrtcUpdateDataMode(long nativeCallManager, int dataMode)
     throws CallException;
 
   private native
@@ -2052,5 +2374,43 @@ public class CallManager {
                               String sfuUrl,
                               byte[] membershipProof,
                               byte[] serializedGroupMembers)
+    throws CallException;
+
+  private native
+    void ringrtcReadCallLink(long   nativeCallManager,
+                             String sfuUrl,
+                             byte[] authCredentialPresentation,
+                             byte[] rootKeyBytes,
+                             long   requestId)
+    throws CallException;
+
+  private native
+    void ringrtcCreateCallLink(long   nativeCallManager,
+                               String sfuUrl,
+                               byte[] createCredentialPresentation,
+                               byte[] rootKeyBytes,
+                               byte[] adminPasskey,
+                               byte[] callLinkPublicParams,
+                               long   requestId)
+    throws CallException;
+
+  private native
+    void ringrtcUpdateCallLink(long   nativeCallManager,
+                               String sfuUrl,
+                               byte[] authCredentialPresentation,
+                               byte[] rootKeyBytes,
+                               byte[] adminPasskey,
+                               String newName,
+                               int    newRestrictions,
+                               int    newRevoked,
+                               long   requestId)
+    throws CallException;
+
+  private native
+    void ringrtcPeekCallLinkCall(long   nativeCallManager,
+                                 long   requestId,
+                                 String sfuUrl,
+                                 byte[] authCredentialPresentation,
+                                 byte[] rootKeyBytes)
     throws CallException;
 }

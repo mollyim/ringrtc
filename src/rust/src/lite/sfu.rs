@@ -11,38 +11,15 @@ use std::{
     iter::FromIterator,
     net::IpAddr,
     net::SocketAddr,
+    sync::Arc,
 };
 
 use hex::ToHex;
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use sha2::{Digest, Sha256};
 
 use crate::lite::http;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(u16)]
-pub enum ResponseCode {
-    GroupCallNotStarted = 404,
-    GroupCallFull = 413,
-    // Artifical codes not actually returned by the server
-    InvalidClientAuth = 601,
-    RequestFailed = 602,
-    InvalidResponseBodyUtf8 = 603,
-    InvalidResponseBodyJson = 604,
-}
-
-impl From<ResponseCode> for http::ResponseStatus {
-    fn from(code: ResponseCode) -> Self {
-        http::ResponseStatus::from(code as u16)
-    }
-}
-
-impl PartialEq<ResponseCode> for http::ResponseStatus {
-    fn eq(&self, code: &ResponseCode) -> bool {
-        self.code == (*code as u16)
-    }
-}
 
 /// The state that can be observed by "peeking".
 #[derive(Clone, Debug, Default)]
@@ -98,20 +75,18 @@ struct SerializedPeekDeviceInfo {
 }
 
 impl SerializedPeekInfo {
-    fn deobfuscate(self, opaque_user_id_mappings: &[OpaqueUserIdMapping]) -> PeekInfo {
+    fn deobfuscate(self, member_resolver: &dyn MemberResolver) -> PeekInfo {
         let device_count = self.devices.len() as u32;
         PeekInfo {
             devices: self
                 .devices
                 .into_iter()
-                .map(|device| device.deobfuscate(opaque_user_id_mappings))
+                .map(|device| device.deobfuscate(member_resolver))
                 .collect(),
-            creator: self.creator.as_ref().and_then(|opaque_user_id| {
-                SerializedPeekDeviceInfo::deobfuscate_user_id(
-                    opaque_user_id_mappings,
-                    opaque_user_id,
-                )
-            }),
+            creator: self
+                .creator
+                .as_ref()
+                .and_then(|opaque_user_id| member_resolver.resolve(opaque_user_id)),
             era_id: self.era_id,
             max_devices: self.max_devices,
             device_count,
@@ -120,25 +95,17 @@ impl SerializedPeekInfo {
 }
 
 impl SerializedPeekDeviceInfo {
-    fn deobfuscate(self, opaque_user_id_mappings: &[OpaqueUserIdMapping]) -> PeekDeviceInfo {
+    fn deobfuscate(self, member_resolver: &dyn MemberResolver) -> PeekDeviceInfo {
         PeekDeviceInfo {
             demux_id: self.demux_id,
-            user_id: Self::deobfuscate_user_id(opaque_user_id_mappings, &self.opaque_user_id),
+            user_id: member_resolver.resolve(&self.opaque_user_id),
         }
     }
+}
 
-    fn deobfuscate_user_id(
-        opaque_user_id_mappings: &[OpaqueUserIdMapping],
-        opaque_user_id: &str,
-    ) -> Option<UserId> {
-        opaque_user_id_mappings.iter().find_map(|mapping| {
-            if opaque_user_id == mapping.opaque_user_id {
-                Some(mapping.user_id.clone())
-            } else {
-                None
-            }
-        })
-    }
+#[derive(Deserialize, Debug)]
+struct SerializedPeekFailure<'a> {
+    reason: &'a str,
 }
 
 #[derive(Deserialize, Debug)]
@@ -173,10 +140,7 @@ pub struct JoinResponse {
 }
 
 impl JoinResponse {
-    fn from(
-        deserialized: SerializedJoinResponse,
-        opaque_user_id_mappings: &[OpaqueUserIdMapping],
-    ) -> Self {
+    fn from(deserialized: SerializedJoinResponse, member_resolver: &dyn MemberResolver) -> Self {
         let server_addresses = deserialized
             .server_ips
             .iter()
@@ -189,10 +153,7 @@ impl JoinResponse {
             server_ice_ufrag: deserialized.server_ice_ufrag,
             server_ice_pwd: deserialized.server_ice_pwd,
             server_dhe_pub_key: deserialized.server_dhe_pub_key,
-            call_creator: SerializedPeekDeviceInfo::deobfuscate_user_id(
-                opaque_user_id_mappings,
-                &deserialized.call_creator,
-            ),
+            call_creator: member_resolver.resolve(&deserialized.call_creator),
             era_id: deserialized.era_id,
         }
     }
@@ -224,6 +185,10 @@ pub type UserId = Vec<u8>;
 // Currently that gap is 16.
 pub type DemuxId = u32;
 
+pub trait MemberResolver {
+    fn resolve(&self, opaque_user_id: &str) -> Option<UserId>;
+}
+
 /// Associates a group member's UserId with their GroupMemberId.
 /// This is passed from the client to RingRTC to be able to create OpaqueUserIdMappings.
 #[derive(Clone, Debug)]
@@ -231,6 +196,35 @@ pub struct GroupMember {
     pub user_id: UserId,
     pub member_id: GroupMemberId,
 }
+
+#[derive(Default)]
+pub struct MemberMap {
+    members: Vec<OpaqueUserIdMapping>,
+}
+
+impl MemberMap {
+    pub fn new(group_members: &[GroupMember]) -> Self {
+        Self {
+            members: group_members
+                .iter()
+                .map(OpaqueUserIdMapping::from)
+                .collect(),
+        }
+    }
+}
+
+impl MemberResolver for MemberMap {
+    fn resolve(&self, opaque_user_id: &str) -> Option<UserId> {
+        self.members.iter().find_map(|entry| {
+            if entry.opaque_user_id == opaque_user_id {
+                Some(entry.user_id.clone())
+            } else {
+                None
+            }
+        })
+    }
+}
+
 /// Associates a group member's OpaqueUserId with their UUID.
 /// This is kept by RingRTC to be able to turn an OpaqueUserId into a UserId.
 #[derive(Clone, Debug)]
@@ -279,15 +273,6 @@ pub fn auth_header_from_membership_proof(proof: &[u8]) -> Option<String> {
     ))
 }
 
-pub fn opaque_user_id_mappings_from_group_members(
-    group_members: &[GroupMember],
-) -> Vec<OpaqueUserIdMapping> {
-    group_members
-        .iter()
-        .map(OpaqueUserIdMapping::from)
-        .collect()
-}
-
 /// The platform-specific methods the application must provide in order to
 /// make SFU calls.
 pub trait Delegate {
@@ -295,23 +280,32 @@ pub trait Delegate {
     fn handle_peek_result(&self, request_id: u32, peek_result: PeekResult);
 }
 
-fn participants_url_from_sfu_url(sfu_url: &str) -> String {
-    format!(
-        "{}/v2/conference/participants",
-        sfu_url.trim_end_matches('/')
-    )
+fn participants_url_from_sfu_url(sfu_url: &str, room_id_for_url: Option<&str>) -> String {
+    let sfu_url = sfu_url.trim_end_matches('/');
+    if let Some(room_id) = room_id_for_url {
+        format!("{sfu_url}/v2/conference/{room_id}/participants")
+    } else {
+        format!("{sfu_url}/v2/conference/participants")
+    }
 }
 
-fn parse_http_json_response<'a, D: Deserialize<'a>>(
-    response: Option<&'a http::Response>,
-) -> Result<D, http::ResponseStatus> {
-    let response = response.ok_or(ResponseCode::RequestFailed)?;
-    if !response.status.is_success() {
-        return Err(response.status);
+fn classify_not_found(body: &[u8]) -> Option<http::ResponseStatus> {
+    let parsed: SerializedPeekFailure = match serde_json::from_slice(body) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            error!("invalid JSON returned from SFU on peek failure: {e}");
+            return None;
+        }
+    };
+    info!(
+        "Got group call peek result with status code 404 ({})",
+        parsed.reason
+    );
+    match parsed.reason {
+        "expired" => Some(http::ResponseStatus::CALL_LINK_EXPIRED),
+        "invalid" => Some(http::ResponseStatus::CALL_LINK_INVALID),
+        _ => None,
     }
-    let deserialized = serde_json::from_slice(&response.body)
-        .map_err(|_| ResponseCode::InvalidResponseBodyJson)?;
-    Ok(deserialized)
 }
 
 pub type PeekResult = Result<PeekInfo, http::ResponseStatus>;
@@ -320,39 +314,49 @@ pub type PeekResultCallback = Box<dyn FnOnce(PeekResult) + Send>;
 pub fn peek(
     http_client: &dyn http::Client,
     sfu_url: &str,
+    room_id_for_url: Option<&str>,
     auth_header: String,
-    opaque_user_id_mappings: Vec<OpaqueUserIdMapping>,
+    member_resolver: Arc<dyn MemberResolver + Send + Sync>,
     result_callback: PeekResultCallback,
 ) {
     http_client.send_request(
         http::Request {
             method: http::Method::Get,
-            url: participants_url_from_sfu_url(sfu_url),
+            url: participants_url_from_sfu_url(sfu_url, room_id_for_url),
             headers: HashMap::from_iter([("Authorization".to_string(), auth_header)]),
             body: None,
         },
         Box::new(move |http_response| {
-            let result =
-                match parse_http_json_response::<SerializedPeekInfo>(http_response.as_ref()) {
-                    Ok(deserialized) => {
-                        info!(
-                            "Got group call peek result with device count = {}",
-                            deserialized.devices.len()
-                        );
-                        Ok(deserialized.deobfuscate(&opaque_user_id_mappings))
-                    }
-                    Err(status) if status == ResponseCode::GroupCallNotStarted => {
+            let result = match http::parse_json_response::<SerializedPeekInfo>(
+                http_response.as_ref(),
+            ) {
+                Ok(deserialized) => {
+                    info!(
+                        "Got group call peek result with device count = {}",
+                        deserialized.devices.len()
+                    );
+                    Ok(deserialized.deobfuscate(&*member_resolver))
+                }
+                Err(status) if status == http::ResponseStatus::GROUP_CALL_NOT_STARTED => {
+                    if let Some(body) = http_response
+                        .as_ref()
+                        .map(|r| &r.body)
+                        .filter(|body| !body.is_empty())
+                    {
+                        Err(classify_not_found(body).unwrap_or(status))
+                    } else {
                         info!("Got group call peek result with device count = 0 (status code 404)");
                         Ok(PeekInfo::default())
                     }
-                    Err(status) => {
-                        info!(
-                            "Got group call peek result with status code = {}",
-                            status.code
-                        );
-                        Err(status)
-                    }
-                };
+                }
+                Err(status) => {
+                    info!(
+                        "Got group call peek result with status code = {}",
+                        status.code
+                    );
+                    Err(status)
+                }
+            };
             result_callback(result);
         }),
     )
@@ -361,15 +365,34 @@ pub fn peek(
 pub type JoinResult = Result<JoinResponse, http::ResponseStatus>;
 pub type JoinResultCallback = Box<dyn FnOnce(JoinResult) + Send>;
 
+#[serde_as]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde_as(as = "Option<serde_with::base64::Base64>")]
+    admin_passkey: Option<&'a [u8]>,
+
+    ice_ufrag: &'a str,
+
+    #[serde_as(as = "serde_with::hex::Hex")]
+    dhe_public_key: &'a [u8],
+
+    #[serde_as(as = "serde_with::hex::Hex")]
+    hkdf_extra_info: &'a [u8],
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn join(
     http_client: &dyn http::Client,
     sfu_url: &str,
+    room_id_for_url: Option<&str>,
     auth_header: String,
+    admin_passkey: Option<&[u8]>,
     client_ice_ufrag: &str,
     client_dhe_pub_key: &[u8],
     hkdf_extra_info: &[u8],
-    opaque_user_id_mappings: Vec<OpaqueUserIdMapping>,
+    member_resolver: Arc<dyn MemberResolver + Send + Sync>,
     result_callback: JoinResultCallback,
 ) {
     info!("sfu::Join(): ");
@@ -377,24 +400,25 @@ pub fn join(
     http_client.send_request(
         http::Request {
             method: http::Method::Put,
-            url: participants_url_from_sfu_url(sfu_url),
+            url: participants_url_from_sfu_url(sfu_url, room_id_for_url),
             headers: HashMap::from_iter([
                 ("Authorization".to_string(), auth_header),
                 ("Content-Type".to_string(), "application/json".to_string()),
             ]),
             body: Some(
-                json!({
-                    "iceUfrag" : client_ice_ufrag,
-                    "dhePublicKey": client_dhe_pub_key.encode_hex::<String>(),
-                    "hkdfExtraInfo": hkdf_extra_info.encode_hex::<String>(),
+                serde_json::to_vec(&JoinRequest {
+                    admin_passkey,
+                    ice_ufrag: client_ice_ufrag,
+                    dhe_public_key: client_dhe_pub_key,
+                    hkdf_extra_info,
                 })
-                .to_string()
-                .into_bytes(),
+                .expect("always valid"),
             ),
         },
         Box::new(move |http_response| {
-            let result = parse_http_json_response::<SerializedJoinResponse>(http_response.as_ref())
-                .map(|deserialized| JoinResponse::from(deserialized, &opaque_user_id_mappings));
+            let result =
+                http::parse_json_response::<SerializedJoinResponse>(http_response.as_ref())
+                    .map(|deserialized| JoinResponse::from(deserialized, &*member_resolver));
             result_callback(result)
         }),
     );
@@ -402,10 +426,16 @@ pub fn join(
 
 #[cfg(any(target_os = "ios", feature = "check-all"))]
 pub mod ios {
+    use std::{
+        ffi::{c_char, CStr},
+        sync::Arc,
+    };
+
     use crate::lite::{
+        call_links::{self, CallLinkMemberResolver, CallLinkRootKey},
         ffi::ios::{rtc_Bytes, rtc_OptionalU16, rtc_OptionalU32, rtc_String, FromOrDefault},
-        http, sfu,
-        sfu::{Delegate, GroupMember, PeekInfo, PeekResult},
+        http,
+        sfu::{self, Delegate, GroupMember, PeekInfo, PeekResult},
     };
     use libc::{c_void, size_t};
 
@@ -427,13 +457,13 @@ pub mod ios {
                     sfu::auth_header_from_membership_proof(request.membership_proof.as_slice())
                 {
                     let group_members = request.group_members.to_vec();
-                    let opaque_user_id_mappings =
-                        sfu::opaque_user_id_mappings_from_group_members(&group_members);
+                    let opaque_user_id_mappings = sfu::MemberMap::new(&group_members);
                     super::peek(
                         http_client,
                         &sfu_url,
+                        None,
                         auth_header,
-                        opaque_user_id_mappings,
+                        Arc::new(opaque_user_id_mappings),
                         Box::new(move |peek_result| {
                             delegate.handle_peek_result(request_id, peek_result)
                         }),
@@ -446,6 +476,47 @@ pub mod ios {
             }
         } else {
             error!("null http_client passed into rtc_sfu_peek");
+        }
+    }
+
+    /// # Safety
+    ///
+    /// - `http_client` must come from `rtc_http_Client_create` and not already be destroyed
+    /// - `sfu_url` must be a valid, non-null C string.
+    #[no_mangle]
+    pub unsafe extern "C" fn rtc_sfu_peekCallLink(
+        http_client: *const http::ios::Client,
+        request_id: u32,
+        sfu_url: *const c_char,
+        auth_credential_presentation: rtc_Bytes,
+        link_root_key: rtc_Bytes,
+        delegate: rtc_sfu_Delegate,
+    ) {
+        info!("rtc_sfu_peekCallLink():");
+
+        if let Some(http_client) = http_client.as_ref() {
+            if let Ok(sfu_url) = CStr::from_ptr(sfu_url).to_str() {
+                if let Ok(link_root_key) = CallLinkRootKey::try_from(link_root_key.as_slice()) {
+                    super::peek(
+                        http_client,
+                        sfu_url,
+                        Some(&hex::encode(link_root_key.derive_room_id())),
+                        call_links::auth_header_from_auth_credential(
+                            auth_credential_presentation.as_slice(),
+                        ),
+                        Arc::new(CallLinkMemberResolver::from(&link_root_key)),
+                        Box::new(move |peek_result| {
+                            delegate.handle_peek_result(request_id, peek_result)
+                        }),
+                    );
+                } else {
+                    error!("invalid link_root_key");
+                }
+            } else {
+                error!("invalid sfu_url");
+            }
+        } else {
+            error!("null http_client passed into rtc_sfu_peekCallLink");
         }
     }
 
@@ -503,7 +574,7 @@ pub mod ios {
         pub handle_peek_response: extern "C" fn(
             unretained: *const c_void,
             request_id: u32,
-            peek_response: rtc_sfu_PeekResponse,
+            peek_response: rtc_sfu_Response<rtc_sfu_PeekInfo<'_>>,
         ),
     }
 
@@ -524,9 +595,9 @@ pub mod ios {
             let joined_members = peek_info.unique_users();
             let rtc_joined_members: Vec<rtc_Bytes<'_>> =
                 joined_members.iter().map(rtc_Bytes::from).collect();
-            let response = rtc_sfu_PeekResponse {
+            let response = rtc_sfu_Response {
                 error_status_code,
-                peek_info: rtc_sfu_PeekInfo {
+                value: rtc_sfu_PeekInfo {
                     joined_members: rtc_UserIds::from(&rtc_joined_members),
                     creator: rtc_Bytes::from_or_default(peek_info.creator.as_ref()),
                     era_id: rtc_String::from_or_default(peek_info.era_id.as_ref()),
@@ -541,9 +612,9 @@ pub mod ios {
 
     #[repr(C)]
     #[derive(Debug)]
-    pub struct rtc_sfu_PeekResponse<'a> {
-        error_status_code: rtc_OptionalU16,
-        peek_info: rtc_sfu_PeekInfo<'a>,
+    pub struct rtc_sfu_Response<T> {
+        pub error_status_code: rtc_OptionalU16,
+        pub value: T,
     }
 
     #[repr(C)]
@@ -572,6 +643,112 @@ pub mod ios {
                 count: user_ids.len(),
                 phantom: std::marker::PhantomData,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lite::call_links::{CallLinkMemberResolver, CallLinkRootKey};
+
+    use super::*;
+
+    #[test]
+    fn endpoint_ids_to_user_ids_by_map() {
+        let user_map = MemberMap {
+            members: vec![
+                OpaqueUserIdMapping {
+                    user_id: vec![1u8; 4],
+                    opaque_user_id: "u1".to_string(),
+                },
+                OpaqueUserIdMapping {
+                    user_id: vec![2u8; 4],
+                    opaque_user_id: "u2".to_string(),
+                },
+            ],
+        };
+
+        let peek_response = SerializedPeekInfo {
+            era_id: Some("paleozoic".to_string()),
+            max_devices: Some(16),
+            devices: vec![
+                SerializedPeekDeviceInfo {
+                    opaque_user_id: "u1".to_string(),
+                    demux_id: 0x11111110,
+                },
+                SerializedPeekDeviceInfo {
+                    opaque_user_id: "u2".to_string(),
+                    demux_id: 0x22222220,
+                },
+            ],
+            creator: None,
+        };
+
+        let peek_info = peek_response.deobfuscate(&user_map);
+        assert_eq!(
+            peek_info
+                .devices
+                .iter()
+                .filter_map(|device| device.user_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec![[1u8; 4].as_ref(), [2u8; 4].as_ref()]
+        );
+    }
+
+    #[allow(clippy::unusual_byte_groupings)]
+    #[test]
+    fn endpoint_ids_to_user_ids_by_zk_encryption() {
+        let uuid_1 = 0x_aaaaaaaa_7000_11eb_b32a_33b8a8a487a6_u128.to_be_bytes();
+        let uuid_2 = 0x_bbbbbbbb_7000_11eb_b32a_33b8a8a487a6_u128.to_be_bytes();
+
+        let root_key = CallLinkRootKey::try_from(
+            0x_0011_2233_4455_6677_8899_aabb_ccdd_eeff_u128
+                .to_be_bytes()
+                .as_slice(),
+        )
+        .unwrap();
+        let secret_params =
+            zkgroup::call_links::CallLinkSecretParams::derive_from_root_key(&root_key.bytes());
+
+        fn encrypt(uuid: [u8; 16], params: &zkgroup::call_links::CallLinkSecretParams) -> String {
+            hex::encode(bincode::serialize(&params.encrypt_uuid(uuid)).unwrap())
+        }
+
+        let resolver = CallLinkMemberResolver::from(&root_key);
+
+        for i in 0..2 {
+            let peek_response = SerializedPeekInfo {
+                era_id: Some("paleozoic".to_string()),
+                max_devices: Some(16),
+                devices: vec![
+                    SerializedPeekDeviceInfo {
+                        opaque_user_id: encrypt(uuid_1, &secret_params),
+                        demux_id: 0x11111110,
+                    },
+                    SerializedPeekDeviceInfo {
+                        opaque_user_id: encrypt(uuid_2, &secret_params),
+                        demux_id: 0x22222220,
+                    },
+                ],
+                creator: None,
+            };
+
+            let peek_info = peek_response.deobfuscate(&resolver);
+            assert_eq!(
+                peek_info
+                    .devices
+                    .iter()
+                    .filter_map(|device| device.user_id.as_ref())
+                    .collect::<Vec<_>>(),
+                vec![uuid_1.as_slice(), uuid_2.as_slice()]
+            );
+            // The second time around the resolver should use its cache.
+            assert_eq!(
+                i * 2,
+                resolver
+                    .cache_hits
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
         }
     }
 }

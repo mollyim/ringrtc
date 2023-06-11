@@ -5,8 +5,10 @@
 
 //! Android CallManager Interface.
 
+use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::panic;
+use std::sync::Arc;
 use std::time::Duration;
 
 use jni::objects::{JClass, JObject, JString};
@@ -20,13 +22,16 @@ use crate::android::jni_util::*;
 use crate::android::logging::init_logging;
 use crate::android::webrtc_peer_connection_factory::*;
 
-use crate::common::{CallId, CallMediaType, DeviceId, Result};
-use crate::core::bandwidth_mode::BandwidthMode;
+use crate::common::{CallId, CallMediaType, DataMode, DeviceId, Result};
 use crate::core::call_manager::CallManager;
 use crate::core::connection::Connection;
 use crate::core::util::{ptr_as_box, ptr_as_mut};
 use crate::core::{group_call, signaling};
 use crate::error::RingRtcError;
+use crate::lite::call_links::{
+    self, CallLinkMemberResolver, CallLinkRestrictions, CallLinkUpdateRequest,
+};
+use crate::lite::sfu::{self, Delegate};
 use crate::lite::{http, sfu::GroupMember};
 use crate::webrtc;
 use crate::webrtc::media;
@@ -182,7 +187,7 @@ pub fn proceed(
     call_manager: *mut AndroidCallManager,
     call_id: jlong,
     jni_call_context: JObject,
-    bandwidth_mode: BandwidthMode,
+    data_mode: DataMode,
     audio_levels_interval: Option<Duration>,
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
@@ -197,7 +202,7 @@ pub fn proceed(
     call_manager.proceed(
         call_id,
         android_call_context,
-        bandwidth_mode,
+        data_mode,
         audio_levels_interval,
     )
 }
@@ -547,16 +552,13 @@ pub fn set_video_enable(call_manager: *mut AndroidCallManager, enable: bool) -> 
     }
 }
 
-/// Request to update the bandwidth mode on the direct connection
-pub fn update_bandwidth_mode(
-    call_manager: *mut AndroidCallManager,
-    bandwidth_mode: BandwidthMode,
-) -> Result<()> {
-    info!("update_bandwidth_mode():");
+/// Request to update the data mode on the direct connection
+pub fn update_data_mode(call_manager: *mut AndroidCallManager, data_mode: DataMode) -> Result<()> {
+    info!("update_data_mode():");
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let mut active_connection = call_manager.active_connection()?;
-    active_connection.inject_update_bandwidth_mode(bandwidth_mode)
+    active_connection.inject_update_data_mode(data_mode)
 }
 
 /// CMI request to drop the active call
@@ -587,6 +589,140 @@ pub fn close(call_manager: *mut AndroidCallManager) -> Result<()> {
     // scope when this function exits.
     let mut call_manager = unsafe { ptr_as_box(call_manager)? };
     call_manager.close()
+}
+
+// Call Links
+
+pub fn read_call_link(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    sfu_url: JString,
+    auth_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+    request_id: jlong,
+) -> Result<()> {
+    info!("read_call_link():");
+
+    let sfu_url = env.get_string(sfu_url)?;
+    let auth_credential_presentation = env.convert_byte_array(auth_credential_presentation)?;
+    let root_key =
+        call_links::CallLinkRootKey::try_from(env.convert_byte_array(root_key)?.as_slice())?;
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    let platform = call_manager.platform()?.try_clone()?;
+    call_links::read_call_link(
+        call_manager.http_client(),
+        &Cow::from(&sfu_url),
+        root_key,
+        &auth_credential_presentation,
+        Box::new(move |result| {
+            platform.handle_call_link_result(request_id as u32, result);
+        }),
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_call_link(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    sfu_url: JString,
+    create_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+    admin_passkey: jbyteArray,
+    call_link_public_params: jbyteArray,
+    request_id: jlong,
+) -> Result<()> {
+    info!("create_call_link():");
+
+    let sfu_url = env.get_string(sfu_url)?;
+    let create_credential_presentation = env.convert_byte_array(create_credential_presentation)?;
+    let root_key =
+        call_links::CallLinkRootKey::try_from(env.convert_byte_array(root_key)?.as_slice())?;
+    let admin_passkey = env.convert_byte_array(admin_passkey)?;
+    let call_link_public_params = env.convert_byte_array(call_link_public_params)?;
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    let platform = call_manager.platform()?.try_clone()?;
+    call_links::create_call_link(
+        call_manager.http_client(),
+        &Cow::from(&sfu_url),
+        root_key,
+        &create_credential_presentation,
+        &admin_passkey,
+        &call_link_public_params,
+        Box::new(move |result| {
+            platform.handle_call_link_result(request_id as u32, result);
+        }),
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_call_link(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    sfu_url: JString,
+    auth_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+    admin_passkey: jbyteArray,
+    new_name: JString,
+    new_restrictions: jint,
+    new_revoked: jint,
+    request_id: jlong,
+) -> Result<()> {
+    info!("update_call_link():");
+
+    let sfu_url = env.get_string(sfu_url)?;
+    let auth_credential_presentation = env.convert_byte_array(auth_credential_presentation)?;
+    let root_key =
+        call_links::CallLinkRootKey::try_from(env.convert_byte_array(root_key)?.as_slice())?;
+    let admin_passkey = env.convert_byte_array(admin_passkey)?;
+    let new_name = if new_name.is_null() {
+        None
+    } else {
+        Some(env.get_string(new_name)?)
+    };
+    let encrypted_name = new_name.map(|name| {
+        let name = Cow::from(&name);
+        if name.is_empty() {
+            vec![]
+        } else {
+            root_key.encrypt(name.as_bytes(), rand::rngs::OsRng)
+        }
+    });
+    let new_restrictions = match new_restrictions {
+        0 => Some(CallLinkRestrictions::None),
+        1 => Some(CallLinkRestrictions::AdminApproval),
+        _ => None,
+    };
+    let new_revoked = match new_revoked {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    let platform = call_manager.platform()?.try_clone()?;
+    call_links::update_call_link(
+        call_manager.http_client(),
+        &Cow::from(&sfu_url),
+        root_key,
+        &auth_credential_presentation,
+        &CallLinkUpdateRequest {
+            admin_passkey: &admin_passkey,
+            encrypted_name: encrypted_name.as_deref(),
+            restrictions: new_restrictions,
+            revoked: new_revoked,
+        },
+        Box::new(move |result| {
+            platform.handle_call_link_result(request_id as u32, result);
+        }),
+    );
+
+    Ok(())
 }
 
 // Group Calls
@@ -635,6 +771,37 @@ pub fn peek_group_call(
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.peek_group_call(request_id, sfu_url, membership_proof, group_members);
+    Ok(())
+}
+
+pub fn peek_call_link_call(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    request_id: jlong,
+    sfu_url: JString,
+    auth_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+) -> Result<()> {
+    info!("peek_call_link_call():");
+
+    let request_id = request_id as u32;
+
+    let sfu_url = env.get_string(sfu_url)?;
+
+    let auth_credential_presentation = env.convert_byte_array(auth_credential_presentation)?;
+    let root_key =
+        call_links::CallLinkRootKey::try_from(env.convert_byte_array(root_key)?.as_slice())?;
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    let platform = call_manager.platform()?.try_clone()?;
+    sfu::peek(
+        call_manager.http_client(),
+        &Cow::from(&sfu_url),
+        Some(hex::encode(root_key.derive_room_id())).as_deref(),
+        call_links::auth_header_from_auth_credential(&auth_credential_presentation),
+        Arc::new(CallLinkMemberResolver::from(&root_key)),
+        Box::new(move |result| platform.handle_peek_result(request_id, result)),
+    );
     Ok(())
 }
 
@@ -694,6 +861,82 @@ pub fn create_group_call_client(
     call_manager.create_group_call_client(
         group_id,
         sfu_url,
+        hkdf_extra_info,
+        audio_levels_interval,
+        Some(peer_connection_factory),
+        outgoing_audio_track,
+        outgoing_video_track,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_call_link_call_client(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    sfu_url: JString,
+    auth_presentation: jbyteArray,
+    root_key: jbyteArray,
+    admin_passkey: jbyteArray,
+    hkdf_extra_info: jbyteArray,
+    audio_levels_interval_millis: jint,
+    native_pcf_borrowed_rc: jlong,
+    native_audio_track_borrowed_rc: jlong,
+    native_video_track_borrowed_rc: jlong,
+) -> Result<group_call::ClientId> {
+    info!("create_call_link_call_client():");
+
+    let sfu_url = env.get_string(sfu_url)?.into();
+    let auth_presentation = env.convert_byte_array(auth_presentation)?;
+    let root_key =
+        call_links::CallLinkRootKey::try_from(env.convert_byte_array(root_key)?.as_slice())?;
+    let admin_passkey = if admin_passkey.is_null() {
+        None
+    } else {
+        Some(env.convert_byte_array(admin_passkey)?)
+    };
+    let hkdf_extra_info = env.convert_byte_array(hkdf_extra_info)?;
+
+    let peer_connection_factory = unsafe {
+        PeerConnectionFactory::from_native_factory(webrtc::Arc::from_borrowed(
+            webrtc::ptr::BorrowedRc::from_ptr(
+                native_pcf_borrowed_rc as *const pcf::RffiPeerConnectionFactoryInterface,
+            ),
+        ))
+    };
+
+    // This is safe because the track given to us should still be alive.
+    let outgoing_audio_track = media::AudioTrack::new(
+        unsafe {
+            webrtc::Arc::from_borrowed(webrtc::ptr::BorrowedRc::from_ptr(
+                native_audio_track_borrowed_rc as *const media::RffiAudioTrack,
+            ))
+        },
+        Some(peer_connection_factory.rffi().clone()),
+    );
+
+    // This is safe because the track given to us should still be alive.
+    let outgoing_video_track = media::VideoTrack::new(
+        unsafe {
+            webrtc::Arc::from_borrowed(webrtc::ptr::BorrowedRc::from_ptr(
+                native_video_track_borrowed_rc as *const media::RffiVideoTrack,
+            ))
+        },
+        Some(peer_connection_factory.rffi().clone()),
+    );
+
+    let audio_levels_interval = if audio_levels_interval_millis <= 0 {
+        None
+    } else {
+        Some(Duration::from_millis(audio_levels_interval_millis as u64))
+    };
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.create_call_link_call_client(
+        sfu_url,
+        &auth_presentation,
+        root_key,
+        admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
         Some(peer_connection_factory),
@@ -804,15 +1047,15 @@ pub fn resend_media_keys(
     Ok(())
 }
 
-pub fn set_bandwidth_mode(
+pub fn set_data_mode(
     call_manager: *mut AndroidCallManager,
     client_id: group_call::ClientId,
-    bandwidth_mode: BandwidthMode,
+    data_mode: DataMode,
 ) -> Result<()> {
-    info!("set_bandwidth_mode(): id: {}", client_id);
+    info!("set_data_mode(): id: {}", client_id);
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.set_bandwidth_mode(client_id, bandwidth_mode);
+    call_manager.set_data_mode(client_id, data_mode);
     Ok(())
 }
 

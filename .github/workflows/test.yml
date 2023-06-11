@@ -46,8 +46,11 @@ jobs:
     - name: Clippy (Electron)
       run: cargo clippy --features electron -- -D warnings
       working-directory: src/rust
-    - name: Clippy (gctc)
-      run: cargo clippy --bin gctc --features native,http -- -D warnings
+    - name: Clippy (group_call)
+      run: cargo clippy --bin group_call --features native,http -- -D warnings
+      working-directory: src/rust
+    - name: Clippy (call_link)
+      run: cargo clippy --bin call_link --features sim,http,rand_chacha -- -D warnings
       working-directory: src/rust
     - name: Install for node
       run: yarn install --frozen-lockfile

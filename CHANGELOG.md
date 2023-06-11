@@ -1,5 +1,52 @@
 # Changelog
 
+## v2.28.0
+
+- Call Links: Implement Peek and Join support
+
+- Refactor: BandwidthMode to DataMode
+
+- Android: Fix exception check when throwing an error up to Java
+
+- Improvements to make tests more reliable
+
+## v2.27.0
+
+- Update to WebRTC 5615 (m112)
+
+- Implement Call Link Create/Read/Update APIs
+
+- Set audio packet time to 60ms
+
+- Apply audio encoder configuration in group calls
+
+- ios: Fix video capture size selection
+
+- Refactor HTTP JSON parsing so it's more reusable
+
+- Bump Rust toolchain to nightly-2023-03-17
+
+- Build improvements and dependency updates
+
+## v2.26.4
+
+- Desktop: Stop duplicate MediaStreamTracks
+
+## v2.26.3
+
+- Remove h264 video codec support
+  - Reference signalapp/webrtc@5481c
+
+- Disable ANY address ports by default
+
+- Build improvements
+
+## v2.26.2
+
+- Node: Require expected calling message fields
+
+- Log notebook improvements
+
 ## v2.26.1
 
 - Revert "Android: Increase max jitter buffer size" (from v2.25.0)

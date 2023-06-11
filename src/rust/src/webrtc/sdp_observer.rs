@@ -9,8 +9,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::common::Result;
-use crate::core::bandwidth_mode::BandwidthMode;
+use crate::common::{DataMode, Result};
 use crate::core::util::FutureResult;
 use crate::error::RingRtcError;
 use crate::protobuf;
@@ -98,15 +97,12 @@ pub struct SessionDescription {
 pub enum RffiVideoCodecType {
     Vp8 = 8,
     Vp9 = 9,
-    H264ConstrainedHigh = 46,
-    H264ConstrainedBaseline = 40,
 }
 
 /// cbindgen:field-names=[type, level]
 #[repr(C)]
 pub struct RffiVideoCodec {
     r#type: RffiVideoCodecType,
-    level: u32,
 }
 
 #[repr(C)]
@@ -195,7 +191,7 @@ impl SessionDescription {
     pub fn to_v4(
         &self,
         public_key: Vec<u8>,
-        bandwidth_mode: BandwidthMode,
+        data_mode: DataMode,
     ) -> Result<protobuf::signaling::ConnectionParametersV4> {
         let rffi_v4_ptr = webrtc::ptr::Unique::from(unsafe {
             sdp::Rust_sessionDescriptionToV4(self.rffi.borrow())
@@ -209,31 +205,23 @@ impl SessionDescription {
         let ice_ufrag = from_cstr(rffi_v4.ice_ufrag.as_ptr());
         let ice_pwd = from_cstr(rffi_v4.ice_pwd.as_ptr());
         let receive_video_codecs: Vec<protobuf::signaling::VideoCodec> = unsafe {
-            std::slice::from_raw_parts(
-                rffi_v4.receive_video_codecs.as_ptr(),
-                rffi_v4.receive_video_codecs_size,
-            )
+            if rffi_v4.receive_video_codecs.is_null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts(
+                    rffi_v4.receive_video_codecs.as_ptr(),
+                    rffi_v4.receive_video_codecs_size,
+                )
+            }
         }
         .iter()
         .map(|rffi_codec| {
             let r#type = match rffi_codec.r#type {
                 RffiVideoCodecType::Vp8 => protobuf::signaling::VideoCodecType::Vp8,
                 RffiVideoCodecType::Vp9 => protobuf::signaling::VideoCodecType::Vp9,
-                RffiVideoCodecType::H264ConstrainedHigh => {
-                    protobuf::signaling::VideoCodecType::H264ConstrainedHigh
-                }
-                RffiVideoCodecType::H264ConstrainedBaseline => {
-                    protobuf::signaling::VideoCodecType::H264ConstrainedBaseline
-                }
-            };
-            let level = if rffi_codec.level > 0 {
-                Some(rffi_codec.level)
-            } else {
-                None
             };
             protobuf::signaling::VideoCodec {
                 r#type: Some(r#type as i32),
-                level,
             }
         })
         .collect();
@@ -243,7 +231,7 @@ impl SessionDescription {
             ice_ufrag: Some(ice_ufrag),
             ice_pwd: Some(ice_pwd),
             receive_video_codecs,
-            max_bitrate_bps: Some(bandwidth_mode.max_bitrate().as_bps()),
+            max_bitrate_bps: Some(data_mode.max_bitrate().as_bps()),
         })
     }
 
@@ -262,28 +250,17 @@ impl SessionDescription {
         for codec in &v4.receive_video_codecs {
             if let protobuf::signaling::VideoCodec {
                 r#type: Some(r#type),
-                level,
             } = codec
             {
                 const VP8: i32 = protobuf::signaling::VideoCodecType::Vp8 as i32;
                 const VP9: i32 = protobuf::signaling::VideoCodecType::Vp9 as i32;
-                const H264_CHP: i32 =
-                    protobuf::signaling::VideoCodecType::H264ConstrainedHigh as i32;
-                const H264_CBP: i32 =
-                    protobuf::signaling::VideoCodecType::H264ConstrainedBaseline as i32;
                 let rffi_type = match *r#type {
                     VP8 => Some(RffiVideoCodecType::Vp8),
                     VP9 => Some(RffiVideoCodecType::Vp9),
-                    H264_CHP => Some(RffiVideoCodecType::H264ConstrainedHigh),
-                    H264_CBP => Some(RffiVideoCodecType::H264ConstrainedBaseline),
                     _ => None,
                 };
-                let rffi_level = level.unwrap_or(0);
                 if let Some(rffi_type) = rffi_type {
-                    rffi_video_codecs.push(RffiVideoCodec {
-                        r#type: rffi_type,
-                        level: rffi_level,
-                    });
+                    rffi_video_codecs.push(RffiVideoCodec { r#type: rffi_type });
                 }
             }
         }
@@ -400,7 +377,7 @@ impl CreateSessionDescriptionObserver {
     /// This call signals the condition variable.
     fn on_create_success(&self, session_description: webrtc::ptr::Unique<RffiSessionDescription>) {
         info!("on_create_success()");
-        let &(ref mtx, ref cvar) = &*self.condition;
+        let (mtx, cvar) = &*self.condition;
         if let Ok(mut guard) = mtx.lock() {
             guard.1 = Ok(session_description);
             guard.0 = true;
@@ -418,7 +395,7 @@ impl CreateSessionDescriptionObserver {
             "on_create_failure(). error msg: {}, type: {}",
             err_message, err_type
         );
-        let &(ref mtx, ref cvar) = &*self.condition;
+        let (mtx, cvar) = &*self.condition;
         if let Ok(mut guard) = mtx.lock() {
             guard.1 =
                 Err(RingRtcError::CreateSessionDescriptionObserver(err_message, err_type).into());
@@ -434,7 +411,7 @@ impl CreateSessionDescriptionObserver {
     /// This can only be called once to get a valid value.  After that, it will return a null
     /// SessionDescription.  This is because the SessionDescription can't be cloned.
     pub fn get_result(&self) -> Result<SessionDescription> {
-        let &(ref mtx, ref cvar) = &*self.condition;
+        let (mtx, cvar) = &*self.condition;
         if let Ok(mut guard) = mtx.lock() {
             while !guard.0 {
                 guard = cvar.wait(guard).map_err(|_| {
@@ -586,7 +563,7 @@ impl SetSessionDescriptionObserver {
     /// This call signals the condition variable.
     fn on_set_success(&self) {
         info!("on_set_success()");
-        let &(ref mtx, ref cvar) = &*self.condition;
+        let (mtx, cvar) = &*self.condition;
         if let Ok(mut guard) = mtx.lock() {
             guard.1 = Ok(());
             guard.0 = true;
@@ -604,7 +581,7 @@ impl SetSessionDescriptionObserver {
             "on_set_failure(). error msg: {}, type: {}",
             err_message, err_type
         );
-        let &(ref mtx, ref cvar) = &*self.condition;
+        let (mtx, cvar) = &*self.condition;
         if let Ok(mut guard) = mtx.lock() {
             guard.1 =
                 Err(RingRtcError::SetSessionDescriptionObserver(err_message, err_type).into());
@@ -618,7 +595,7 @@ impl SetSessionDescriptionObserver {
     ///
     /// This call blocks on the condition variable.
     pub fn get_result(&self) -> Result<()> {
-        let &(ref mtx, ref cvar) = &*self.condition;
+        let (mtx, cvar) = &*self.condition;
         if let Ok(mut guard) = mtx.lock() {
             while !guard.0 {
                 guard = cvar.wait(guard).map_err(|_| {

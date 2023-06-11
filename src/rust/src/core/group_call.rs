@@ -27,17 +27,15 @@ use crate::{
     common::{
         actor::{Actor, Stopper},
         units::DataRate,
-        Result,
+        DataMode, Result,
     },
-    core::{
-        bandwidth_mode::BandwidthMode, call_mutex::CallMutex, crypto as frame_crypto, signaling,
-    },
+    core::{call_mutex::CallMutex, crypto as frame_crypto, signaling},
     error::RingRtcError,
     lite::{
         http, sfu,
         sfu::{
-            DemuxId, GroupMember, MembershipProof, OpaqueUserIdMapping, PeekDeviceInfo, PeekInfo,
-            PeekResult, PeekResultCallback, UserId,
+            DemuxId, GroupMember, MembershipProof, PeekDeviceInfo, PeekInfo, PeekResult,
+            PeekResultCallback, UserId,
         },
     },
     protobuf,
@@ -81,7 +79,9 @@ impl RingId {
         // Sad path: arbitrary strings get a truncated hash as their ring ID.
         // We have no current plans to change era IDs from being 16 hex digits,
         // but nothing enforces this today, and we may want to change them in the future.
-        let truncated_hash: [u8; 8] = Sha256::digest(era_id).as_slice()[..8].try_into().unwrap();
+        let truncated_hash: [u8; 8] = Sha256::digest(era_id.as_bytes()).as_slice()[..8]
+            .try_into()
+            .unwrap();
         Self(i64::from_le_bytes(truncated_hash))
     }
 }
@@ -444,12 +444,14 @@ pub struct Joined {
 
 /// Communicates with the SFU using HTTP.
 pub struct HttpSfuClient {
-    url: String,
+    sfu_url: String,
+    room_id_for_url: Option<String>,
+    admin_passkey: Option<Vec<u8>>,
     // For use post-DHE
     hkdf_extra_info: Vec<u8>,
     http_client: Box<dyn http::Client + Send>,
     auth_header: Option<String>,
-    opaque_user_id_mappings: Vec<OpaqueUserIdMapping>,
+    member_resolver: Arc<dyn sfu::MemberResolver + Send + Sync>,
     deferred_join: Option<(String, [u8; 32], Client)>,
 }
 
@@ -457,16 +459,31 @@ impl HttpSfuClient {
     pub fn new(
         http_client: Box<dyn http::Client + Send>,
         url: String,
+        room_id_for_url: Option<&[u8]>,
+        admin_passkey: Option<Vec<u8>>,
         hkdf_extra_info: Vec<u8>,
     ) -> Self {
         Self {
-            url,
+            sfu_url: url,
+            room_id_for_url: room_id_for_url.map(hex::encode),
+            admin_passkey,
             hkdf_extra_info,
             http_client,
             auth_header: None,
-            opaque_user_id_mappings: vec![],
+            member_resolver: Arc::new(sfu::MemberMap::default()),
             deferred_join: None,
         }
+    }
+
+    pub fn set_auth_header(&mut self, auth_header: String) {
+        self.auth_header = Some(auth_header)
+    }
+
+    pub fn set_member_resolver(
+        &mut self,
+        member_resolver: Arc<dyn sfu::MemberResolver + Send + Sync>,
+    ) {
+        self.member_resolver = member_resolver;
     }
 
     fn join_with_header(
@@ -479,12 +496,14 @@ impl HttpSfuClient {
         let hkdf_extra_info = self.hkdf_extra_info.clone();
         sfu::join(
             self.http_client.as_ref(),
-            &self.url,
+            &self.sfu_url,
+            self.room_id_for_url.as_deref(),
             auth_header,
+            self.admin_passkey.as_deref(),
             ice_ufrag,
             dhe_pub_key,
             &self.hkdf_extra_info,
-            self.opaque_user_id_mappings.clone(),
+            self.member_resolver.clone(),
             Box::new(move |join_response| {
                 let join_result: Result<Joined> = match join_response {
                     Ok(join_response) => Ok(Joined {
@@ -499,10 +518,10 @@ impl HttpSfuClient {
                         era_id: join_response.era_id,
                         hkdf_extra_info,
                     }),
-                    Err(http_status) if http_status == sfu::ResponseCode::RequestFailed => {
+                    Err(http_status) if http_status == http::ResponseStatus::REQUEST_FAILED => {
                         Err(RingRtcError::SfuClientRequestFailed.into())
                     }
-                    Err(http_status) if http_status == sfu::ResponseCode::GroupCallFull => {
+                    Err(http_status) if http_status == http::ResponseStatus::GROUP_CALL_FULL => {
                         Err(RingRtcError::GroupCallFull.into())
                     }
                     Err(http_status) => {
@@ -542,23 +561,21 @@ impl SfuClient for HttpSfuClient {
         match self.auth_header.clone() {
             Some(auth_header) => sfu::peek(
                 self.http_client.as_ref(),
-                &self.url,
+                &self.sfu_url,
+                self.room_id_for_url.as_deref(),
                 auth_header,
-                self.opaque_user_id_mappings.clone(),
+                self.member_resolver.clone(),
                 result_callback,
             ),
             None => {
-                result_callback(Err(sfu::ResponseCode::InvalidClientAuth.into()));
+                result_callback(Err(http::ResponseStatus::INVALID_CLIENT_AUTH));
             }
         }
     }
 
     fn set_group_members(&mut self, members: Vec<GroupMember>) {
-        self.opaque_user_id_mappings = sfu::opaque_user_id_mappings_from_group_members(&members);
-        info!(
-            "SfuClient set_group_members: {} members",
-            self.opaque_user_id_mappings.len()
-        );
+        info!("SfuClient set_group_members: {} members", members.len());
+        self.set_member_resolver(Arc::new(sfu::MemberMap::new(&members)));
     }
 }
 
@@ -803,11 +820,18 @@ enum OutgoingRingState {
     NotPermittedToRing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupCallKind {
+    SignalGroup,
+    CallLink,
+}
+
 /// The state inside the Actor
 struct State {
     // Things passed in that never change
     client_id: ClientId,
     group_id: GroupId,
+    kind: GroupCallKind,
     sfu_client: Box<dyn SfuClient>,
     observer: Box<dyn Observer>,
 
@@ -894,6 +918,7 @@ struct State {
     // If set, will always overide the send_rates.  Intended for testing.
     send_rates_override: Option<SendRates>,
     max_receive_rate: Option<DataRate>,
+    data_mode: DataMode,
     // Demux IDs where video is being forward from, mapped to the server allocated height.
     forwarding_videos: HashMap<DemuxId, u16>,
 
@@ -948,6 +973,7 @@ impl Client {
     pub fn start(
         group_id: GroupId,
         client_id: ClientId,
+        kind: GroupCallKind,
         sfu_client: Box<dyn SfuClient + Send>,
         observer: Box<dyn Observer + Send>,
         busy: Arc<CallMutex<bool>>,
@@ -1020,6 +1046,7 @@ impl Client {
                 Ok(State {
                     client_id,
                     group_id,
+                    kind,
                     sfu_client,
                     observer,
                     busy,
@@ -1032,8 +1059,12 @@ impl Client {
                     dhe_state: DheState::default(),
                     remote_devices: Default::default(),
 
-                    remote_devices_request_state:
-                        RemoteDevicesRequestState::WaitingForMembershipProof,
+                    remote_devices_request_state: match kind {
+                        GroupCallKind::SignalGroup => {
+                            RemoteDevicesRequestState::WaitingForMembershipProof
+                        }
+                        GroupCallKind::CallLink => RemoteDevicesRequestState::NeverRequested,
+                    },
                     last_peek_info: None,
 
                     known_members: HashSet::new(),
@@ -1069,8 +1100,9 @@ impl Client {
 
                     send_rates: SendRates::default(),
                     send_rates_override: None,
-                    // If the client never calls set_bandwidth_mode, use the normal max receive rate.
+                    // If the client never calls set_data_mode, use the normal max receive rate.
                     max_receive_rate: Some(NORMAL_MAX_RECEIVE_RATE),
+                    data_mode: DataMode::Normal,
                     forwarding_videos: HashMap::default(),
 
                     outgoing_ring_state: OutgoingRingState::Unknown,
@@ -1088,6 +1120,7 @@ impl Client {
             state
                 .peer_connection_observer_impl
                 .initialize(client_clone_to_init_peer_connection_observer_impl);
+            Self::request_remote_devices_as_soon_as_possible(state);
         });
         Ok(client)
     }
@@ -1170,11 +1203,15 @@ impl Client {
             }
         }
 
-        if let Some(next_membership_proof_request_time) = state.next_membership_proof_request_time {
-            if now >= next_membership_proof_request_time {
-                state.observer.request_membership_proof(state.client_id);
-                state.next_membership_proof_request_time =
-                    Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+        if state.kind == GroupCallKind::SignalGroup {
+            if let Some(next_membership_proof_request_time) =
+                state.next_membership_proof_request_time
+            {
+                if now >= next_membership_proof_request_time {
+                    state.observer.request_membership_proof(state.client_id);
+                    state.next_membership_proof_request_time =
+                        Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+                }
             }
         }
 
@@ -1282,12 +1319,14 @@ impl Client {
                     state.next_audio_levels_time = Some(now);
 
                     // Request group membership refresh as we start polling the participant list.
-                    state.observer.request_membership_proof(state.client_id);
-                    state.next_membership_proof_request_time =
-                        Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+                    if state.kind == GroupCallKind::SignalGroup {
+                        state.observer.request_membership_proof(state.client_id);
+                        state.next_membership_proof_request_time =
+                            Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
 
-                    // Request the list of all group members
-                    state.observer.request_group_members(state.client_id);
+                        // Request the list of all group members
+                        state.observer.request_group_members(state.client_id);
+                    }
 
                     Self::tick(state);
                 }
@@ -1373,10 +1412,12 @@ impl Client {
                         Self::set_join_state_and_notify_observer(state, JoinState::Joining);
                         Self::accept_ring_if_needed(state, ring_id);
 
-                        // Request group membership refresh before joining.
-                        // The Join request will then proceed once SfuClient has the token.
-                        state.observer.request_membership_proof(state.client_id);
-                        state.next_membership_proof_request_time = Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+                        if state.kind == GroupCallKind::SignalGroup {
+                            // Request group membership refresh before joining.
+                            // The Join request will then proceed once SfuClient has the token.
+                            state.observer.request_membership_proof(state.client_id);
+                            state.next_membership_proof_request_time = Some(Instant::now() + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
+                        }
 
                         let client_secret = EphemeralSecret::new(OsRng);
                         let client_pub_key = PublicKey::from(&client_secret);
@@ -1684,22 +1725,34 @@ impl Client {
         });
     }
 
-    pub fn set_bandwidth_mode(&self, bandwidth_mode: BandwidthMode) {
+    pub fn set_data_mode(&self, data_mode: DataMode) {
         debug!(
-            "group_call::Client(outer)::set_bandwidth_mode(client_id: {}, bandwidth_mode: {:?})",
-            self.client_id, bandwidth_mode
+            "group_call::Client(outer)::set_data_mode(client_id: {}, data_mode: {:?})",
+            self.client_id, data_mode
         );
         self.actor.send(move |state| {
             debug!(
-                "group_call::Client(inner)::set_bandwidth_mode(client_id: {}), bandwidth_mode: {:?}",
-                state.client_id,
-                bandwidth_mode,
+                "group_call::Client(inner)::set_data_mode(client_id: {}), data_mode: {:?}",
+                state.client_id, data_mode,
             );
 
-            state.max_receive_rate = Some(match bandwidth_mode {
-                BandwidthMode::Low => LOW_MAX_RECEIVE_RATE,
-                BandwidthMode::Normal => NORMAL_MAX_RECEIVE_RATE,
+            state.max_receive_rate = Some(match data_mode {
+                DataMode::Low => LOW_MAX_RECEIVE_RATE,
+                DataMode::Normal => NORMAL_MAX_RECEIVE_RATE,
             });
+
+            state.data_mode = data_mode;
+            match state.join_state {
+                JoinState::NotJoined(_) | JoinState::Joining => {
+                    // The audio encoders will be configured with data_mode upon joining.
+                }
+                JoinState::Joined(_) => {
+                    state
+                        .peer_connection
+                        .configure_audio_encoders(&data_mode.audio_encoder_config());
+                }
+            };
+
             if !state.on_demand_video_request_sent_since_last_heartbeat {
                 Self::send_video_requests_to_sfu(state);
                 state.on_demand_video_request_sent_since_last_heartbeat = true;
@@ -2016,6 +2069,10 @@ impl Client {
                         // the eraId.
                         Self::request_remote_devices_as_soon_as_possible(state);
                         state.next_stats_time = Some(Instant::now() + STATS_INITIAL_OFFSET);
+
+                        state
+                            .peer_connection
+                            .configure_audio_encoders(&state.data_mode.audio_encoder_config());
                     }
                     JoinState::Joined(_) => {
                         warn!("The SFU completed joining more than once.");
@@ -2554,7 +2611,9 @@ impl Client {
                 "Storing media receive key from {} because we don't know who they are yet.",
                 demux_id
             );
-            if state.pending_media_receive_keys.is_empty() {
+            if state.pending_media_receive_keys.is_empty()
+                && state.kind == GroupCallKind::SignalGroup
+            {
                 // Proactively ask for the group members again.
                 // Since pending_media_receive_keys is re-processed every time we get a device
                 // update, this will effectively be requested once per peek as long as there's an
@@ -4043,6 +4102,7 @@ mod tests {
             let client = Client::start(
                 b"fake group ID".to_vec(),
                 demux_id,
+                GroupCallKind::SignalGroup,
                 Box::new(sfu_client.clone()),
                 Box::new(observer.clone()),
                 fake_busy,
@@ -5052,7 +5112,7 @@ mod tests {
         let elapsed = Instant::now() - before;
         assert!(elapsed > Duration::from_millis(1000));
 
-        client1.client.set_bandwidth_mode(BandwidthMode::Low);
+        client1.client.set_data_mode(DataMode::Low);
         let (header, payload) = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("Get RTP packet to SFU");
@@ -5082,7 +5142,7 @@ mod tests {
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
 
-        client1.client.set_bandwidth_mode(BandwidthMode::Normal);
+        client1.client.set_data_mode(DataMode::Normal);
         let (header, payload) = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("Get RTP packet to SFU");

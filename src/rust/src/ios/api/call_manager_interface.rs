@@ -15,10 +15,10 @@ use libc::size_t;
 use crate::ios::call_manager;
 use crate::ios::call_manager::IosCallManager;
 
-use crate::common::{CallMediaType, DeviceId};
-use crate::core::bandwidth_mode::BandwidthMode;
+use crate::common::{CallMediaType, DataMode, DeviceId};
 use crate::core::group_call;
 use crate::core::signaling;
+use crate::lite::call_links::CallLinkRootKey;
 use crate::lite::{http, sfu, sfu::DemuxId};
 use crate::webrtc::peer_connection::AudioLevel;
 use crate::webrtc::{self, media, peer_connection_factory as pcf};
@@ -561,7 +561,7 @@ pub extern "C" fn ringrtcProceed(
     callManager: *mut c_void,
     callId: u64,
     appCallContext: AppCallContext,
-    bandwidthMode: i32,
+    dataMode: i32,
     audioLevelsIntervalMillis: u64,
 ) -> *mut c_void {
     let audio_levels_interval = if audioLevelsIntervalMillis == 0 {
@@ -573,7 +573,7 @@ pub extern "C" fn ringrtcProceed(
         callManager as *mut IosCallManager,
         callId,
         appCallContext,
-        BandwidthMode::from_i32(bandwidthMode),
+        DataMode::from_i32(dataMode),
         audio_levels_interval,
     ) {
         Ok(_v) => {
@@ -903,13 +903,13 @@ pub extern "C" fn ringrtcSetVideoEnable(callManager: *mut c_void, enable: bool) 
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "C" fn ringrtcUpdateBandwidthMode(callManager: *mut c_void, bandwidthMode: i32) {
-    let result = call_manager::update_bandwidth_mode(
+pub extern "C" fn ringrtcUpdateDataMode(callManager: *mut c_void, dataMode: i32) {
+    let result = call_manager::update_data_mode(
         callManager as *mut IosCallManager,
-        BandwidthMode::from_i32(bandwidthMode),
+        DataMode::from_i32(dataMode),
     );
     if result.is_err() {
-        error!("ringrtcUpdateBandwidthMode(): {:?}", result.err());
+        error!("ringrtcUpdateDataMode(): {:?}", result.err());
     }
 }
 
@@ -1011,6 +1011,81 @@ pub extern "C" fn ringrtcCreateGroupCallClient(
     ) {
         Ok(client_id) => client_id,
         Err(_e) => 0,
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn ringrtcCreateCallLinkCallClient(
+    callManager: *mut c_void,
+    sfuUrl: AppByteSlice,
+    authCredentialPresentation: AppByteSlice,
+    rootKeyBytes: AppByteSlice,
+    adminPasskey: AppByteSlice,
+    hkdfExtraInfo: AppByteSlice,
+    audioLevelsIntervalMillis: u64,
+    nativePeerConnectionFactoryOwnedRc: *const c_void,
+    nativeAudioTrackOwnedRc: *const c_void,
+    nativeVideoTrackOwnedRc: *const c_void,
+) -> group_call::ClientId {
+    info!("ringrtcCreateGroupCallClient():");
+
+    // Note that failing these checks will result in the native objects being leaked.
+    // So...don't do that!
+
+    let sfu_url = string_from_app_slice(&sfuUrl);
+    if sfu_url.is_none() {
+        error!("Invalid sfuUrl");
+        return group_call::INVALID_CLIENT_ID;
+    }
+    let auth_presentation = byte_vec_from_app_slice(&authCredentialPresentation);
+    if auth_presentation.is_none() {
+        error!("Invalid authCredentialPresentation");
+        return group_call::INVALID_CLIENT_ID;
+    }
+    let root_key = rootKeyBytes
+        .as_slice()
+        .and_then(|bytes| CallLinkRootKey::try_from(bytes).ok());
+    if root_key.is_none() {
+        error!("Invalid rootKey");
+        return group_call::INVALID_CLIENT_ID;
+    }
+    let admin_passkey = byte_vec_from_app_slice(&adminPasskey);
+    let hkdf_extra_info = byte_vec_from_app_slice(&hkdfExtraInfo);
+    if hkdf_extra_info.is_none() {
+        error!("Invalid HKDF extra info");
+        return group_call::INVALID_CLIENT_ID;
+    }
+
+    let audio_levels_interval = if audioLevelsIntervalMillis == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(audioLevelsIntervalMillis))
+    };
+
+    match call_manager::create_call_link_call_client(
+        callManager as *mut IosCallManager,
+        sfu_url.unwrap(),
+        auth_presentation.unwrap(),
+        root_key.unwrap(),
+        admin_passkey,
+        hkdf_extra_info.unwrap(),
+        audio_levels_interval,
+        unsafe {
+            webrtc::ptr::OwnedRc::from_ptr(
+                nativePeerConnectionFactoryOwnedRc
+                    as *const pcf::RffiPeerConnectionFactoryInterface,
+            )
+        },
+        unsafe {
+            webrtc::ptr::OwnedRc::from_ptr(nativeAudioTrackOwnedRc as *const media::RffiAudioTrack)
+        },
+        unsafe {
+            webrtc::ptr::OwnedRc::from_ptr(nativeVideoTrackOwnedRc as *const media::RffiVideoTrack)
+        },
+    ) {
+        Ok(client_id) => client_id,
+        Err(_e) => group_call::INVALID_CLIENT_ID,
     }
 }
 
@@ -1134,17 +1209,17 @@ pub extern "C" fn ringrtcResendMediaKeys(callManager: *mut c_void, clientId: gro
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "C" fn ringrtcSetBandwidthMode(
+pub extern "C" fn ringrtcSetDataMode(
     callManager: *mut c_void,
     clientId: group_call::ClientId,
-    bandwidthMode: i32,
+    dataMode: i32,
 ) {
-    info!("ringrtcSetBandwidthMode():");
+    info!("ringrtcSetDataMode():");
 
-    let result = call_manager::set_bandwidth_mode(
+    let result = call_manager::set_data_mode(
         callManager as *mut IosCallManager,
         clientId,
-        BandwidthMode::from_i32(bandwidthMode),
+        DataMode::from_i32(dataMode),
     );
     if result.is_err() {
         error!("{:?}", result.err());

@@ -5,14 +5,14 @@
 
 /* eslint-disable max-classes-per-file */
 
-import * as os from 'os';
 import * as process from 'process';
 import { GumVideoCaptureOptions, VideoPixelFormatEnum } from './VideoSupport';
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires, import/no-dynamic-require
-const Native = require(`../../build/${os.platform()}/libringrtc-${
-  process.arch
-}.node`);
+import {
+  CallLinkState,
+  CallLinkRestrictions,
+  CallLinkRootKey,
+} from './CallLinks';
+import Native from './Native';
 
 export const callIdFromEra: (era: string) => CallId = Native.callIdFromEra;
 
@@ -43,9 +43,17 @@ class NativeCallManager {
   }
 
   private createCallEndpoint(config: Config) {
+    const fieldTrials = Object.assign(
+      {
+        'RingRTC-AnyAddressPortsKillSwitch': 'Enabled',
+        'WebRTC-Audio-OpusSetSignalVoiceWithDtx': 'Enabled',
+      },
+      config.field_trials
+    );
+
     /* eslint-disable prefer-template */
     const fieldTrialsString =
-      Object.entries(config.field_trials || {})
+      Object.entries(fieldTrials)
         .map(([k, v]) => `${k}/${v}`)
         .join('/') + '/';
     /* eslint-enable prefer-template */
@@ -90,8 +98,7 @@ class NativeCallManager {
   Native.cm_signalingMessageSent;
 (NativeCallManager.prototype as any).signalingMessageSendFailed =
   Native.cm_signalingMessageSendFailed;
-(NativeCallManager.prototype as any).updateBandwidthMode =
-  Native.cm_updateBandwidthMode;
+(NativeCallManager.prototype as any).updateDataMode = Native.cm_updateDataMode;
 (NativeCallManager.prototype as any).receivedOffer = Native.cm_receivedOffer;
 (NativeCallManager.prototype as any).receivedAnswer = Native.cm_receivedAnswer;
 (NativeCallManager.prototype as any).receivedIceCandidates =
@@ -117,6 +124,8 @@ class NativeCallManager {
   Native.cm_receiveGroupCallVideoFrame;
 (NativeCallManager.prototype as any).createGroupCallClient =
   Native.cm_createGroupCallClient;
+(NativeCallManager.prototype as any).createCallLinkCallClient =
+  Native.cm_createCallLinkCallClient;
 (NativeCallManager.prototype as any).deleteGroupCallClient =
   Native.cm_deleteGroupCallClient;
 (NativeCallManager.prototype as any).connect = Native.cm_connect;
@@ -133,14 +142,18 @@ class NativeCallManager {
 (NativeCallManager.prototype as any).setPresenting = Native.cm_setPresenting;
 (NativeCallManager.prototype as any).resendMediaKeys =
   Native.cm_resendMediaKeys;
-(NativeCallManager.prototype as any).setBandwidthMode =
-  Native.cm_setBandwidthMode;
+(NativeCallManager.prototype as any).setDataMode = Native.cm_setDataMode;
 (NativeCallManager.prototype as any).requestVideo = Native.cm_requestVideo;
 (NativeCallManager.prototype as any).setGroupMembers =
   Native.cm_setGroupMembers;
 (NativeCallManager.prototype as any).setMembershipProof =
   Native.cm_setMembershipProof;
+(NativeCallManager.prototype as any).readCallLink = Native.cm_readCallLink;
+(NativeCallManager.prototype as any).createCallLink = Native.cm_createCallLink;
+(NativeCallManager.prototype as any).updateCallLink = Native.cm_updateCallLink;
 (NativeCallManager.prototype as any).peekGroupCall = Native.cm_peekGroupCall;
+(NativeCallManager.prototype as any).peekCallLinkCall =
+  Native.cm_peekCallLinkCall;
 (NativeCallManager.prototype as any).getAudioInputs = Native.cm_getAudioInputs;
 (NativeCallManager.prototype as any).setAudioInput = Native.cm_setAudioInput;
 (NativeCallManager.prototype as any).getAudioOutputs =
@@ -151,27 +164,22 @@ class NativeCallManager {
 type GroupId = Buffer;
 type GroupCallUserId = Buffer;
 
-export class PeekDeviceInfo {
+export interface PeekDeviceInfo {
   demuxId: number;
   userId?: GroupCallUserId;
-
-  constructor(demuxId: number, userId: GroupCallUserId | undefined) {
-    this.demuxId = demuxId;
-    this.userId = userId;
-  }
 }
 
-export class PeekInfo {
+export interface PeekInfo {
   devices: Array<PeekDeviceInfo>;
   creator?: GroupCallUserId;
   eraId?: string;
   maxDevices?: number;
   deviceCount: number;
+}
 
-  constructor() {
-    this.devices = [];
-    this.deviceCount = 0;
-  }
+export enum PeekStatusCodes {
+  EXPIRED_CALL_LINK = 703,
+  INVALID_CALL_LINK = 704,
 }
 
 // In sync with WebRTC's PeerConnection.AdapterType.
@@ -261,11 +269,16 @@ class CallInfo {
   }
 }
 
+export type HttpResult<T> =
+  | { success: true; value: T }
+  | { success: false; errorStatusCode: number };
+
 export class RingRTCType {
   private readonly callManager: CallManager;
   private _call: Call | null;
   private _groupCallByClientId: Map<GroupCallClientId, GroupCall>;
-  private _peekRequests: Requests<PeekInfo>;
+  private _peekRequests: Requests<HttpResult<PeekInfo>>;
+  private _callLinkRequests: Requests<HttpResult<CallLinkState>>;
 
   // A map to hold call information not maintained in RingRTC.
   private _callInfoByCallId: Map<string, CallInfo>;
@@ -342,7 +355,8 @@ export class RingRTCType {
     this.callManager = new NativeCallManager(this) as unknown as CallManager;
     this._call = null;
     this._groupCallByClientId = new Map();
-    this._peekRequests = new Requests<PeekInfo>();
+    this._peekRequests = new Requests();
+    this._callLinkRequests = new Requests();
     this._callInfoByCallId = new Map();
   }
 
@@ -503,7 +517,7 @@ export class RingRTCType {
         settings.iceServer.password || '',
         settings.iceServer.urls,
         settings.hideIp,
-        settings.bandwidthMode,
+        settings.dataMode,
         settings.audioLevelsIntervalMillis || 0
       );
     });
@@ -667,10 +681,7 @@ export class RingRTCType {
     opaque: Buffer
   ): void {
     const message = new CallingMessage();
-    message.offer = new OfferMessage();
-    message.offer.callId = callId;
-    message.offer.type = offerType;
-    message.offer.opaque = opaque;
+    message.offer = new OfferMessage(callId, offerType, opaque);
     this.sendSignaling(
       remoteUserId,
       remoteDeviceId,
@@ -689,9 +700,7 @@ export class RingRTCType {
     opaque: Buffer
   ): void {
     const message = new CallingMessage();
-    message.answer = new AnswerMessage();
-    message.answer.callId = callId;
-    message.answer.opaque = opaque;
+    message.answer = new AnswerMessage(callId, opaque);
     this.sendSignaling(
       remoteUserId,
       remoteDeviceId,
@@ -712,9 +721,7 @@ export class RingRTCType {
     const message = new CallingMessage();
     message.iceCandidates = [];
     for (const candidate of candidates) {
-      const copy = new IceCandidateMessage();
-      copy.callId = callId;
-      copy.opaque = candidate;
+      const copy = new IceCandidateMessage(callId, candidate);
       message.iceCandidates.push(copy);
     }
     this.sendSignaling(
@@ -736,10 +743,7 @@ export class RingRTCType {
     deviceId: DeviceId | null
   ): void {
     const message = new CallingMessage();
-    message.hangup = new HangupMessage();
-    message.hangup.callId = callId;
-    message.hangup.type = hangupType;
-    message.hangup.deviceId = deviceId || 0;
+    message.hangup = new HangupMessage(callId, hangupType, deviceId || 0);
     this.sendSignaling(
       remoteUserId,
       remoteDeviceId,
@@ -757,8 +761,7 @@ export class RingRTCType {
     broadcast: boolean
   ): void {
     const message = new CallingMessage();
-    message.busy = new BusyMessage();
-    message.busy.callId = callId;
+    message.busy = new BusyMessage(callId);
     this.sendSignaling(
       remoteUserId,
       remoteDeviceId,
@@ -799,6 +802,212 @@ export class RingRTCType {
     })().catch(e => this.logError(e.toString()));
   }
 
+  // Call Links
+
+  /**
+   * Asynchronous request to get information about a call link.
+   *
+   * @param sfuUrl - the URL to use when accessing the SFU
+   * @param authCredentialPresentation - a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey - the root key for the call link
+   *
+   * Expected failure codes include:
+   * - 404: the room does not exist (or expired so long ago that it has been removed from the server)
+   */
+  readCallLink(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: CallLinkRootKey
+  ): Promise<HttpResult<CallLinkState>> {
+    const [requestId, promise] = this._callLinkRequests.add();
+    // Response comes back via handleCallLinkResponse
+    sillyDeadlockProtection(() => {
+      this.callManager.readCallLink(
+        requestId,
+        sfuUrl,
+        authCredentialPresentation,
+        linkRootKey.bytes
+      );
+    });
+    return promise;
+  }
+
+  /**
+   * Asynchronous request to create a new call link.
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @example
+   * const linkKey = CallLinkRootKey.generate();
+   * const adminPasskey = CallLinkRootKey.generateAdminPasskey();
+   * const roomId = linkKey.deriveRoomId();
+   * const credential = requestCreateCredentialFromChatServer(roomId); // using libsignal
+   * const secretParams = CallLinkSecretParams.deriveFromRootKey(linkKey.bytes);
+   * const credentialPresentation = credential.present(roomId, secretParams).serialize();
+   * const serializedPublicParams = secretParams.getPublicParams().serialize();
+   * const result = await RingRTC.createCallLink(sfuUrl, credentialPresentation, linkKey, adminPasskey, serializedPublicParams);
+   * if (result.success) {
+   *   const state = result.value;
+   *   // In actuality you may not want to do this until the user clicks Done.
+   *   saveToDatabase(linkKey.bytes, adminPasskey, state);
+   *   syncToOtherDevices(linkKey.bytes, adminPasskey);
+   * } else {
+   *   switch (result.errorStatusCode) {
+   *   case 409:
+   *     // The room already exists (and isn't yours), i.e. you've hit a 1-in-a-billion conflict.
+   *     // Fall through to kicking the user out to try again later.
+   *   default:
+   *     // Unexpected error, kick the user out for now.
+   *   }
+   * }
+   *
+   * @param sfuUrl - the URL to use when accessing the SFU
+   * @param createCredentialPresentation - a serialized CreateCallLinkCredentialPresentation
+   * @param linkRootKey - the root key for the call link
+   * @param adminPasskey - the arbitrary passkey to use for the new room
+   * @param callLinkPublicParams - the serialized CallLinkPublicParams for the new room
+   */
+  createCallLink(
+    sfuUrl: string,
+    createCredentialPresentation: Buffer,
+    linkRootKey: CallLinkRootKey,
+    adminPasskey: Buffer,
+    callLinkPublicParams: Buffer
+  ): Promise<HttpResult<CallLinkState>> {
+    const [requestId, promise] = this._callLinkRequests.add();
+    // Response comes back via handleCallLinkResponse
+    sillyDeadlockProtection(() => {
+      this.callManager.createCallLink(
+        requestId,
+        sfuUrl,
+        createCredentialPresentation,
+        linkRootKey.bytes,
+        adminPasskey,
+        callLinkPublicParams
+      );
+    });
+    return promise;
+  }
+
+  /**
+   * Asynchronous request to update a call link's name.
+   *
+   * Possible failure codes include:
+   * - 401: the room does not exist (and this is the wrong API to create a new room)
+   * - 403: the admin passkey is incorrect
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @param sfuUrl - the URL to use when accessing the SFU
+   * @param authCredentialPresentation - a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey - the root key for the call link
+   * @param adminPasskey - the passkey specified when the link was created
+   * @param newName - the new name to use
+   */
+  updateCallLinkName(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: CallLinkRootKey,
+    adminPasskey: Buffer,
+    newName: string
+  ): Promise<HttpResult<CallLinkState>> {
+    const [requestId, promise] = this._callLinkRequests.add();
+    // Response comes back via handleCallLinkResponse
+    sillyDeadlockProtection(() => {
+      this.callManager.updateCallLink(
+        requestId,
+        sfuUrl,
+        authCredentialPresentation,
+        linkRootKey.bytes,
+        adminPasskey,
+        newName,
+        undefined,
+        undefined
+      );
+    });
+    return promise;
+  }
+
+  /**
+   * Asynchronous request to update a call link's restrictions.
+   *
+   * Possible failure codes include:
+   * - 401: the room does not exist (and this is the wrong API to create a new room)
+   * - 403: the admin passkey is incorrect
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @param sfuUrl - the URL to use when accessing the SFU
+   * @param authCredentialPresentation - a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey - the root key for the call link
+   * @param adminPasskey - the passkey specified when the link was created
+   * @param restrictions - the new restrictions to use
+   */
+  updateCallLinkRestrictions(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: CallLinkRootKey,
+    adminPasskey: Buffer,
+    restrictions: Exclude<CallLinkRestrictions, CallLinkRestrictions.Unknown>
+  ): Promise<HttpResult<CallLinkState>> {
+    const [requestId, promise] = this._callLinkRequests.add();
+    // Response comes back via handleCallLinkResponse
+    sillyDeadlockProtection(() => {
+      this.callManager.updateCallLink(
+        requestId,
+        sfuUrl,
+        authCredentialPresentation,
+        linkRootKey.bytes,
+        adminPasskey,
+        undefined,
+        restrictions,
+        undefined
+      );
+    });
+    return promise;
+  }
+
+  /**
+   * Asynchronous request to revoke or un-revoke a call link.
+   *
+   * Possible failure codes include:
+   * - 401: the room does not exist (and this is the wrong API to create a new room)
+   * - 403: the admin passkey is incorrect
+   *
+   * This request is idempotent; if it fails due to a network issue, it is safe to retry.
+   *
+   * @param sfuUrl - the URL to use when accessing the SFU
+   * @param authCredentialPresentation - a serialized CallLinkAuthCredentialPresentation
+   * @param linkRootKey - the root key for the call link
+   * @param adminPasskey - the passkey specified when the link was created
+   * @param revoked - whether the link should now be revoked
+   */
+  updateCallLinkRevocation(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: CallLinkRootKey,
+    adminPasskey: Buffer,
+    revoked: boolean
+  ): Promise<HttpResult<CallLinkState>> {
+    const [requestId, promise] = this._callLinkRequests.add();
+    // Response comes back via handleCallLinkResponse
+    sillyDeadlockProtection(() => {
+      this.callManager.updateCallLink(
+        requestId,
+        sfuUrl,
+        authCredentialPresentation,
+        linkRootKey.bytes,
+        adminPasskey,
+        undefined,
+        undefined,
+        revoked
+      );
+    });
+    return promise;
+  }
+
+  // HTTP callbacks
+
   receivedHttpResponse(requestId: number, status: number, body: Buffer): void {
     sillyDeadlockProtection(() => {
       try {
@@ -831,14 +1040,38 @@ export class RingRTCType {
     audioLevelsIntervalMillis: number | undefined,
     observer: GroupCallObserver
   ): GroupCall | undefined {
-    const groupCall = new GroupCall(
-      this.callManager,
+    const clientId = this.callManager.createGroupCallClient(
       groupId,
       sfuUrl,
       hkdfExtraInfo,
-      audioLevelsIntervalMillis,
-      observer
+      audioLevelsIntervalMillis || 0
     );
+    const groupCall = new GroupCall(this.callManager, observer, clientId);
+
+    this._groupCallByClientId.set(groupCall.clientId, groupCall);
+
+    return groupCall;
+  }
+
+  // Called by UX
+  getCallLinkCall(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    rootKey: CallLinkRootKey,
+    adminPasskey: Buffer | undefined,
+    hkdfExtraInfo: Buffer,
+    audioLevelsIntervalMillis: number | undefined,
+    observer: GroupCallObserver
+  ): GroupCall | undefined {
+    const clientId = this.callManager.createCallLinkCallClient(
+      sfuUrl,
+      authCredentialPresentation,
+      rootKey.bytes,
+      adminPasskey,
+      hkdfExtraInfo,
+      audioLevelsIntervalMillis || 0
+    );
+    const groupCall = new GroupCall(this.callManager, observer, clientId);
 
     this._groupCallByClientId.set(groupCall.clientId, groupCall);
 
@@ -860,6 +1093,31 @@ export class RingRTCType {
         sfuUrl,
         membershipProof,
         groupMembers
+      );
+    });
+    return promise.then(result => {
+      if (result.success) {
+        return result.value;
+      } else {
+        return { devices: [], deviceCount: 0 };
+      }
+    });
+  }
+
+  // Called by UX
+  peekCallLinkCall(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    rootKey: CallLinkRootKey
+  ): Promise<HttpResult<PeekInfo>> {
+    const [requestId, promise] = this._peekRequests.add();
+    // Response comes back via handlePeekResponse
+    sillyDeadlockProtection(() => {
+      this.callManager.peekCallLinkCall(
+        requestId,
+        sfuUrl,
+        authCredentialPresentation,
+        rootKey.bytes
       );
     });
     return promise;
@@ -990,10 +1248,69 @@ export class RingRTCType {
   }
 
   // Called by Rust
-  handlePeekResponse(requestId: number, info: PeekInfo): void {
+  handlePeekResponse(
+    requestId: number,
+    statusCode: number,
+    info: PeekInfo | undefined
+  ): void {
     sillyDeadlockProtection(() => {
-      if (!this._peekRequests.resolve(requestId, info)) {
+      let result: HttpResult<PeekInfo>;
+      if (info) {
+        result = { success: true, value: info };
+      } else {
+        result = { success: false, errorStatusCode: statusCode };
+      }
+      if (!this._peekRequests.resolve(requestId, result)) {
         this.logWarn(`Invalid request ID for handlePeekResponse: ${requestId}`);
+      }
+    });
+  }
+
+  // Called by Rust
+  handleCallLinkResponse(
+    requestId: number,
+    statusCode: number,
+    state:
+      | {
+          name: string;
+          rawRestrictions: number;
+          revoked: boolean;
+          expiration: Date;
+        }
+      | undefined
+  ): void {
+    sillyDeadlockProtection(() => {
+      // Recreate the state so that we have the correct prototype, in case we add more methods to CallLinkState.
+      let result: HttpResult<CallLinkState>;
+      if (state) {
+        let restrictions: CallLinkRestrictions;
+        switch (state.rawRestrictions) {
+          case 0:
+            restrictions = CallLinkRestrictions.None;
+            break;
+          case 1:
+            restrictions = CallLinkRestrictions.AdminApproval;
+            break;
+          default:
+            restrictions = CallLinkRestrictions.Unknown;
+            break;
+        }
+        result = {
+          success: true,
+          value: new CallLinkState(
+            state.name,
+            restrictions,
+            state.revoked,
+            state.expiration
+          ),
+        };
+      } else {
+        result = { success: false, errorStatusCode: statusCode };
+      }
+      if (!this._callLinkRequests.resolve(requestId, result)) {
+        this.logWarn(
+          `Invalid request ID for handleCallLinkResponse: ${requestId}`
+        );
       }
     });
   }
@@ -1384,7 +1701,7 @@ export class RingRTCType {
 export interface CallSettings {
   iceServer: IceServer;
   hideIp: boolean;
-  bandwidthMode: BandwidthMode;
+  dataMode: DataMode;
   audioLevelsIntervalMillis?: number;
 }
 
@@ -1641,10 +1958,10 @@ export class Call {
     });
   }
 
-  updateBandwidthMode(bandwidthMode: BandwidthMode): void {
+  updateDataMode(dataMode: DataMode): void {
     sillyDeadlockProtection(() => {
       try {
-        this._callManager.updateBandwidthMode(bandwidthMode);
+        this._callManager.updateDataMode(dataMode);
       } catch {
         // We may not have an active connection any more.
         // In which case it doesn't matter
@@ -1853,28 +2170,18 @@ export class GroupCall {
   private _localDeviceState: LocalDeviceState;
   private _remoteDeviceStates: Array<RemoteDeviceState> | undefined;
 
-  private _peekInfo: PeekInfo | undefined; // uuid
+  private _peekInfo: PeekInfo | undefined;
 
   // Called by UI via RingRTC object
   constructor(
     callManager: CallManager,
-    groupId: Buffer,
-    sfuUrl: string,
-    hkdfExtraInfo: Buffer,
-    audioLevelsIntervalMillis: number | undefined,
-    observer: GroupCallObserver
+    observer: GroupCallObserver,
+    clientId: GroupCallClientId
   ) {
     this._callManager = callManager;
     this._observer = observer;
-
+    this._clientId = clientId;
     this._localDeviceState = new LocalDeviceState();
-
-    this._clientId = this._callManager.createGroupCallClient(
-      groupId,
-      sfuUrl,
-      hkdfExtraInfo,
-      audioLevelsIntervalMillis || 0
-    );
   }
 
   // Called by UI
@@ -1954,8 +2261,8 @@ export class GroupCall {
   }
 
   // Called by UI
-  setBandwidthMode(bandwidthMode: BandwidthMode): void {
-    this._callManager.setBandwidthMode(this._clientId, bandwidthMode);
+  setDataMode(dataMode: DataMode): void {
+    this._callManager.setDataMode(this._clientId, dataMode);
   }
 
   // Called by UI
@@ -2178,10 +2485,15 @@ export class CallingMessage {
 }
 
 export class OfferMessage {
-  callId?: CallId;
-  type?: OfferType;
-  opaque?: ProtobufBuffer;
-  sdp?: string;
+  callId: CallId;
+  type: OfferType;
+  opaque: ProtobufBuffer;
+
+  constructor(callId: CallId, type: OfferType, opaque: ProtobufBuffer) {
+    this.callId = callId;
+    this.type = type;
+    this.opaque = opaque;
+  }
 }
 
 export enum OfferType {
@@ -2190,27 +2502,43 @@ export enum OfferType {
 }
 
 export class AnswerMessage {
-  callId?: CallId;
-  opaque?: ProtobufBuffer;
-  sdp?: string;
+  callId: CallId;
+  opaque: ProtobufBuffer;
+
+  constructor(callId: CallId, opaque: ProtobufBuffer) {
+    this.callId = callId;
+    this.opaque = opaque;
+  }
 }
 
 export class IceCandidateMessage {
-  callId?: CallId;
-  mid?: string;
-  line?: number;
-  opaque?: ProtobufBuffer;
-  sdp?: string;
+  callId: CallId;
+  opaque: ProtobufBuffer;
+
+  constructor(callId: CallId, opaque: ProtobufBuffer) {
+    this.callId = callId;
+    this.opaque = opaque;
+  }
 }
 
 export class BusyMessage {
-  callId?: CallId;
+  callId: CallId;
+
+  constructor(callId: CallId) {
+    this.callId = callId;
+  }
 }
 
 export class HangupMessage {
-  callId?: CallId;
-  type?: HangupType;
-  deviceId?: DeviceId;
+  callId: CallId;
+  type: HangupType;
+  deviceId: DeviceId;
+
+  constructor(callId: CallId, type: HangupType, deviceId: DeviceId) {
+    this.callId = callId;
+    this.type = type;
+    this.deviceId = deviceId;
+  }
 }
 
 export class OpaqueMessage {
@@ -2225,7 +2553,7 @@ export enum HangupType {
   NeedPermission = 4,
 }
 
-export enum BandwidthMode {
+export enum DataMode {
   Low = 0,
   Normal = 1,
 }
@@ -2252,7 +2580,7 @@ export interface CallManager {
     iceServerPassword: string,
     iceServerUrls: Array<string>,
     hideIp: boolean,
-    bandwidthMode: BandwidthMode,
+    dataMode: DataMode,
     audioLevelsIntervalMillis: number
   ): void;
   accept(callId: CallId): void;
@@ -2268,7 +2596,7 @@ export interface CallManager {
   setOutgoingAudioEnabled(enabled: boolean): void;
   setOutgoingVideoEnabled(enabled: boolean): void;
   setOutgoingVideoIsScreenShare(enabled: boolean): void;
-  updateBandwidthMode(bandwidthMode: BandwidthMode): void;
+  updateDataMode(dataMode: DataMode): void;
   sendVideoFrame(
     width: number,
     height: number,
@@ -2336,6 +2664,14 @@ export interface CallManager {
     hkdfExtraInfo: Buffer,
     audioLevelsIntervalMillis: number
   ): GroupCallClientId;
+  createCallLinkCallClient(
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: Buffer,
+    adminPasskey: Buffer | undefined,
+    hkdfExtraInfo: Buffer,
+    audioLevelsIntervalMillis: number
+  ): GroupCallClientId;
   deleteGroupCallClient(clientId: GroupCallClientId): void;
   connect(clientId: GroupCallClientId): void;
   join(clientId: GroupCallClientId): void;
@@ -2350,10 +2686,7 @@ export interface CallManager {
   ): void;
   groupRing(clientId: GroupCallClientId, recipient: Buffer | undefined): void;
   resendMediaKeys(clientId: GroupCallClientId): void;
-  setBandwidthMode(
-    clientId: GroupCallClientId,
-    bandwidthMode: BandwidthMode
-  ): void;
+  setDataMode(clientId: GroupCallClientId, dataMode: DataMode): void;
   requestVideo(
     clientId: GroupCallClientId,
     resolutions: Array<VideoRequest>,
@@ -2372,12 +2705,44 @@ export interface CallManager {
     maxWidth: number,
     maxHeight: number
   ): [number, number] | undefined;
+  // Responses come back via handleCallLinkResponse
+  readCallLink(
+    requestId: number,
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: Buffer
+  ): void;
+  createCallLink(
+    requestId: number,
+    sfuUrl: string,
+    createCredentialPresentation: Buffer,
+    linkRootKey: Buffer,
+    adminPasskey: Buffer,
+    callLinkPublicParams: Buffer
+  ): void;
+  updateCallLink(
+    requestId: number,
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: Buffer,
+    adminPasskey: Buffer,
+    newName: string | undefined,
+    newRestrictions: number | undefined,
+    newRevoked: boolean | undefined
+  ): void;
   // Response comes back via handlePeekResponse
   peekGroupCall(
     requestId: number,
     sfu_url: string,
     membership_proof: Buffer,
     group_members: Array<GroupMemberInfo>
+  ): void;
+  // Response comes back via handlePeekResponse
+  peekCallLinkCall(
+    requestId: number,
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: Buffer
   ): void;
 
   getAudioInputs(): Array<AudioDevice>;
@@ -2474,7 +2839,11 @@ export interface CallManagerCallbacks {
     remoteDeviceStates: Array<RemoteDeviceState>
   ): void;
   handlePeekChanged(clientId: GroupCallClientId, info: PeekInfo): void;
-  handlePeekResponse(requestId: number, info: PeekInfo): void;
+  handlePeekResponse(
+    requestId: number,
+    statusCode: number,
+    info: PeekInfo | undefined
+  ): void;
   handleEnded(clientId: GroupCallClientId, reason: GroupCallEndReason): void;
 
   onLogMessage(

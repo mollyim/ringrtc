@@ -62,27 +62,13 @@ public final class GroupCall {
     @Nullable private VideoTrack                         outgoingVideoTrack;
     @NonNull  private ArrayList<VideoTrack>              incomingVideoTracks;
 
-    /*
-     * Creates a GroupCall object. If successful, all supporting objects
-     * will be valid. Otherwise, clientId will be 0.
-     *
-     * Should only be accessed via the CallManager.createGroupCall().
-     *
-     * If clientId is 0, the caller should invoke dispose() and let the
-     * object itself get GC'd.
-     */
-    GroupCall(          long                  nativeCallManager,
-              @NonNull  byte[]                groupId,
-              @NonNull  String                sfuUrl,
-              @NonNull  byte[]                hkdfExtraInfo,
-              @Nullable Integer               audioLevelsIntervalMs,
-              @NonNull  PeerConnectionFactory factory,
-              @NonNull  Observer              observer) {
-        Log.i(TAG, "GroupCall():");
-
+    private GroupCall(          long                  nativeCallManager,
+                      @NonNull  PeerConnectionFactory factory,
+                      @NonNull  Observer              observer) {
         this.nativeCallManager = nativeCallManager;
         this.factory = factory;
         this.observer = observer;
+        this.clientId = 0;
 
         this.handleEndedCalled = false;
         this.disconnectCalled = false;
@@ -122,10 +108,27 @@ public final class GroupCall {
         this.outgoingVideoSource.adaptOutputFormat(640, 360, 30);
 
         this.incomingVideoTracks = new ArrayList<>();
+    }
+
+    /**
+     * Creates a GroupCall object.
+     *
+     * Will return null on failure. Should only be accessed via the CallManager.createGroupCall().
+     */
+    static GroupCall create(          long                  nativeCallManager,
+                            @NonNull  byte[]                groupId,
+                            @NonNull  String                sfuUrl,
+                            @NonNull  byte[]                hkdfExtraInfo,
+                            @Nullable Integer               audioLevelsIntervalMs,
+                            @NonNull  PeerConnectionFactory factory,
+                            @NonNull  Observer              observer) {
+        Log.i(TAG, "create():");
+
+        GroupCall call = new GroupCall(nativeCallManager, factory, observer);
 
         int audioLevelsIntervalMillis = audioLevelsIntervalMs == null ? 0 : audioLevelsIntervalMs.intValue();
         try {
-            this.clientId = ringrtcCreateGroupCallClient(
+            call.clientId = ringrtcCreateGroupCallClient(
                 nativeCallManager,
                 groupId,
                 sfuUrl,
@@ -134,13 +137,67 @@ public final class GroupCall {
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
                 // Returns a borrowed RC.
-                this.outgoingAudioTrack.getNativeAudioTrack(),
+                call.outgoingAudioTrack.getNativeAudioTrack(),
                 // Returns a borrowed RC.
-                this.outgoingVideoTrack.getNativeVideoTrack());
-        } catch  (CallException e) {
+                call.outgoingVideoTrack.getNativeVideoTrack());
+
+            if (call.clientId == 0) {
+                call.dispose();
+                return null;
+            }
+        } catch (CallException e) {
             Log.w(TAG, "Unable to create group call client", e);
             throw new AssertionError("Unable to create group call client");
         }
+
+        return call;
+    }
+
+    /**
+     * Creates a GroupCall object for a call link call.
+     *
+     * Will return null on failure. Should only be accessed via the CallManager.createCallLinkCall().
+     */
+    static GroupCall create(          long                  nativeCallManager,
+                            @NonNull  String                sfuUrl,
+                            @NonNull  byte[]                authCredentialPresentation,
+                            @NonNull  CallLinkRootKey       rootKey,
+                            @Nullable byte[]                adminPasskey,
+                            @NonNull  byte[]                hkdfExtraInfo,
+                            @Nullable Integer               audioLevelsIntervalMs,
+                            @NonNull  PeerConnectionFactory factory,
+                            @NonNull  Observer              observer) {
+        Log.i(TAG, "create():");
+
+        GroupCall call = new GroupCall(nativeCallManager, factory, observer);
+
+        int audioLevelsIntervalMillis = audioLevelsIntervalMs == null ? 0 : audioLevelsIntervalMs.intValue();
+        try {
+            call.clientId = ringrtcCreateCallLinkCallClient(
+                nativeCallManager,
+                sfuUrl,
+                authCredentialPresentation,
+                rootKey.getKeyBytes(),
+                adminPasskey,
+                hkdfExtraInfo,
+                audioLevelsIntervalMillis,
+                // Returns a borrowed RC.
+                factory.getNativePeerConnectionFactory(),
+                // Returns a borrowed RC.
+                call.outgoingAudioTrack.getNativeAudioTrack(),
+                // Returns a borrowed RC.
+                call.outgoingVideoTrack.getNativeVideoTrack());
+
+            if (call.clientId == 0) {
+                call.dispose();
+                return null;
+            }
+        } catch (CallException e) {
+            Log.w(TAG, "Unable to create call link call client", e);
+            throw new AssertionError("Unable to create call link call client");
+        }
+
+        return call;
     }
 
     /**
@@ -385,20 +442,19 @@ public final class GroupCall {
 
     /**
      *
-     * Allows the application to constrain bandwidth if so configured
-     * by the user.
+     * Sets a data mode, allowing the client to limit the media bandwidth used.
      *
-     * @param bandwidthMode  one of the BandwidthMode enumerated values
+     * @param dataMode  one of the DataMode enumerated values
      *
      * @throws CallException for native code failures
      *
      */
-    public void setBandwidthMode(CallManager.BandwidthMode bandwidthMode)
+    public void setDataMode(CallManager.DataMode dataMode)
         throws CallException
     {
-        Log.i(TAG, "setBandwidthMode():");
+        Log.i(TAG, "setDataMode():");
 
-        ringrtcSetBandwidthMode(nativeCallManager, this.clientId, bandwidthMode.ordinal());
+        ringrtcSetDataMode(nativeCallManager, this.clientId, dataMode.ordinal());
     }
 
     /**
@@ -430,7 +486,7 @@ public final class GroupCall {
      * Provides a collection of GroupMemberInfo objects representing all
      * the possible members of a group.
      *
-     * @param members        a GroupMemberInfo object for each member in a group
+     * @param groupMembers a GroupMemberInfo object for each member in a group
      *
      * @throws CallException for native code failures
      *
@@ -1005,7 +1061,7 @@ public final class GroupCall {
 
     /* Native methods below here. */
 
-    private native
+    private static native
         long ringrtcCreateGroupCallClient(long nativeCallManager,
                                           byte[] groupId,
                                           String sfuUrl,
@@ -1014,6 +1070,19 @@ public final class GroupCall {
                                           long nativePeerConnectionFactory,
                                           long nativeAudioTrack,
                                           long nativeVideoTrack)
+        throws CallException;
+
+    private static native
+        long ringrtcCreateCallLinkCallClient(long nativeCallManager,
+                                             String sfuUrl,
+                                             byte[] authCredentialPresentation,
+                                             byte[] rootKeyBytes,
+                                             byte[] adminPasskey,
+                                             byte[] hkdfExtraInfo,
+                                             int audioLevelsIntervalMillis,
+                                             long nativePeerConnectionFactory,
+                                             long nativeAudioTrack,
+                                             long nativeVideoTrack)
         throws CallException;
 
     private native
@@ -1065,9 +1134,9 @@ public final class GroupCall {
         throws CallException;
 
     private native
-        void ringrtcSetBandwidthMode(long nativeCallManager,
+        void ringrtcSetDataMode(long nativeCallManager,
                                      long clientId,
-                                     int bandwidthMode)
+                                     int dataMode)
         throws CallException;
 
     private native

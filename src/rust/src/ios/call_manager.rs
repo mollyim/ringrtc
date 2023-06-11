@@ -14,12 +14,12 @@ use anyhow::anyhow;
 use crate::ios::api::call_manager_interface::{AppCallContext, AppInterface, AppObject};
 use crate::ios::ios_platform::IosPlatform;
 
-use crate::common::{CallId, CallMediaType, DeviceId, Result};
-use crate::core::bandwidth_mode::BandwidthMode;
+use crate::common::{CallId, CallMediaType, DataMode, DeviceId, Result};
 use crate::core::call_manager::CallManager;
 use crate::core::util::{ptr_as_box, ptr_as_mut, uuid_to_string};
 use crate::core::{call_manager, group_call, signaling};
 use crate::error::RingRtcError;
+use crate::lite::call_links::CallLinkRootKey;
 use crate::lite::{
     http,
     sfu::{GroupMember, UserId},
@@ -74,7 +74,7 @@ pub fn proceed(
     call_manager: *mut IosCallManager,
     call_id: u64,
     app_call_context: AppCallContext,
-    bandwidth_mode: BandwidthMode,
+    data_mode: DataMode,
     audio_levels_interval: Option<Duration>,
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
@@ -85,7 +85,7 @@ pub fn proceed(
     call_manager.proceed(
         call_id,
         Arc::new(app_call_context),
-        bandwidth_mode,
+        data_mode,
         audio_levels_interval,
     )
 }
@@ -392,16 +392,13 @@ pub fn set_video_enable(call_manager: *mut IosCallManager, enable: bool) -> Resu
     })
 }
 
-/// Request to update the bandwidth mode on the direct connection
-pub fn update_bandwidth_mode(
-    call_manager: *mut IosCallManager,
-    bandwidth_mode: BandwidthMode,
-) -> Result<()> {
-    info!("update_bandwidth_mode():");
+/// Request to update the data mode on the direct connection
+pub fn update_data_mode(call_manager: *mut IosCallManager, data_mode: DataMode) -> Result<()> {
+    info!("update_data_mode():");
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let mut active_connection = call_manager.active_connection()?;
-    active_connection.inject_update_bandwidth_mode(bandwidth_mode)
+    active_connection.inject_update_data_mode(data_mode)
 }
 
 /// CMI request to drop the active call
@@ -469,6 +466,52 @@ pub fn create_group_call_client(
     call_manager.create_group_call_client(
         group_id,
         sfu_url,
+        hkdf_extra_info,
+        audio_levels_interval,
+        Some(peer_connection_factory),
+        outgoing_audio_track,
+        outgoing_video_track,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_call_link_call_client(
+    call_manager: *mut IosCallManager,
+    sfu_url: String,
+    auth_credential_presentation: Vec<u8>,
+    root_key: CallLinkRootKey,
+    admin_passkey: Option<Vec<u8>>,
+    hkdf_extra_info: Vec<u8>,
+    audio_levels_interval: Option<Duration>,
+    native_peer_connection_factory: webrtc::ptr::OwnedRc<pcf::RffiPeerConnectionFactoryInterface>,
+    native_audio_track: webrtc::ptr::OwnedRc<media::RffiAudioTrack>,
+    native_video_track: webrtc::ptr::OwnedRc<media::RffiVideoTrack>,
+) -> Result<group_call::ClientId> {
+    info!("create_call_link_call_client():");
+
+    let peer_connection_factory = unsafe {
+        PeerConnectionFactory::from_native_factory(webrtc::Arc::from_owned(
+            native_peer_connection_factory,
+        ))
+    };
+
+    let outgoing_audio_track = media::AudioTrack::new(
+        webrtc::Arc::from_owned(native_audio_track),
+        Some(peer_connection_factory.rffi().clone()),
+    );
+
+    let outgoing_video_track = media::VideoTrack::new(
+        webrtc::Arc::from_owned(native_video_track),
+        Some(peer_connection_factory.rffi().clone()),
+    );
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.create_call_link_call_client(
+        sfu_url,
+        &auth_credential_presentation,
+        root_key,
+        admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
         Some(peer_connection_factory),
@@ -569,15 +612,15 @@ pub fn resend_media_keys(
     Ok(())
 }
 
-pub fn set_bandwidth_mode(
+pub fn set_data_mode(
     call_manager: *mut IosCallManager,
     client_id: group_call::ClientId,
-    bandwidth_mode: BandwidthMode,
+    data_mode: DataMode,
 ) -> Result<()> {
-    info!("set_bandwidth_mode(): id: {}", client_id);
+    info!("set_data_mode(): id: {}", client_id);
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.set_bandwidth_mode(client_id, bandwidth_mode);
+    call_manager.set_data_mode(client_id, data_mode);
     Ok(())
 }
 

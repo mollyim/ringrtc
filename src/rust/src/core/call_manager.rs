@@ -21,9 +21,9 @@ use lazy_static::lazy_static;
 use prost::Message;
 
 use crate::common::{
-    ApplicationEvent, CallDirection, CallId, CallMediaType, CallState, DeviceId, Result, RingBench,
+    ApplicationEvent, CallDirection, CallId, CallMediaType, CallState, DataMode, DeviceId, Result,
+    RingBench,
 };
-use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call::Call;
 use crate::core::call_mutex::CallMutex;
 use crate::core::connection::{Connection, ConnectionType};
@@ -33,6 +33,7 @@ use crate::core::signaling::ReceivedOffer;
 use crate::core::util::{uuid_to_string, TaskQueueRuntime};
 use crate::core::{group_call, signaling};
 use crate::error::RingRtcError;
+use crate::lite::call_links::{self, CallLinkRootKey};
 use crate::lite::{
     http, sfu,
     sfu::{DemuxId, GroupMember, MembershipProof, PeekInfo, UserId},
@@ -486,6 +487,10 @@ where
         })
     }
 
+    pub fn http_client(&self) -> &dyn http::Client {
+        &self.http_client
+    }
+
     /// Updates the current user's UUID.
     pub fn set_self_uuid(&mut self, uuid: UserId) -> Result<()> {
         info!("set_self_uuid():");
@@ -543,7 +548,7 @@ where
         &mut self,
         call_id: CallId,
         app_call_context: <T as Platform>::AppCallContext,
-        bandwidth_mode: BandwidthMode,
+        data_mode: DataMode,
         audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         handle_active_call_api!(
@@ -551,7 +556,7 @@ where
             CallManager::handle_proceed,
             call_id,
             app_call_context,
-            bandwidth_mode,
+            data_mode,
             audio_levels_interval
         )
     }
@@ -1170,7 +1175,7 @@ where
         &mut self,
         call_id: CallId,
         app_call_context: <T as Platform>::AppCallContext,
-        bandwidth_mode: BandwidthMode,
+        data_mode: DataMode,
         audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         ringbench!(
@@ -1185,7 +1190,7 @@ where
             Ok(())
         } else {
             active_call.set_call_context(app_call_context)?;
-            active_call.inject_proceed(bandwidth_mode, audio_levels_interval)
+            active_call.inject_proceed(data_mode, audio_levels_interval)
         }
     }
 
@@ -2217,7 +2222,7 @@ where
         device_id: DeviceId,
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
-        bandwidth_mode: BandwidthMode,
+        data_mode: DataMode,
         audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<T>> {
         let mut platform = self.platform.lock()?;
@@ -2226,7 +2231,7 @@ where
             device_id,
             connection_type,
             signaling_version,
-            bandwidth_mode,
+            data_mode,
             audio_levels_interval,
         )
     }
@@ -2689,14 +2694,14 @@ where
         group_members: Vec<GroupMember>,
     ) {
         if let Some(auth_header) = sfu::auth_header_from_membership_proof(&membership_proof) {
-            let opaque_user_id_mappings =
-                sfu::opaque_user_id_mappings_from_group_members(&group_members);
+            let member_resolver = sfu::MemberMap::new(&group_members);
             let call_manager = self.clone();
             sfu::peek(
                 &self.http_client,
                 &sfu_url,
+                None,
                 auth_header,
-                opaque_user_id_mappings,
+                Arc::new(member_resolver),
                 Box::new(move |peek_result| {
                     info!("handle_peek_response");
                     platform_handler!(call_manager, handle_peek_result, request_id, peek_result);
@@ -2745,11 +2750,17 @@ where
                 .map(|ring| ring.ring_id)
         };
 
-        let sfu_client =
-            HttpSfuClient::new(Box::new(self.http_client.clone()), sfu_url, hkdf_extra_info);
+        let sfu_client = HttpSfuClient::new(
+            Box::new(self.http_client.clone()),
+            sfu_url,
+            None,
+            None,
+            hkdf_extra_info,
+        );
         let client = group_call::Client::start(
             group_id,
             client_id,
+            group_call::GroupCallKind::SignalGroup,
             Box::new(sfu_client),
             Box::new(self.clone()),
             self.busy.clone(),
@@ -2766,6 +2777,76 @@ where
         client_by_id.insert(client_id, client);
 
         info!("Group Client created with id: {}", client_id);
+
+        Ok(client_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_call_link_call_client(
+        &mut self,
+        sfu_url: String,
+        auth_presentation: &[u8],
+        root_key: CallLinkRootKey,
+        admin_passkey: Option<Vec<u8>>,
+        hkdf_extra_info: Vec<u8>,
+        audio_levels_interval: Option<Duration>,
+        peer_connection_factory: Option<PeerConnectionFactory>,
+        outgoing_audio_track: AudioTrack,
+        outgoing_video_track: VideoTrack,
+        incoming_video_sink: Option<Box<dyn VideoSink>>,
+    ) -> Result<group_call::ClientId> {
+        info!("create_call_link_call_client():");
+        let room_id: group_call::GroupId = root_key.derive_room_id();
+        debug!(
+            "  root_key: {} room_id: {} sfu_url: {}",
+            root_key.to_formatted_string(),
+            hex::encode(&room_id),
+            sfu_url
+        );
+
+        let client_id = {
+            let mut next_group_call_client_id = self.next_group_call_client_id.lock()?;
+            if *next_group_call_client_id == group_call::INVALID_CLIENT_ID {
+                *next_group_call_client_id = next_group_call_client_id.wrapping_add(1);
+            }
+            let client_id = *next_group_call_client_id;
+            *next_group_call_client_id = next_group_call_client_id.wrapping_add(1);
+            client_id
+        };
+
+        let mut sfu_client = HttpSfuClient::new(
+            Box::new(self.http_client.clone()),
+            sfu_url,
+            Some(&room_id),
+            admin_passkey,
+            hkdf_extra_info,
+        );
+        sfu_client.set_auth_header(call_links::auth_header_from_auth_credential(
+            auth_presentation,
+        ));
+        sfu_client.set_member_resolver(Arc::new(call_links::CallLinkMemberResolver::from(
+            &root_key,
+        )));
+        let client = group_call::Client::start(
+            room_id,
+            client_id,
+            group_call::GroupCallKind::CallLink,
+            Box::new(sfu_client),
+            Box::new(self.clone()),
+            self.busy.clone(),
+            self.self_uuid.clone(),
+            peer_connection_factory,
+            outgoing_audio_track,
+            Some(outgoing_video_track),
+            incoming_video_sink,
+            None,
+            audio_levels_interval,
+        )?;
+
+        let mut client_by_id = self.group_call_by_client_id.lock()?;
+        client_by_id.insert(client_id, client);
+
+        info!("Call Link Client created with id: {}", client_id);
 
         Ok(client_id)
     }
@@ -2876,13 +2957,9 @@ where
         group_call_api_handler!(self, client_id, resend_media_keys);
     }
 
-    pub fn set_bandwidth_mode(
-        &mut self,
-        client_id: group_call::ClientId,
-        bandwidth_mode: BandwidthMode,
-    ) {
-        info!("set_bandwidth_mode(): id: {}", client_id);
-        group_call_api_handler!(self, client_id, set_bandwidth_mode, bandwidth_mode);
+    pub fn set_data_mode(&mut self, client_id: group_call::ClientId, data_mode: DataMode) {
+        info!("set_data_mode(): id: {}", client_id);
+        group_call_api_handler!(self, client_id, set_data_mode, data_mode);
     }
 
     pub fn request_video(

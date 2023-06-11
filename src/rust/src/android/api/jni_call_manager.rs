@@ -17,8 +17,7 @@ use crate::android::android_platform::AndroidPlatform;
 use crate::android::call_manager;
 use crate::android::call_manager::AndroidCallManager;
 use crate::android::error;
-use crate::common::{CallMediaType, DeviceId};
-use crate::core::bandwidth_mode::BandwidthMode;
+use crate::common::{CallMediaType, DataMode, DeviceId};
 use crate::core::connection::Connection;
 use crate::core::util::try_scoped;
 use crate::core::{group_call, signaling};
@@ -144,7 +143,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
     call_manager: jlong,
     call_id: jlong,
     jni_call_context: JObject,
-    bandwidth_mode: jint,
+    data_mode: jint,
     audio_levels_interval_millis: jint,
 ) {
     let audio_levels_interval = if audio_levels_interval_millis <= 0 {
@@ -158,7 +157,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
         call_manager as *mut AndroidCallManager,
         call_id,
         jni_call_context,
-        BandwidthMode::from_i32(bandwidth_mode),
+        DataMode::from_i32(data_mode),
         audio_levels_interval,
     ) {
         Ok(v) => v,
@@ -308,7 +307,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedOffe
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedIceCandidates(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     call_id: jlong,
@@ -332,7 +331,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedIceC
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHangup(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     call_id: jlong,
@@ -357,7 +356,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHang
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedBusy(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     call_id: jlong,
@@ -378,7 +377,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedBusy
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedCallMessage(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     sender_uuid: jbyteArray,
@@ -406,7 +405,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedCall
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHttpResponse(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     request_id: jlong,
@@ -430,7 +429,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHttp
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcHttpRequestFailed(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     request_id: jlong,
@@ -462,7 +461,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcAcceptCall(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveConnection(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
 ) -> jobject {
@@ -478,7 +477,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveCon
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveCallContext(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
 ) -> jobject {
@@ -494,7 +493,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveCal
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetVideoEnable(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     enable: jboolean,
@@ -509,15 +508,15 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetVideoEnab
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateBandwidthMode(
-    env: JNIEnv<'static>,
+pub extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateDataMode(
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
-    bandwidth_mode: jint,
+    data_mode: jint,
 ) {
-    match call_manager::update_bandwidth_mode(
+    match call_manager::update_data_mode(
         call_manager as *mut AndroidCallManager,
-        BandwidthMode::from_i32(bandwidth_mode),
+        DataMode::from_i32(data_mode),
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -529,7 +528,7 @@ pub extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateBandwidthMode
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcDrop(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     call_id: jlong,
@@ -545,7 +544,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcDrop(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReset(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
 ) {
@@ -560,11 +559,103 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReset(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcClose(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
 ) {
     match call_manager::close(call_manager as *mut AndroidCallManager) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+// Call Links
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReadCallLink(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    sfu_url: JString,
+    auth_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+    request_id: jlong,
+) {
+    match call_manager::read_call_link(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        sfu_url,
+        auth_credential_presentation,
+        root_key,
+        request_id,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreateCallLink(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    sfu_url: JString,
+    create_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+    admin_passkey: jbyteArray,
+    call_link_public_params: jbyteArray,
+    request_id: jlong,
+) {
+    match call_manager::create_call_link(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        sfu_url,
+        create_credential_presentation,
+        root_key,
+        admin_passkey,
+        call_link_public_params,
+        request_id,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateCallLink(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    sfu_url: JString,
+    auth_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+    admin_passkey: jbyteArray,
+    new_name: JString,
+    new_restrictions: jint,
+    new_revoked: jint,
+    request_id: jlong,
+) {
+    match call_manager::update_call_link(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        sfu_url,
+        auth_credential_presentation,
+        root_key,
+        admin_passkey,
+        new_name,
+        new_restrictions,
+        new_revoked,
+        request_id,
+    ) {
         Ok(v) => v,
         Err(e) => {
             error::throw_error(&env, e);
@@ -577,7 +668,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcClose(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekGroupCall(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     request_id: jlong,
@@ -602,9 +693,35 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekGroupCal
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCallClient(
-    env: JNIEnv<'static>,
+pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekCallLinkCall(
+    env: JNIEnv,
     _object: JObject,
+    call_manager: jlong,
+    request_id: jlong,
+    sfu_url: JString,
+    auth_credential_presentation: jbyteArray,
+    root_key: jbyteArray,
+) {
+    match call_manager::peek_call_link_call(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        request_id,
+        sfu_url,
+        auth_credential_presentation,
+        root_key,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCallClient(
+    env: JNIEnv,
+    _cls: JClass,
     call_manager: jlong,
     group_id: jbyteArray,
     sfu_url: JString,
@@ -635,8 +752,45 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCal
 
 #[no_mangle]
 #[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLinkCallClient(
+    env: JNIEnv,
+    _cls: JClass,
+    call_manager: jlong,
+    sfu_url: JString,
+    auth_presentation: jbyteArray,
+    call_link_bytes: jbyteArray,
+    admin_passkey: jbyteArray,
+    hkdf_extra_info: jbyteArray,
+    audio_levels_interval_millis: jint,
+    native_peer_connection_factory_borrowed_rc: jlong,
+    native_audio_track_borrowed_rc: jlong,
+    native_video_track_borrowed_rc: jlong,
+) -> jlong {
+    match call_manager::create_call_link_call_client(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        sfu_url,
+        auth_presentation,
+        call_link_bytes,
+        admin_passkey,
+        hkdf_extra_info,
+        audio_levels_interval_millis,
+        native_peer_connection_factory_borrowed_rc,
+        native_audio_track_borrowed_rc,
+        native_video_track_borrowed_rc,
+    ) {
+        Ok(v) => v as i64,
+        Err(e) => {
+            error::throw_error(&env, e);
+            group_call::INVALID_CLIENT_ID as i64
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDeleteGroupCallClient(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -655,7 +809,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDeleteGroupCal
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcConnect(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -674,7 +828,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcConnect(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcJoin(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -693,7 +847,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcJoin(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcLeave(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -712,7 +866,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcLeave(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDisconnect(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -731,7 +885,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDisconnect(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingAudioMuted(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -752,7 +906,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingAud
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingVideoMuted(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -773,7 +927,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingVid
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRing(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -795,7 +949,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRing(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcResendMediaKeys(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -813,17 +967,17 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcResendMediaKey
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetBandwidthMode(
-    env: JNIEnv<'static>,
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetDataMode(
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
-    bandwidth_mode: jint,
+    data_mode: jint,
 ) {
-    match call_manager::set_bandwidth_mode(
+    match call_manager::set_data_mode(
         call_manager as *mut AndroidCallManager,
         client_id as group_call::ClientId,
-        BandwidthMode::from_i32(bandwidth_mode),
+        DataMode::from_i32(data_mode),
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -835,7 +989,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetBandwidthMo
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRequestVideo(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -859,7 +1013,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRequestVideo(
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetGroupMembers(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,
@@ -881,7 +1035,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetGroupMember
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetMembershipProof(
-    env: JNIEnv<'static>,
+    env: JNIEnv,
     _object: JObject,
     call_manager: jlong,
     client_id: jlong,

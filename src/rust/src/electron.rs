@@ -12,14 +12,17 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::common::{CallId, CallMediaType, DeviceId, Result};
-use crate::core::bandwidth_mode::BandwidthMode;
+use crate::common::{CallId, CallMediaType, DataMode, DeviceId, Result};
 use crate::core::call_manager::CallManager;
 use crate::core::group_call;
 use crate::core::group_call::{GroupId, SignalingMessageUrgency};
 use crate::core::signaling;
 use crate::core::util::minmax;
+use crate::lite::sfu;
 use crate::lite::{
+    call_links::{
+        self, CallLinkRestrictions, CallLinkRootKey, CallLinkState, CallLinkUpdateRequest,
+    },
     http,
     sfu::{DemuxId, GroupMember, PeekInfo, UserId},
 };
@@ -134,6 +137,11 @@ pub enum Event {
     RemoteSharingScreenChange(PeerId, bool),
     // The group call has an update.
     GroupUpdate(GroupUpdate),
+    // A call link request has completed.
+    CallLinkResponse {
+        request_id: u32,
+        result: std::result::Result<CallLinkState, http::ResponseStatus>,
+    },
     // JavaScript should initiate an HTTP request.
     SendHttpRequest {
         request_id: u32,
@@ -298,6 +306,7 @@ pub struct CallEndpoint {
     call_manager: CallManager<NativePlatform>,
 
     events_receiver: Receiver<Event>,
+    event_reporter: EventReporter,
     // This is what we use to control mute/not.
     // It should probably be per-call, but for now it's easier to have only one.
     outgoing_audio_track: AudioTrack,
@@ -366,10 +375,23 @@ impl CallEndpoint {
                     // because otherwise a new event could come in *during* the processing.
                     event_reported_for_callback.store(false, std::sync::atomic::Ordering::Relaxed);
 
-                    let observer = js_object.as_ref().to_inner(&mut cx);
-                    let method_name = "processEvents";
-                    let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
-                    method.call(&mut cx, observer, Vec::<Handle<JsValue>>::new())?;
+                    match cx.try_catch(|cx| {
+                        let observer = js_object.as_ref().to_inner(cx);
+                        let method_name = "processEvents";
+                        let method = observer.get::<JsFunction, _, _>(cx, method_name)?;
+                        method.call(cx, observer, Vec::<Handle<JsValue>>::new())?;
+                        Ok(())
+                    }) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!(
+                                "{}",
+                                e.to_string(&mut cx)
+                                    .map(|s| s.value(&mut cx))
+                                    .unwrap_or_else(|_| "[failed to stringify]".to_string())
+                            );
+                        }
+                    }
                     Ok(())
                 });
             }
@@ -389,7 +411,7 @@ impl CallEndpoint {
 
         // Only relevant for group calls
         let http_client = http::DelegatingClient::new(event_reporter.clone());
-        let group_handler = Box::new(event_reporter);
+        let group_handler = Box::new(event_reporter.clone());
 
         let platform = NativePlatform::new(
             peer_connection_factory.clone(),
@@ -403,6 +425,7 @@ impl CallEndpoint {
         Ok(Self {
             call_manager,
             events_receiver,
+            event_reporter,
             outgoing_audio_track,
             outgoing_video_source,
             outgoing_video_track,
@@ -630,7 +653,7 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
     let ice_server_password = cx.argument::<JsString>(2)?.value(&mut cx);
     let js_ice_server_urls = cx.argument::<JsArray>(3)?;
     let hide_ip = cx.argument::<JsBoolean>(4)?.value(&mut cx);
-    let bandwidth_mode = cx.argument::<JsNumber>(5)?.value(&mut cx) as i32;
+    let data_mode = cx.argument::<JsNumber>(5)?.value(&mut cx) as i32;
     let audio_levels_interval_millis = cx.argument::<JsNumber>(6)?.value(&mut cx) as u64;
 
     let mut ice_server_urls = Vec::with_capacity(js_ice_server_urls.len(&mut cx) as usize);
@@ -669,7 +692,7 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint.call_manager.proceed(
             call_id,
             call_context,
-            BandwidthMode::from_i32(bandwidth_mode),
+            DataMode::from_i32(data_mode),
             audio_levels_interval,
         )?;
         Ok(())
@@ -743,13 +766,13 @@ fn signalingMessageSendFailed(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
-fn updateBandwidthMode(mut cx: FunctionContext) -> JsResult<JsValue> {
-    debug!("JsCallManager.updateBandwidthMode()");
-    let bandwidth_mode = cx.argument::<JsNumber>(0)?.value(&mut cx) as i32;
+fn updateDataMode(mut cx: FunctionContext) -> JsResult<JsValue> {
+    debug!("JsCallManager.updateDataMode()");
+    let data_mode = cx.argument::<JsNumber>(0)?.value(&mut cx) as i32;
 
     with_call_endpoint(&mut cx, |endpoint| {
         let active_connection = endpoint.call_manager.active_connection()?;
-        active_connection.update_bandwidth_mode(BandwidthMode::from_i32(bandwidth_mode))?;
+        active_connection.update_data_mode(DataMode::from_i32(data_mode))?;
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -1186,6 +1209,64 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
+fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let sfu_url = cx.argument::<JsString>(0)?.value(&mut cx);
+
+    let auth_presentation = cx.argument::<JsBuffer>(1)?;
+    let auth_presentation = auth_presentation.as_slice(&cx).to_vec();
+
+    let root_key_bytes = cx.argument::<JsBuffer>(2)?;
+    let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
+        .or_else(|e| cx.throw_type_error(e.to_string()))?;
+
+    let admin_passkey = cx.argument::<JsValue>(3)?;
+    let admin_passkey = if admin_passkey.is_a::<JsUndefined, _>(&mut cx) {
+        None
+    } else {
+        let admin_passkey = admin_passkey.downcast_or_throw::<JsBuffer, _>(&mut cx)?;
+        Some(admin_passkey.as_slice(&cx).to_vec())
+    };
+
+    let hkdf_extra_info = cx.argument::<JsBuffer>(4)?;
+    let hkdf_extra_info = hkdf_extra_info.as_slice(&cx).to_vec();
+
+    let audio_levels_interval_millis = cx.argument::<JsNumber>(5)?.value(&mut cx) as u64;
+    let audio_levels_interval = if audio_levels_interval_millis == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(audio_levels_interval_millis))
+    };
+
+    let mut client_id = group_call::INVALID_CLIENT_ID;
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        let peer_connection_factory = endpoint.peer_connection_factory.clone();
+        let outgoing_audio_track = endpoint.outgoing_audio_track.clone();
+        let outgoing_video_track = endpoint.outgoing_video_track.clone();
+        let incoming_video_sink = endpoint.incoming_video_sink.clone();
+        let result = endpoint.call_manager.create_call_link_call_client(
+            sfu_url,
+            &auth_presentation,
+            root_key,
+            admin_passkey,
+            hkdf_extra_info,
+            audio_levels_interval,
+            Some(peer_connection_factory),
+            outgoing_audio_track,
+            outgoing_video_track,
+            Some(incoming_video_sink),
+        );
+        if let Ok(v) = result {
+            client_id = v;
+        }
+
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.number(client_id).upcast())
+}
+
+#[allow(non_snake_case)]
 fn deleteGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
 
@@ -1351,14 +1432,14 @@ fn resendMediaKeys(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
-fn setBandwidthMode(mut cx: FunctionContext) -> JsResult<JsValue> {
+fn setDataMode(mut cx: FunctionContext) -> JsResult<JsValue> {
     let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
-    let bandwidth_mode = cx.argument::<JsNumber>(1)?.value(&mut cx) as i32;
+    let data_mode = cx.argument::<JsNumber>(1)?.value(&mut cx) as i32;
 
     with_call_endpoint(&mut cx, |endpoint| {
         endpoint
             .call_manager
-            .set_bandwidth_mode(client_id, BandwidthMode::from_i32(bandwidth_mode));
+            .set_data_mode(client_id, DataMode::from_i32(data_mode));
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -1467,7 +1548,7 @@ fn setMembershipProof(mut cx: FunctionContext) -> JsResult<JsValue> {
 fn peekGroupCall(mut cx: FunctionContext) -> JsResult<JsValue> {
     let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
 
-    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx) as PeerId;
+    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
 
     let membership_proof = cx.argument::<JsBuffer>(2)?;
     let membership_proof = membership_proof.as_slice(&cx).to_vec();
@@ -1498,6 +1579,176 @@ fn peekGroupCall(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint
             .call_manager
             .peek_group_call(request_id, sfu_url, membership_proof, members);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn peekCallLinkCall(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
+
+    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
+
+    let auth_presentation = cx.argument::<JsBuffer>(2)?;
+    let auth_presentation = auth_presentation.as_slice(&cx).to_vec();
+
+    let root_key_bytes = cx.argument::<JsBuffer>(3)?;
+    let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
+        .or_else(|e| cx.throw_type_error(e.to_string()))?;
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        let event_reporter = endpoint.event_reporter.clone();
+        sfu::peek(
+            endpoint.call_manager.http_client(),
+            &sfu_url,
+            Some(&hex::encode(root_key.derive_room_id())),
+            call_links::auth_header_from_auth_credential(&auth_presentation),
+            Arc::new(call_links::CallLinkMemberResolver::from(&root_key)),
+            Box::new(move |peek_result| {
+                // Ignore errors, that can only mean we're shutting down.
+                let _ = event_reporter.send(Event::GroupUpdate(GroupUpdate::PeekResult {
+                    request_id,
+                    peek_result,
+                }));
+            }),
+        );
+    });
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn readCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
+    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
+    let auth_presentation = cx.argument::<JsBuffer>(2)?;
+    let auth_presentation = auth_presentation.as_slice(&cx).to_vec();
+    let root_key_bytes = cx.argument::<JsBuffer>(3)?;
+    let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
+        .or_else(|e| cx.throw_type_error(e.to_string()))?;
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        let event_reporter = endpoint.event_reporter.clone();
+        call_links::read_call_link(
+            endpoint.call_manager.http_client(),
+            &sfu_url,
+            root_key,
+            &auth_presentation,
+            Box::new(move |result| {
+                // Ignore errors, that can only mean we're shutting down.
+                let _ = event_reporter.send(Event::CallLinkResponse { request_id, result });
+            }),
+        );
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn createCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
+    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
+    let create_presentation = cx.argument::<JsBuffer>(2)?;
+    let create_presentation = create_presentation.as_slice(&cx).to_vec();
+    let root_key_bytes = cx.argument::<JsBuffer>(3)?;
+    let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
+        .or_else(|e| cx.throw_type_error(e.to_string()))?;
+    let admin_passkey = cx.argument::<JsBuffer>(4)?;
+    let admin_passkey = admin_passkey.as_slice(&cx).to_vec();
+    let public_zkparams = cx.argument::<JsBuffer>(5)?;
+    let public_zkparams = public_zkparams.as_slice(&cx).to_vec();
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        let event_reporter = endpoint.event_reporter.clone();
+        call_links::create_call_link(
+            endpoint.call_manager.http_client(),
+            &sfu_url,
+            root_key,
+            &create_presentation,
+            &admin_passkey,
+            &public_zkparams,
+            Box::new(move |result| {
+                // Ignore errors, that can only mean we're shutting down.
+                let _ = event_reporter.send(Event::CallLinkResponse { request_id, result });
+            }),
+        );
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn updateCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
+    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
+    let create_presentation = cx.argument::<JsBuffer>(2)?;
+    let create_presentation = create_presentation.as_slice(&cx).to_vec();
+    let root_key_bytes = cx.argument::<JsBuffer>(3)?;
+    let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
+        .or_else(|e| cx.throw_type_error(e.to_string()))?;
+    let admin_passkey = cx.argument::<JsBuffer>(4)?;
+    let admin_passkey = admin_passkey.as_slice(&cx).to_vec();
+
+    let new_name = cx.argument::<JsValue>(5)?;
+    let new_name = if new_name.is_a::<JsUndefined, _>(&mut cx) {
+        None
+    } else {
+        let name = new_name
+            .downcast_or_throw::<JsString, _>(&mut cx)?
+            .value(&mut cx);
+        Some(if name.is_empty() {
+            vec![]
+        } else {
+            root_key.encrypt(name.as_bytes(), rand::rngs::OsRng)
+        })
+    };
+
+    let new_restrictions = cx.argument::<JsValue>(6)?;
+    let new_restrictions = if new_restrictions.is_a::<JsUndefined, _>(&mut cx) {
+        None
+    } else {
+        let raw_restrictions = new_restrictions
+            .downcast_or_throw::<JsNumber, _>(&mut cx)?
+            .value(&mut cx);
+        match raw_restrictions as i8 {
+            0 => Some(CallLinkRestrictions::None),
+            1 => Some(CallLinkRestrictions::AdminApproval),
+            _ => None,
+        }
+    };
+
+    let new_revoked = cx.argument::<JsValue>(7)?;
+    let new_revoked = if new_revoked.is_a::<JsUndefined, _>(&mut cx) {
+        None
+    } else {
+        Some(
+            new_revoked
+                .downcast_or_throw::<JsBoolean, _>(&mut cx)?
+                .value(&mut cx),
+        )
+    };
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        let event_reporter = endpoint.event_reporter.clone();
+        call_links::update_call_link(
+            endpoint.call_manager.http_client(),
+            &sfu_url,
+            root_key,
+            &create_presentation,
+            &CallLinkUpdateRequest {
+                admin_passkey: &admin_passkey,
+                encrypted_name: new_name.as_deref(),
+                restrictions: new_restrictions,
+                revoked: new_revoked,
+            },
+            Box::new(move |result| {
+                // Ignore errors, that can only mean we're shutting down.
+                let _ = event_reporter.send(Event::CallLinkResponse { request_id, result });
+            }),
+        );
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -1959,6 +2210,46 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 method.call(&mut cx, observer, args)?;
             }
 
+            Event::CallLinkResponse { request_id, result } => {
+                let method_name = "handleCallLinkResponse";
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+
+                let js_request_id = cx.number(request_id);
+                let (status, state_object) = match result {
+                    Ok(state) => {
+                        let state_object = cx.empty_object();
+                        let js_name = cx.string(state.name);
+                        state_object.set(&mut cx, "name", js_name)?;
+                        let js_revoked = cx.boolean(state.revoked);
+                        state_object.set(&mut cx, "revoked", js_revoked)?;
+                        let js_restrictions = cx.number(match state.restrictions {
+                            call_links::CallLinkRestrictions::None => 0,
+                            call_links::CallLinkRestrictions::AdminApproval => 1,
+                            call_links::CallLinkRestrictions::Unknown => -1,
+                        });
+                        state_object.set(&mut cx, "rawRestrictions", js_restrictions)?;
+                        let js_expiration = cx
+                            .date(
+                                state
+                                    .expiration
+                                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as f64,
+                            )
+                            .or_else(|e| cx.throw_range_error(e.to_string()))?;
+                        state_object.set(&mut cx, "expiration", js_expiration)?;
+                        (cx.number(200), state_object.upcast())
+                    }
+                    Err(status_code) => (cx.number(status_code.code), cx.undefined().upcast()),
+                };
+
+                method.call(
+                    &mut cx,
+                    observer,
+                    [js_request_id.upcast(), status.upcast(), state_object],
+                )?;
+            }
+
             Event::GroupUpdate(GroupUpdate::RemoteDeviceStatesChanged(
                 client_id,
                 remote_device_states,
@@ -2098,50 +2389,56 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 request_id,
                 peek_result,
             }) => {
-                // TODO: Pass failure error codes to app.
-                let PeekInfo {
-                    devices,
-                    creator,
-                    era_id,
-                    max_devices,
-                    device_count,
-                } = peek_result.unwrap_or_default();
+                let (js_status, js_info) = match peek_result {
+                    Ok(PeekInfo {
+                        devices,
+                        creator,
+                        era_id,
+                        max_devices,
+                        device_count,
+                    }) => {
+                        let js_info = cx.empty_object();
+                        let js_devices = JsArray::new(&mut cx, devices.len() as u32);
+                        for (i, device) in devices.into_iter().enumerate() {
+                            let js_device = cx.empty_object();
+                            let js_demux_id = cx.number(device.demux_id);
+                            js_device.set(&mut cx, "demuxId", js_demux_id)?;
+                            if let Some(user_id) = device.user_id {
+                                let js_user_id = to_js_buffer(&mut cx, &user_id);
+                                js_device.set(&mut cx, "userId", js_user_id)?;
+                            }
+                            js_devices.set(&mut cx, i as u32, js_device)?;
+                        }
+                        let js_creator: neon::handle::Handle<JsValue> = match creator {
+                            Some(creator) => to_js_buffer(&mut cx, &creator).upcast(),
+                            None => cx.undefined().upcast(),
+                        };
+                        let era_id: neon::handle::Handle<JsValue> = match era_id {
+                            None => cx.undefined().upcast(),
+                            Some(id) => cx.string(id).upcast(),
+                        };
+                        let max_devices: neon::handle::Handle<JsValue> = match max_devices {
+                            None => cx.undefined().upcast(),
+                            Some(devices) => cx.number(devices).upcast(),
+                        };
+                        let device_count: neon::handle::Handle<JsValue> =
+                            cx.number(device_count).upcast();
+
+                        js_info.set(&mut cx, "devices", js_devices)?;
+                        js_info.set(&mut cx, "creator", js_creator)?;
+                        js_info.set(&mut cx, "eraId", era_id)?;
+                        js_info.set(&mut cx, "maxDevices", max_devices)?;
+                        js_info.set(&mut cx, "deviceCount", device_count)?;
+
+                        (cx.number(200), js_info.upcast())
+                    }
+                    Err(status) => (cx.number(status.code), cx.undefined().upcast()),
+                };
 
                 let method_name = "handlePeekResponse";
-                let js_info = cx.empty_object();
-                let js_devices = JsArray::new(&mut cx, devices.len() as u32);
-                for (i, device) in devices.into_iter().enumerate() {
-                    let js_device = cx.empty_object();
-                    let js_demux_id = cx.number(device.demux_id);
-                    js_device.set(&mut cx, "demuxId", js_demux_id)?;
-                    if let Some(user_id) = device.user_id {
-                        let js_user_id = to_js_buffer(&mut cx, &user_id);
-                        js_device.set(&mut cx, "userId", js_user_id)?;
-                    }
-                    js_devices.set(&mut cx, i as u32, js_device)?;
-                }
-                let js_creator: neon::handle::Handle<JsValue> = match creator {
-                    Some(creator) => to_js_buffer(&mut cx, &creator).upcast(),
-                    None => cx.undefined().upcast(),
-                };
-                let era_id: neon::handle::Handle<JsValue> = match era_id {
-                    None => cx.undefined().upcast(),
-                    Some(id) => cx.string(id).upcast(),
-                };
-                let max_devices: neon::handle::Handle<JsValue> = match max_devices {
-                    None => cx.undefined().upcast(),
-                    Some(devices) => cx.number(devices).upcast(),
-                };
-                let device_count: neon::handle::Handle<JsValue> = cx.number(device_count).upcast();
-
-                js_info.set(&mut cx, "devices", js_devices)?;
-                js_info.set(&mut cx, "creator", js_creator)?;
-                js_info.set(&mut cx, "eraId", era_id)?;
-                js_info.set(&mut cx, "maxDevices", max_devices)?;
-                js_info.set(&mut cx, "deviceCount", device_count)?;
 
                 let args: Vec<Handle<JsValue>> =
-                    vec![cx.number(request_id).upcast(), js_info.upcast()];
+                    vec![cx.number(request_id).upcast(), js_status.upcast(), js_info];
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
             }
@@ -2216,10 +2513,87 @@ fn callIdFromEra(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(create_id_arg(&mut cx, result))
 }
 
+#[allow(non_snake_case)]
+fn CallLinkRootKey_parse(mut cx: FunctionContext) -> JsResult<JsBuffer> {
+    let string = cx.argument::<JsString>(0)?.value(&mut cx);
+    match CallLinkRootKey::try_from(string.as_str()) {
+        Ok(key) => {
+            let mut buffer = cx.buffer(key.bytes().len())?;
+            buffer.as_mut_slice(&mut cx).copy_from_slice(&key.bytes());
+            Ok(buffer)
+        }
+        Err(e) => cx.throw_error(e.to_string()),
+    }
+}
+
+#[allow(non_snake_case)]
+fn CallLinkRootKey_validate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let bytes = cx.argument::<JsBuffer>(0)?;
+    match CallLinkRootKey::try_from(bytes.as_slice(&cx)) {
+        Ok(_) => Ok(cx.undefined()),
+        Err(e) => cx.throw_error(e.to_string()),
+    }
+}
+
+#[allow(non_snake_case)]
+fn CallLinkRootKey_generate(mut cx: FunctionContext) -> JsResult<JsBuffer> {
+    let key = CallLinkRootKey::generate(rand::rngs::OsRng);
+    let mut buffer = cx.buffer(key.bytes().len())?;
+    buffer.as_mut_slice(&mut cx).copy_from_slice(&key.bytes());
+    Ok(buffer)
+}
+
+#[allow(non_snake_case)]
+fn CallLinkRootKey_generateAdminPasskey(mut cx: FunctionContext) -> JsResult<JsBuffer> {
+    let passkey = CallLinkRootKey::generate_admin_passkey(rand::rngs::OsRng);
+    let mut buffer = cx.buffer(passkey.len())?;
+    buffer.as_mut_slice(&mut cx).copy_from_slice(&passkey);
+    Ok(buffer)
+}
+
+#[allow(non_snake_case)]
+fn CallLinkRootKey_deriveRoomId(mut cx: FunctionContext) -> JsResult<JsBuffer> {
+    let bytes = cx.argument::<JsBuffer>(0)?;
+    match CallLinkRootKey::try_from(bytes.as_slice(&cx)) {
+        Ok(key) => {
+            let room_id = key.derive_room_id();
+            let mut buffer = cx.buffer(room_id.len())?;
+            buffer.as_mut_slice(&mut cx).copy_from_slice(&room_id);
+            Ok(buffer)
+        }
+        Err(e) => cx.throw_error(e.to_string()),
+    }
+}
+
+#[allow(non_snake_case)]
+fn CallLinkRootKey_toFormattedString(mut cx: FunctionContext) -> JsResult<JsString> {
+    let bytes = cx.argument::<JsBuffer>(0)?;
+    match CallLinkRootKey::try_from(bytes.as_slice(&cx)) {
+        Ok(key) => {
+            let result = key.to_formatted_string();
+            Ok(cx.string(result))
+        }
+        Err(e) => cx.throw_error(e.to_string()),
+    }
+}
+
 #[neon::main]
 fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("createCallEndpoint", createCallEndpoint)?;
     cx.export_function("callIdFromEra", callIdFromEra)?;
+
+    cx.export_function("CallLinkRootKey_parse", CallLinkRootKey_parse)?;
+    cx.export_function("CallLinkRootKey_validate", CallLinkRootKey_validate)?;
+    cx.export_function("CallLinkRootKey_generate", CallLinkRootKey_generate)?;
+    cx.export_function(
+        "CallLinkRootKey_generateAdminPasskey",
+        CallLinkRootKey_generateAdminPasskey,
+    )?;
+    cx.export_function("CallLinkRootKey_deriveRoomId", CallLinkRootKey_deriveRoomId)?;
+    cx.export_function(
+        "CallLinkRootKey_toFormattedString",
+        CallLinkRootKey_toFormattedString,
+    )?;
 
     let js_property_key = cx.string(CALL_ENDPOINT_PROPERTY_KEY);
     cx.export_value("callEndpointPropertyKey", js_property_key)?;
@@ -2233,7 +2607,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_hangup", hangup)?;
     cx.export_function("cm_signalingMessageSent", signalingMessageSent)?;
     cx.export_function("cm_signalingMessageSendFailed", signalingMessageSendFailed)?;
-    cx.export_function("cm_updateBandwidthMode", updateBandwidthMode)?;
+    cx.export_function("cm_updateDataMode", updateDataMode)?;
     cx.export_function("cm_receivedOffer", receivedOffer)?;
     cx.export_function("cm_receivedAnswer", receivedAnswer)?;
     cx.export_function("cm_receivedIceCandidates", receivedIceCandidates)?;
@@ -2252,6 +2626,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_receiveVideoFrame", receiveVideoFrame)?;
     cx.export_function("cm_receiveGroupCallVideoFrame", receiveGroupCallVideoFrame)?;
     cx.export_function("cm_createGroupCallClient", createGroupCallClient)?;
+    cx.export_function("cm_createCallLinkCallClient", createCallLinkCallClient)?;
     cx.export_function("cm_deleteGroupCallClient", deleteGroupCallClient)?;
     cx.export_function("cm_connect", connect)?;
     cx.export_function("cm_join", join)?;
@@ -2266,11 +2641,15 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     )?;
     cx.export_function("cm_groupRing", groupRing)?;
     cx.export_function("cm_resendMediaKeys", resendMediaKeys)?;
-    cx.export_function("cm_setBandwidthMode", setBandwidthMode)?;
+    cx.export_function("cm_setDataMode", setDataMode)?;
     cx.export_function("cm_requestVideo", requestVideo)?;
     cx.export_function("cm_setGroupMembers", setGroupMembers)?;
     cx.export_function("cm_setMembershipProof", setMembershipProof)?;
     cx.export_function("cm_peekGroupCall", peekGroupCall)?;
+    cx.export_function("cm_peekCallLinkCall", peekCallLinkCall)?;
+    cx.export_function("cm_readCallLink", readCallLink)?;
+    cx.export_function("cm_createCallLink", createCallLink)?;
+    cx.export_function("cm_updateCallLink", updateCallLink)?;
     cx.export_function("cm_getAudioInputs", getAudioInputs)?;
     cx.export_function("cm_setAudioInput", setAudioInput)?;
     cx.export_function("cm_getAudioOutputs", getAudioOutputs)?;

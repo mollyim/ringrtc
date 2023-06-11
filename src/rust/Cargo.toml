@@ -5,7 +5,7 @@
 
 [package]
 name = "ringrtc"
-version = "2.26.1"
+version = "2.28.0"
 authors = ["Calling Team <callingteam@signal.org>"]
 edition = "2021"
 description = "A Rust interface for WebRTC"
@@ -15,25 +15,29 @@ license = "AGPL-3.0-only"
 crate_type = ["cdylib", "staticlib", "lib"]
 
 [[bin]]
-name = "cli"
-path = "src/cli.rs"
+name = "direct"
 required-features = ["native", "simnet"]
 
 [[bin]]
-name = "gctc"
-path = "src/gctc.rs"
+name = "group_call"
 required-features = ["native", "http"]
+
+[[bin]]
+name = "call_link"
+# This binary doesn't depend on WebRTC at all, so either `sim` or `native` would work.
+required-features = ["sim", "http", "rand_chacha"]
 
 [dependencies]
 regex-aot         = { path = "regex-aot" }
 
-aes               = { version = "0.8"    }
+aes               = { version = "0.7.5"  }
+aes-gcm-siv       = { version = "0.10.3" }
 anyhow            = { version = "1.0"    }
 base64            = { version = "0.13"   }
 bytes             = { version = "1.0"    }
-ctr               = { version = "0.9"    }
+ctr               = { version = "0.8"    }
 futures           = { version = "0.3"    }
-hmac              = { version = "0.12"   }
+hmac              = { version = "0.11"   }
 lazy_static       = { version = "1.4"    }
 libc              = { version = "0.2"    }
 log               = { version = "0.4", features = ["std", "max_level_trace", "release_max_level_info"] }
@@ -41,11 +45,12 @@ num_enum          = { version = "0.5"    }
 prost             = { version = "0.11"   }
 rand              = { version = "0.7", features = [] }
 regex-automata    = { version = "0.1.10" }
-hkdf              = { version = "0.12"   }
+hkdf              = { version = "0.11"   }
 serde_json        = { version = "1.0"    }
 serde             = { version = "1.0", features = ["derive"] }
+serde_with        = { version = "2.3.2", features = ["base64", "hex"] }
 hex               = { version = "0.4", features = ["serde"] }
-sha2              = { version = "0.10"   }
+sha2              = { version = "0.9.9"  }
 static_assertions = { version = "1.1.0"  }
 subtle            = { version = "2.3.0"  }
 sysinfo           = { version = "0.28.0", default-features = false }
@@ -53,8 +58,14 @@ thiserror         = { version = "1.0.20" }
 tokio             = { version = "1.13.0", features = ["rt-multi-thread", "time"] }
 x25519-dalek      = { version = "1.1"    }
 
+# Used by call links. Be careful not to pull in more than strictly needed, for both code size and
+# maintenance reasons. In particular, anything involving credentials should be left to
+# libsignal-client.
+bincode = { version = "1.2.1" }
+zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.23.1" }
+
 # Optional, needed by the "electron" feature
-neon = { version = "0.10.1", optional = true, default-features = false, features = ["napi-6", "channel-api"] }
+neon = { version = "0.10.1", optional = true, default-features = false, features = ["napi-6", "channel-api", "try-catch-api"] }
 
 # Optional, needed to check Android-specific code when not targeting Android
 jni = { version = "0.19.0", optional = true, default-features = false }
@@ -63,6 +74,9 @@ jni = { version = "0.19.0", optional = true, default-features = false }
 ureq = { version = "2.5", optional = true }
 rustls = { version = "0.20.7", optional = true, features = ["dangerous_configuration"] }
 webpki = { version = "0.22", optional = true }
+
+# Optional, needed for call-link-test-client
+rand_chacha = { version = "0.2", optional = true }
 
 [features]
 default = []
@@ -90,5 +104,9 @@ jni = { version = "0.19.0", default-features = false }
 prost-build = { version = "0.11" }
 
 [dev-dependencies]
-env_logger = { version = "0.9" }
+env_logger = { version = "0.10" }
 rand_chacha = { version = "0.2" }
+
+[patch.crates-io]
+# Use our fork of curve25519-dalek for zkgroup compatibility.
+curve25519-dalek = { git = 'https://github.com/signalapp/curve25519-dalek', branch = 'lizard2' }

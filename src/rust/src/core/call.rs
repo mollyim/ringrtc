@@ -16,9 +16,8 @@ use futures::future::TryFutureExt;
 use x25519_dalek::StaticSecret;
 
 use crate::common::{
-    ApplicationEvent, CallDirection, CallId, CallMediaType, CallState, DeviceId, Result,
+    ApplicationEvent, CallDirection, CallId, CallMediaType, CallState, DataMode, DeviceId, Result,
 };
-use crate::core::bandwidth_mode::BandwidthMode;
 use crate::core::call_fsm::{CallEvent, CallStateMachine};
 use crate::core::call_manager::CallManager;
 use crate::core::call_mutex::CallMutex;
@@ -558,7 +557,7 @@ where
     /// - handle the previously stored pending Offer and ICE Candidates
     pub fn proceed(
         &mut self,
-        bandwidth_mode: BandwidthMode,
+        data_mode: DataMode,
         audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         info!("proceed():");
@@ -578,7 +577,7 @@ where
                         remote_device_id,
                         ConnectionType::Incoming,
                         pending_call.received.offer.latest_version(),
-                        bandwidth_mode,
+                        data_mode,
                         audio_levels_interval,
                     )?;
                     let answer = connection
@@ -611,11 +610,11 @@ where
                     0,
                     ConnectionType::OutgoingParent,
                     signaling::Version::V4,
-                    bandwidth_mode,
+                    data_mode,
                     audio_levels_interval,
                 )?;
                 let (local_secret, ice_gatherer, offer) =
-                    parent_connection.start_outgoing_parent(self.media_type, bandwidth_mode)?;
+                    parent_connection.start_outgoing_parent(self.media_type, data_mode)?;
 
                 // Keep around so that it's not closed until all the connections are closed.
                 *(self.forking.lock()?) = Some(ForkingState {
@@ -651,14 +650,14 @@ where
             if let Some(forking) = maybe_forking.as_mut() {
                 info!("received_answer from device {}; forking enabled, so inject into connection_map", sender_device_id);
                 let call_manager = self.call_manager()?;
-                let bandwidth_mode = forking.parent_connection.local_bandwidth_mode()?;
+                let data_mode = forking.parent_connection.local_data_mode()?;
                 let audio_levels_interval = forking.parent_connection.audio_levels_interval();
                 let mut child_connection = call_manager.create_connection(
                     self,
                     sender_device_id,
                     ConnectionType::OutgoingChild,
                     received.answer.latest_version(),
-                    bandwidth_mode,
+                    data_mode,
                     audio_levels_interval,
                 )?;
                 child_connection.start_outgoing_child(
@@ -950,10 +949,10 @@ where
     ///
     /// Waits for the FSM shutdown condition variable to signal that
     /// shutdown is complete.
-    fn wait_for_terminate(&mut self) -> Result<()> {
+    pub fn wait_for_terminate(&mut self) -> Result<()> {
         // Wait for terminate operation to complete
         info!("terminate(): waiting for terminate complete...");
-        let &(ref mutex, ref condvar) = &*self.terminate_condvar;
+        let (mutex, condvar) = &*self.terminate_condvar;
         if let Ok(mut terminate_complete) = mutex.lock() {
             while !*terminate_complete {
                 terminate_complete = condvar.wait(terminate_complete).map_err(|_| {
@@ -978,10 +977,10 @@ where
     /// `Note:` Called by the FSM on a worker thread after shutdown.
     pub fn terminate_complete(&mut self) -> Result<()> {
         info!("notify_terminate_complete(): notifying terminate complete...");
-        let &(ref mutex, ref condvar) = &*self.terminate_condvar;
+        let (mutex, condvar) = &*self.terminate_condvar;
         if let Ok(mut terminate_complete) = mutex.lock() {
             *terminate_complete = true;
-            condvar.notify_one();
+            condvar.notify_all();
             Ok(())
         } else {
             Err(RingRtcError::MutexPoisoned("Call Terminate Condition Variable".to_string()).into())
@@ -1011,11 +1010,11 @@ where
     /// Inject a call Proceed event into the FSM.
     pub fn inject_proceed(
         &mut self,
-        bandwidth_mode: BandwidthMode,
+        data_mode: DataMode,
         audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         let event = CallEvent::Proceed {
-            bandwidth_mode,
+            data_mode,
             audio_levels_interval,
         };
         self.inject_event(event)
@@ -1102,7 +1101,13 @@ where
     #[cfg(feature = "sim")]
     fn inject_synchronize(&mut self) -> Result<()> {
         match self.state()? {
-            CallState::Terminated | CallState::Terminating => {
+            CallState::Terminating => {
+                if self.fsm_sender.is_closed() {
+                    self.wait_for_terminate()?;
+                    return Ok(());
+                }
+            }
+            CallState::Terminated => {
                 info!(
                     "call-synchronize(): skipping synchronize while terminating or terminated..."
                 );
@@ -1117,7 +1122,7 @@ where
         self.inject_event(event)?;
 
         info!("call-synchronize(): waiting for synchronize complete...");
-        let &(ref mutex, ref condvar) = &*sync;
+        let (mutex, condvar) = &*sync;
         if let Ok(mut sync_complete) = mutex.lock() {
             while !*sync_complete {
                 sync_complete = condvar.wait(sync_complete).map_err(|_| {
@@ -1149,6 +1154,19 @@ where
         self.inject_synchronize()?;
 
         // Synchronize all connections in this call
+        if let Some(parent_connection) = self
+            .forking
+            .lock()?
+            .as_mut()
+            .map(|f| &mut f.parent_connection)
+        {
+            info!(
+                "synchronize(): call_id: {} parent connection",
+                self.call_id(),
+            );
+            // blocks as connection FSM synchronizes
+            parent_connection.synchronize()?;
+        }
         if let Ok(mut connection_map) = self.connection_map.lock() {
             for (_, connection) in connection_map.iter_mut() {
                 info!(
