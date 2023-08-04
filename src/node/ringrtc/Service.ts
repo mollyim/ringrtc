@@ -144,6 +144,10 @@ class NativeCallManager {
   Native.cm_resendMediaKeys;
 (NativeCallManager.prototype as any).setDataMode = Native.cm_setDataMode;
 (NativeCallManager.prototype as any).requestVideo = Native.cm_requestVideo;
+(NativeCallManager.prototype as any).approveUser = Native.cm_approveUser;
+(NativeCallManager.prototype as any).denyUser = Native.cm_denyUser;
+(NativeCallManager.prototype as any).removeClient = Native.cm_removeClient;
+(NativeCallManager.prototype as any).blockClient = Native.cm_blockClient;
 (NativeCallManager.prototype as any).setGroupMembers =
   Native.cm_setGroupMembers;
 (NativeCallManager.prototype as any).setMembershipProof =
@@ -175,6 +179,7 @@ export interface PeekInfo {
   eraId?: string;
   maxDevices?: number;
   deviceCount: number;
+  pendingUsers: Array<GroupCallUserId>;
 }
 
 export enum PeekStatusCodes {
@@ -1109,7 +1114,7 @@ export class RingRTCType {
       if (result.success) {
         return result.value;
       } else {
-        return { devices: [], deviceCount: 0 };
+        return { devices: [], deviceCount: 0, pendingUsers: [] };
       }
     });
   }
@@ -2027,21 +2032,23 @@ export enum JoinState {
 export enum GroupCallEndReason {
   // Normal events
   DeviceExplicitlyDisconnected = 0,
-  ServerExplicitlyDisconnected = 1,
+  ServerExplicitlyDisconnected,
+  DeniedRequestToJoinCall,
+  RemovedFromCall,
 
   // Things that can go wrong
-  CallManagerIsBusy = 2,
-  SfuClientFailedToJoin = 3,
-  FailedToCreatePeerConnectionFactory = 4,
-  FailedToNegotiateSrtpKeys = 5,
-  FailedToCreatePeerConnection = 6,
-  FailedToStartPeerConnection = 7,
-  FailedToUpdatePeerConnection = 8,
-  FailedToSetMaxSendBitrate = 9,
-  IceFailedWhileConnecting = 10,
-  IceFailedAfterConnected = 11,
-  ServerChangedDemuxId = 12,
-  HasMaxDevices = 13,
+  CallManagerIsBusy,
+  SfuClientFailedToJoin,
+  FailedToCreatePeerConnectionFactory,
+  FailedToNegotiateSrtpKeys,
+  FailedToCreatePeerConnection,
+  FailedToStartPeerConnection,
+  FailedToUpdatePeerConnection,
+  FailedToSetMaxSendBitrate,
+  IceFailedWhileConnecting,
+  IceFailedAfterConnected,
+  ServerChangedDemuxId,
+  HasMaxDevices,
 }
 
 export enum CallMessageUrgency {
@@ -2297,6 +2304,26 @@ export class GroupCall {
       resolutions,
       activeSpeakerHeight
     );
+  }
+
+  // Called by UI
+  approveUser(otherUserId: Buffer): void {
+    this._callManager.approveUser(this._clientId, otherUserId);
+  }
+
+  // Called by UI
+  denyUser(otherUserId: Buffer): void {
+    this._callManager.denyUser(this._clientId, otherUserId);
+  }
+
+  // Called by UI
+  removeClient(otherClientDemuxId: number): void {
+    this._callManager.removeClient(this._clientId, otherClientDemuxId);
+  }
+
+  // Called by UI
+  blockClient(otherClientDemuxId: number): void {
+    this._callManager.blockClient(this._clientId, otherClientDemuxId);
   }
 
   // Called by UI
@@ -2714,6 +2741,10 @@ export interface CallManager {
     resolutions: Array<VideoRequest>,
     activeSpeakerHeight: number
   ): void;
+  approveUser(clientId: GroupCallClientId, otherUserId: Buffer): void;
+  denyUser(clientId: GroupCallClientId, otherUserId: Buffer): void;
+  removeClient(clientId: GroupCallClientId, otherClientDemuxId: number): void;
+  blockClient(clientId: GroupCallClientId, otherClientDemuxId: number): void;
   setGroupMembers(
     clientId: GroupCallClientId,
     members: Array<GroupMemberInfo>

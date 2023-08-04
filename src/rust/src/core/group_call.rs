@@ -6,6 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
+    hash::{Hash, Hasher},
     iter::FromIterator,
     mem::size_of,
     net::SocketAddr,
@@ -14,7 +15,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use bytes::BytesMut;
 use hkdf::Hkdf;
 use num_enum::TryFromPrimitive;
 use prost::Message;
@@ -34,14 +34,15 @@ use crate::{
     lite::{
         http, sfu,
         sfu::{
-            DemuxId, GroupMember, MembershipProof, PeekDeviceInfo, PeekInfo, PeekResult,
-            PeekResultCallback, UserId,
+            DemuxId, GroupMember, MembershipProof, PeekInfo, PeekResult, PeekResultCallback, UserId,
         },
     },
     protobuf,
     webrtc::{
         self,
-        media::{AudioTrack, VideoFrame, VideoFrameMetadata, VideoSink, VideoTrack},
+        media::{
+            AudioEncoderConfig, AudioTrack, VideoFrame, VideoFrameMetadata, VideoSink, VideoTrack,
+        },
         peer_connection::{AudioLevel, PeerConnection, ReceivedAudioLevel, SendRates},
         peer_connection_factory::{self as pcf, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
@@ -407,6 +408,8 @@ pub enum EndReason {
     // Normal events
     DeviceExplicitlyDisconnected = 0,
     ServerExplicitlyDisconnected,
+    DeniedRequestToJoinCall,
+    RemovedFromCall,
 
     // Things that can go wrong
     CallManagerIsBusy,
@@ -845,6 +848,7 @@ struct State {
     connection_state: ConnectionState,
     join_state: JoinState,
     remote_devices: RemoteDevices,
+    has_ever_been_participating_client: bool,
 
     // State that changes infrequently and is not sent to the observer.
     dhe_state: DheState,
@@ -857,6 +861,7 @@ struct State {
     // Derived from remote_devices but stored so we can fire
     // Observer::handle_peek_changed only when it changes
     joined_members: HashSet<UserId>,
+    pending_users_signature: u64,
 
     // Things we send to other clients via heartbeats
     // These are unset until the app sets them.
@@ -1004,7 +1009,7 @@ impl Client {
                 debug!("group_call::Client(inner)::new(client_id: {})", client_id);
 
                 let peer_connection_factory = match peer_connection_factory {
-                    None => match PeerConnectionFactory::new(pcf::Config::default()) {
+                    None => match PeerConnectionFactory::new(&pcf::AudioConfig::default(), false) {
                         Ok(v) => v,
                         Err(err) => {
                             observer.handle_ended(
@@ -1062,6 +1067,7 @@ impl Client {
                     join_state: JoinState::NotJoined(ring_id),
                     dhe_state: DheState::default(),
                     remote_devices: Default::default(),
+                    has_ever_been_participating_client: false,
 
                     remote_devices_request_state: match kind {
                         GroupCallKind::SignalGroup => {
@@ -1074,6 +1080,7 @@ impl Client {
                     known_members: HashSet::new(),
 
                     joined_members: HashSet::new(),
+                    pending_users_signature: 0,
 
                     outgoing_heartbeat_state: Default::default(),
 
@@ -1405,9 +1412,9 @@ impl Client {
                     warn!("Can't join when already joining.");
                 }
                 JoinState::NotJoined(ring_id) => {
-                    if let Some(PeekInfo{device_count, max_devices: Some(max_devices), ..}) = &state.last_peek_info {
-                        if device_count >= max_devices {
-                            info!("Ending group call client because there are {}/{} devices in the call.", device_count, max_devices);
+                    if let Some(peek_info) = &state.last_peek_info {
+                        if peek_info.device_count() >= peek_info.max_devices.unwrap_or(u32::MAX) as usize {
+                            info!("Ending group call client because there are {}/{} devices in the call.", peek_info.device_count(), peek_info.max_devices.unwrap());
                             Self::end(state, EndReason::HasMaxDevices);
                             return;
                         }
@@ -1512,6 +1519,7 @@ impl Client {
                 state.next_stats_time = None;
                 state.next_audio_levels_time = None;
                 state.next_membership_proof_request_time = None;
+                state.has_ever_been_participating_client = false;
             }
         }
     }
@@ -1743,6 +1751,10 @@ impl Client {
             state.max_receive_rate = Some(match data_mode {
                 DataMode::Low => LOW_MAX_RECEIVE_RATE,
                 DataMode::Normal => NORMAL_MAX_RECEIVE_RATE,
+                DataMode::Custom {
+                    max_group_call_receive_rate,
+                    ..
+                } => max_group_call_receive_rate,
             });
 
             state.data_mode = data_mode;
@@ -1753,7 +1765,7 @@ impl Client {
                 JoinState::Joined(_) => {
                     state
                         .peer_connection
-                        .configure_audio_encoders(&data_mode.audio_encoder_config());
+                        .configure_audio_encoders(&AudioEncoderConfig::default());
                 }
             };
 
@@ -1839,7 +1851,7 @@ impl Client {
                         })
                 })
                 .collect();
-            match encode_proto(DeviceToSfu {
+            let msg = DeviceToSfu {
                 video_request: Some(VideoRequestMessage {
                     // TODO: Update the server to handle this as expected or remove this altogether.
                     // The client needs the server to sort by resolution and then cap the number after that sort.
@@ -1864,17 +1876,150 @@ impl Client {
                     active_speaker_height: state.active_speaker_height.map(|height| height.into()),
                 }),
                 ..Default::default()
-            }) {
-                Err(e) => {
-                    warn!("Failed to encode video request: {:?}", e);
-                }
-                Ok(msg) => {
-                    if let Err(e) = Self::send_data_to_sfu(state, &msg) {
-                        warn!("Failed to send video request: {:?}", e);
-                    }
-                }
+            };
+
+            if let Err(e) = Self::send_data_to_sfu(state, &msg.encode_to_vec()) {
+                warn!("Failed to send video request: {:?}", e);
             }
         }
+    }
+
+    fn approve_or_deny_user(state: &mut State, user_id: UserId, approved: bool) {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+
+        // Approval is implemented by demux ID (because we don't put user IDs in RTP messages).
+        // So we have to find a corresponding demux ID in the pending users list.
+        let Some(peek_info) = state.last_peek_info.as_ref() else {
+            error!("Cannot approve users without peek info");
+            return;
+        };
+
+        let action_to_log = if approved { "approval" } else { "denial" };
+
+        if let Some(demux_id) = peek_info
+            .pending_devices
+            .iter()
+            .find(|device| device.user_id.as_ref() == Some(&user_id))
+            .map(|device| device.demux_id)
+        {
+            let action = if approved {
+                AdminAction::Approve
+            } else {
+                AdminAction::Deny
+            };
+            let msg = DeviceToSfu {
+                admin_action: Some((action)(GenericAdminAction {
+                    target_demux_id: Some(demux_id),
+                })),
+                ..Default::default()
+            };
+
+            if let Err(e) = Self::send_data_to_sfu(state, &msg.encode_to_vec()) {
+                warn!("Failed to send {}: {:?}", action_to_log, e);
+            }
+        } else if let Some(demux_id) = peek_info
+            .devices
+            .iter()
+            .find(|device| device.user_id.as_ref() == Some(&user_id))
+            .map(|device| device.demux_id)
+        {
+            info!("User has already been added to call with demux ID {demux_id}");
+        } else {
+            warn!("Failed to find user for {action_to_log} (they may have left or been denied by another admin)");
+        }
+    }
+
+    pub fn approve_user(&self, user_id: UserId) {
+        debug!(
+            "group_call::Client(outer)::approve_user(client_id: {})",
+            self.client_id
+        );
+        self.actor.send(move |state| {
+            debug!(
+                "group_call::Client(inner)::approve_user(client_id: {})",
+                state.client_id
+            );
+            Self::approve_or_deny_user(state, user_id, true);
+        });
+    }
+
+    pub fn deny_user(&self, user_id: UserId) {
+        debug!(
+            "group_call::Client(outer)::deny_user(client_id: {})",
+            self.client_id
+        );
+        self.actor.send(move |state| {
+            debug!(
+                "group_call::Client(inner)::deny_user(client_id: {})",
+                state.client_id
+            );
+            Self::approve_or_deny_user(state, user_id, false);
+        });
+    }
+
+    pub fn remove_client(&self, other_client: DemuxId) {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+        debug!(
+            "group_call::Client(outer)::remove_client(client_id: {})",
+            self.client_id
+        );
+        self.actor.send(move |state| {
+            debug!(
+                "group_call::Client(inner)::remove_client(client_id: {})",
+                state.client_id
+            );
+
+            // We could check that other_client is a valid demux ID according to our current peek
+            // info, but that's a racy check anyway. Just let the calling server do it.
+            let msg = DeviceToSfu {
+                admin_action: Some(AdminAction::Remove(GenericAdminAction {
+                    target_demux_id: Some(other_client),
+                })),
+                ..Default::default()
+            };
+
+            if let Err(e) = Self::send_data_to_sfu(state, &msg.encode_to_vec()) {
+                warn!("Failed to send removal: {:?}", e);
+            }
+        });
+    }
+
+    // Blocks are performed on a particular client, but end up affecting all of the user's devices.
+    // Still, we define it as a demux-ID-based operation for more flexibility later.
+    pub fn block_client(&self, other_client: DemuxId) {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+        debug!(
+            "group_call::Client(outer)::block_client(client_id: {})",
+            self.client_id
+        );
+        self.actor.send(move |state| {
+            debug!(
+                "group_call::Client(inner)::block_client(client_id: {})",
+                state.client_id
+            );
+
+            // We could check that other_client is a valid demux ID according to our current peek
+            // info, but that's a racy check anyway. Just let the calling server do it.
+            let msg = DeviceToSfu {
+                admin_action: Some(AdminAction::Block(GenericAdminAction {
+                    target_demux_id: Some(other_client),
+                })),
+                ..Default::default()
+            };
+
+            if let Err(e) = Self::send_data_to_sfu(state, &msg.encode_to_vec()) {
+                warn!("Failed to send block: {:?}", e);
+            }
+        });
     }
 
     pub fn set_group_members(&self, group_members: Vec<GroupMember>) {
@@ -2076,7 +2221,7 @@ impl Client {
 
                         state
                             .peer_connection
-                            .configure_audio_encoders(&state.data_mode.audio_encoder_config());
+                            .configure_audio_encoders(&AudioEncoderConfig::default());
                     }
                     JoinState::Joined(_) => {
                         warn!("The SFU completed joining more than once.");
@@ -2261,20 +2406,41 @@ impl Client {
             .filter_map(|device| device.user_id.clone())
             .collect();
 
-        let old_era_id = match &state.last_peek_info {
-            Some(PeekInfo {
-                era_id: Some(era_id),
-                ..
-            }) => Some(era_id.clone()),
-            _ => None,
-        };
-        if is_first_peek_info || old_user_ids != new_user_ids || old_era_id != peek_info.era_id {
+        // When would this combined hash falsely claim that the set of pending users hasn't changed?
+        // If the combined hash of the user IDs that have been added and removed since the last peek
+        // comes out to the exact bit-pattern needed to match the change in `pending_devices.len()`.
+        // For example, if one person left and one person joined the pending list, their user IDs
+        // would have to have hashes of `x` and `-x`, so that combined they equal 0. This is
+        // extremely unlikely.
+        let new_pending_users_signature = peek_info
+            .unique_pending_users()
+            .into_iter()
+            .map(|user_id| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                user_id.hash(&mut hasher);
+                hasher.finish()
+            })
+            .fold(peek_info.pending_devices.len() as u64, |a, b| {
+                // Note that this is an order-independent fold, so that two differently-ordered
+                // HashSets produce the same signature.
+                a.wrapping_add(b)
+            });
+
+        let old_era_id = state
+            .last_peek_info
+            .as_ref()
+            .and_then(|peek_info| peek_info.era_id.as_ref());
+
+        if is_first_peek_info
+            || old_user_ids != new_user_ids
+            || old_era_id != peek_info.era_id.as_ref()
+            || state.pending_users_signature != new_pending_users_signature
+        {
             state
                 .observer
                 .handle_peek_changed(state.client_id, &peek_info, &new_user_ids)
         }
 
-        let peek_info_to_remember = peek_info.clone();
         if let (JoinState::Joined(local_demux_id), DheState::Negotiated { srtp_keys }) =
             (&state.join_state, &state.dhe_state)
         {
@@ -2282,40 +2448,36 @@ impl Client {
             // We remember these before changing state.remote_devices so we can calculate changes after.
             let old_demux_ids: HashSet<DemuxId> = state.remote_devices.demux_id_set();
 
-            // Then we update state.remote_devices by first building a map of id_pair => RemoteDeviceState
+            // Then we update state.remote_devices by first building a map of demux_id => RemoteDeviceState
             // from the old values and then building a new Vec using either the old value (if there is one)
             // or creating a new one.
-            let mut old_remote_devices_by_id_pair: HashMap<(DemuxId, UserId), RemoteDeviceState> =
+            let mut old_remote_devices_by_demux_id: HashMap<DemuxId, RemoteDeviceState> =
                 std::mem::take(&mut state.remote_devices)
                     .into_iter()
-                    .map(|rd| ((rd.demux_id, rd.user_id.clone()), rd))
+                    .map(|rd| (rd.demux_id, rd))
                     .collect();
             let added_time = SystemTime::now();
             state.remote_devices = peek_info
                 .devices
-                .into_iter()
+                .iter()
                 .filter_map(|device| {
                     if device.demux_id == local_demux_id {
                         // Don't add a remote device to represent the local device.
+                        state.has_ever_been_participating_client = true;
                         return None;
                     }
-                    if let PeekDeviceInfo {
-                        demux_id,
-                        user_id: Some(user_id),
-                    } = device
-                    {
-                        // Keep the old one, with its state, if there is one.
-                        Some(
-                            match old_remote_devices_by_id_pair.remove(&(demux_id, user_id.clone()))
-                            {
-                                Some(existing_remote_device) => existing_remote_device,
-                                None => RemoteDeviceState::new(demux_id, user_id, added_time),
-                            },
-                        )
-                    } else {
-                        // Ignore devices of users that aren't in the group
-                        None
-                    }
+                    device.user_id.as_ref().map(|user_id| {
+                        // Keep the old one, with its state, if there is one and the user ID
+                        // matches.
+                        if let Some(existing_remote_device) =
+                            old_remote_devices_by_demux_id.remove(&device.demux_id)
+                        {
+                            if &existing_remote_device.user_id == user_id {
+                                return existing_remote_device;
+                            }
+                        }
+                        RemoteDeviceState::new(device.demux_id, user_id.clone(), added_time)
+                    })
                 })
                 .collect();
 
@@ -2353,13 +2515,6 @@ impl Client {
                 );
             }
 
-            if new_user_ids != old_user_ids {
-                state.observer.handle_peek_changed(
-                    state.client_id,
-                    &peek_info_to_remember,
-                    &new_user_ids,
-                )
-            }
             // If someone was added, we must advance the send media key
             // and send it to everyone that was added.
             let added_demux_ids: HashSet<DemuxId> =
@@ -2420,11 +2575,12 @@ impl Client {
                 state.outgoing_ring_state = OutgoingRingState::NotPermittedToRing;
             }
         }
-        state.last_peek_info = Some(peek_info_to_remember);
+        state.last_peek_info = Some(peek_info);
 
         // Do this later so that we can use new_user_ids above without running into
         // referencing issues
         state.joined_members = new_user_ids;
+        state.pending_users_signature = new_pending_users_signature;
 
         if should_request_again {
             // Something occurred while we were waiting for this update.
@@ -2883,40 +3039,34 @@ impl Client {
     }
 
     fn send_heartbeat(state: &mut State) -> Result<()> {
-        let heartbeat_msg = encode_proto({
-            protobuf::group_call::DeviceToDevice {
-                heartbeat: {
-                    Some(protobuf::group_call::device_to_device::Heartbeat {
-                        audio_muted: state.outgoing_heartbeat_state.audio_muted,
-                        video_muted: state.outgoing_heartbeat_state.video_muted,
-                        presenting: state.outgoing_heartbeat_state.presenting,
-                        sharing_screen: state.outgoing_heartbeat_state.sharing_screen,
-                    })
-                },
-                ..Default::default()
-            }
-        })?;
-        Self::broadcast_data_through_sfu(state, &heartbeat_msg)
+        let heartbeat_msg = protobuf::group_call::DeviceToDevice {
+            heartbeat: {
+                Some(protobuf::group_call::device_to_device::Heartbeat {
+                    audio_muted: state.outgoing_heartbeat_state.audio_muted,
+                    video_muted: state.outgoing_heartbeat_state.video_muted,
+                    presenting: state.outgoing_heartbeat_state.presenting,
+                    sharing_screen: state.outgoing_heartbeat_state.sharing_screen,
+                })
+            },
+            ..Default::default()
+        };
+        Self::broadcast_data_through_sfu(state, &heartbeat_msg.encode_to_vec())
     }
 
     fn send_leave_to_sfu(state: &mut State) {
         use protobuf::group_call::{device_to_sfu::LeaveMessage, DeviceToSfu};
-        match encode_proto(DeviceToSfu {
+        let msg = DeviceToSfu {
             leave: Some(LeaveMessage {}),
             ..Default::default()
-        }) {
-            Err(e) => {
-                warn!("Failed to encode LeaveMessage: {:?}", e);
-            }
-            Ok(msg) => {
-                if let Err(e) = Self::send_data_to_sfu(state, &msg) {
-                    warn!("Failed to send LeaveMessage: {:?}", e);
-                }
-                // Send it *again* to increase reliability just a little.
-                if let Err(e) = Self::send_data_to_sfu(state, &msg) {
-                    warn!("Failed to send extra redundancy LeaveMessage: {:?}", e);
-                }
-            }
+        }
+        .encode_to_vec();
+
+        if let Err(e) = Self::send_data_to_sfu(state, &msg) {
+            warn!("Failed to send LeaveMessage: {:?}", e);
+        }
+        // Send it *again* to increase reliability just a little.
+        if let Err(e) = Self::send_data_to_sfu(state, &msg) {
+            warn!("Failed to send extra redundancy LeaveMessage: {:?}", e);
         }
     }
 
@@ -2932,14 +3082,10 @@ impl Client {
             leaving: Some(Leaving::default()),
             ..DeviceToDevice::default()
         };
-        if let Ok(encoded_msg) = encode_proto(msg) {
-            if Self::broadcast_data_through_sfu(state, &encoded_msg).is_err() {
-                warn!("Could not send leaving message through the SFU");
-            } else {
-                debug!("Send leaving message over RTP through SFU.");
-            }
+        if Self::broadcast_data_through_sfu(state, &msg.encode_to_vec()).is_err() {
+            warn!("Could not send leaving message through the SFU");
         } else {
-            warn!("Could not encode leaving message")
+            debug!("Send leaving message over RTP through SFU.");
         }
 
         let msg = protobuf::signaling::CallMessage {
@@ -3041,7 +3187,7 @@ impl Client {
 
     fn handle_rtp_received(&self, header: rtp::Header, payload: &[u8]) {
         use protobuf::group_call::{
-            sfu_to_device::{CurrentDevices, DeviceJoinedOrLeft, Speaker},
+            sfu_to_device::{CurrentDevices, DeviceJoinedOrLeft, Removed, Speaker},
             DeviceToDevice, SfuToDevice,
         };
 
@@ -3054,6 +3200,7 @@ impl Client {
                     current_devices,
                     stats,
                     video_request: _,
+                    removed,
                 }) = SfuToDevice::decode(payload)
                 {
                     if let Some(Speaker {
@@ -3088,6 +3235,9 @@ impl Client {
                             stats.ideal_send_rate_kbps.unwrap_or(0),
                             stats.allocated_send_rate_kbps.unwrap_or(0)
                         );
+                    }
+                    if let Some(Removed {}) = removed {
+                        self.handle_removed_received();
                     }
                 }
                 debug!("Received RTP data from SFU: {:?}.", payload);
@@ -3133,6 +3283,16 @@ impl Client {
                 header.pt
             );
         }
+    }
+
+    fn handle_removed_received(&self) {
+        self.actor.send(move |state| {
+            if state.has_ever_been_participating_client {
+                Self::end(state, EndReason::RemovedFromCall);
+            } else {
+                Self::end(state, EndReason::DeniedRequestToJoinCall);
+            }
+        });
     }
 
     fn handle_speaker_received(&self, timestamp: rtp::Timestamp, demux_id: DemuxId) {
@@ -3298,12 +3458,6 @@ impl Client {
 
         barrier.wait();
     }
-}
-
-fn encode_proto(msg: impl prost::Message) -> Result<BytesMut> {
-    let mut bytes = BytesMut::with_capacity(msg.encoded_len());
-    msg.encode(&mut bytes)?;
-    Ok(bytes)
 }
 
 // We need to wrap a Call to implement PeerConnectionObserverTrait
@@ -3680,7 +3834,7 @@ mod tests {
         mpsc, Arc, Condvar, Mutex,
     };
 
-    use crate::webrtc::sim::media::FAKE_AUDIO_TRACK;
+    use crate::{lite::sfu::PeekDeviceInfo, webrtc::sim::media::FAKE_AUDIO_TRACK};
 
     use super::*;
     use std::sync::atomic::Ordering;
@@ -3767,7 +3921,7 @@ mod tests {
                 }
                 val = wait_val
             }
-            Some(val.clone().unwrap())
+            Some(val.take().unwrap())
         }
     }
 
@@ -3792,7 +3946,7 @@ mod tests {
         creator: Option<UserId>,
         era_id: Option<String>,
         max_devices: Option<u32>,
-        device_count: u32,
+        device_count: usize,
     }
 
     #[derive(Clone)]
@@ -4012,7 +4166,7 @@ mod tests {
             owned_state.creator = peek_info.creator.clone();
             owned_state.era_id = peek_info.era_id.clone();
             owned_state.max_devices = peek_info.max_devices;
-            owned_state.device_count = peek_info.device_count;
+            owned_state.device_count = peek_info.device_count();
             self.peek_changed.set();
         }
 
@@ -4154,22 +4308,7 @@ mod tests {
             assert!(self.observer.joined.wait(Duration::from_secs(5)));
         }
 
-        fn set_remotes_and_wait_until_applied(&self, clients: &[&TestClient]) {
-            let remote_devices = clients
-                .iter()
-                .map(|client| PeekDeviceInfo {
-                    demux_id: client.demux_id,
-                    user_id: Some(client.user_id.clone()),
-                })
-                .collect();
-            // Need to clone to pass over to the actor and set in observer.
-            let clients: Vec<TestClient> = clients.iter().copied().cloned().collect();
-            self.observer.set_recipients(clients.clone());
-            let peek_info = PeekInfo {
-                devices: remote_devices,
-                ..self.default_peek_info.clone()
-            };
-            self.client.set_peek_result(Ok(peek_info));
+        fn set_up_rtp_with_remotes(&self, clients: Vec<TestClient>) {
             let local_demux_id = self.demux_id;
             let sfu_rtp_packet_sender = self.sfu_rtp_packet_sender.clone();
             self.client.actor.send(move |state| {
@@ -4195,6 +4334,42 @@ mod tests {
                         }
                     }));
             });
+        }
+
+        fn set_remotes_and_wait_until_applied(&self, clients: &[&TestClient]) {
+            let remote_devices = clients
+                .iter()
+                .map(|client| PeekDeviceInfo {
+                    demux_id: client.demux_id,
+                    user_id: Some(client.user_id.clone()),
+                })
+                .collect();
+            // Need to clone to pass over to the actor and set in observer.
+            let clients: Vec<TestClient> = clients.iter().copied().cloned().collect();
+            self.observer.set_recipients(clients.clone());
+            let peek_info = PeekInfo {
+                devices: remote_devices,
+                ..self.default_peek_info.clone()
+            };
+            self.client.set_peek_result(Ok(peek_info));
+            self.set_up_rtp_with_remotes(clients);
+            self.wait_for_client_to_process();
+        }
+
+        fn set_pending_clients_and_wait_until_applied(&self, clients: &[&TestClient]) {
+            let remote_devices = clients
+                .iter()
+                .map(|client| PeekDeviceInfo {
+                    demux_id: client.demux_id,
+                    user_id: Some(client.user_id.clone()),
+                })
+                .collect();
+            let peek_info = PeekInfo {
+                pending_devices: remote_devices,
+                ..self.default_peek_info.clone()
+            };
+            self.client.set_peek_result(Ok(peek_info));
+            self.set_up_rtp_with_remotes(vec![]);
             self.wait_for_client_to_process();
         }
 
@@ -4796,10 +4971,10 @@ mod tests {
                     user_id: None,
                 },
             ],
+            pending_devices: vec![],
             creator: None,
             era_id: None,
             max_devices: None,
-            device_count: 3,
         };
         client.client.set_peek_result(Ok(peek_info));
         client.wait_for_client_to_process();
@@ -4827,10 +5002,10 @@ mod tests {
                 demux_id: 1,
                 user_id: Some(b"1".to_vec()),
             }],
+            pending_devices: vec![],
             creator: None,
             era_id: None,
             max_devices: None,
-            device_count: 1,
         }));
 
         assert!(client
@@ -4877,10 +5052,10 @@ mod tests {
         peeker.observer.handle_peek_changed(
             0,
             &PeekInfo {
+                pending_devices: vec![],
                 creator: None,
                 era_id: None,
                 devices: vec![],
-                device_count: 0,
                 max_devices: None,
             },
             &HashSet::default(),
@@ -4891,10 +5066,10 @@ mod tests {
         peeker.observer.handle_peek_changed(
             0,
             &PeekInfo {
+                pending_devices: vec![],
                 creator: None,
                 era_id: None,
                 devices: vec![],
-                device_count: 3,
                 max_devices: None,
             },
             &([joiner1.user_id.clone(), joiner2.user_id.clone()]
@@ -4923,6 +5098,43 @@ mod tests {
 
         peeker.set_remotes_and_wait_until_applied(&[]);
         assert_eq!(0, peeker.observer.joined_members().len());
+
+        peeker.disconnect_and_wait_until_ended();
+    }
+
+    #[test]
+    fn pending_clients() {
+        let peeker = TestClient::new(vec![42], 42);
+        peeker.connect_join_and_wait_until_joined();
+
+        assert_eq!(0, peeker.observer.joined_members().len());
+
+        let joiner1 = TestClient::new(vec![1], 1);
+        let joiner2 = TestClient::new(vec![2], 2);
+
+        peeker.set_pending_clients_and_wait_until_applied(&[&joiner1]);
+        assert!(peeker
+            .observer
+            .peek_changed
+            .wait(Duration::from_millis(200)));
+
+        peeker.set_pending_clients_and_wait_until_applied(&[&joiner1, &joiner2]);
+        assert!(peeker
+            .observer
+            .peek_changed
+            .wait(Duration::from_millis(200)));
+
+        peeker.set_pending_clients_and_wait_until_applied(&[&joiner2, &joiner1]);
+        assert!(!peeker
+            .observer
+            .peek_changed
+            .wait(Duration::from_millis(200)));
+
+        peeker.set_pending_clients_and_wait_until_applied(&[&joiner1]);
+        assert!(peeker
+            .observer
+            .peek_changed
+            .wait(Duration::from_millis(200)));
 
         peeker.disconnect_and_wait_until_ended();
     }
@@ -5095,7 +5307,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(NORMAL_MAX_RECEIVE_RATE.as_kbps() as u32),
-                    active_speaker_height: None,
+                    active_speaker_height: Some(0),
                 }),
                 ..Default::default()
             },
@@ -5186,7 +5398,7 @@ mod tests {
                             height: Some(0),
                         },
                     ],
-                    max_kbps: Some(20_000_000),
+                    max_kbps: Some(NORMAL_MAX_RECEIVE_RATE.as_kbps() as u32),
                     active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
@@ -5228,6 +5440,153 @@ mod tests {
         assert_eq!(
             DeviceToSfu {
                 leave: Some(LeaveMessage {}),
+                ..Default::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+    }
+
+    #[test]
+    fn device_to_sfu_remove() {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+
+        let mut client1 = TestClient::new(vec![1], 1);
+
+        let (sender, receiver) = mpsc::channel();
+        client1.sfu_rtp_packet_sender = Some(sender);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[]);
+        client1.client.remove_client(32);
+
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                admin_action: Some(AdminAction::Remove(GenericAdminAction {
+                    target_demux_id: Some(32)
+                })),
+                ..Default::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+    }
+
+    #[test]
+    fn device_to_sfu_block() {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+
+        let mut client1 = TestClient::new(vec![1], 1);
+
+        let (sender, receiver) = mpsc::channel();
+        client1.sfu_rtp_packet_sender = Some(sender);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[]);
+        client1.client.block_client(32);
+
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                admin_action: Some(AdminAction::Block(GenericAdminAction {
+                    target_demux_id: Some(32)
+                })),
+                ..Default::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+    }
+
+    #[test]
+    fn device_to_sfu_approve() {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+
+        let mut client1 = TestClient::new(vec![1], 1);
+
+        let remote1 = TestClient::new(vec![11], 16);
+        let remote2a = TestClient::new(vec![22], 32);
+        let remote2b = TestClient::new(vec![22], 48);
+
+        let (sender, receiver) = mpsc::channel();
+        client1.sfu_rtp_packet_sender = Some(sender);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_pending_clients_and_wait_until_applied(&[&remote1, &remote2a, &remote2b]);
+        client1.client.approve_user(vec![22]);
+
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                admin_action: Some(AdminAction::Approve(GenericAdminAction {
+                    target_demux_id: Some(32)
+                })),
+                ..Default::default()
+            },
+            DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+    }
+
+    #[test]
+    fn approve_not_found() {
+        let mut client1 = TestClient::new(vec![1], 1);
+
+        let remote1 = TestClient::new(vec![11], 16);
+        let remote2a = TestClient::new(vec![22], 32);
+        let remote2b = TestClient::new(vec![22], 48);
+
+        let (sender, receiver) = mpsc::channel();
+        client1.sfu_rtp_packet_sender = Some(sender);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_pending_clients_and_wait_until_applied(&[&remote1, &remote2a, &remote2b]);
+        client1.client.approve_user(vec![33]);
+
+        receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect_err("No packets to send");
+    }
+
+    #[test]
+    fn device_to_sfu_deny() {
+        use protobuf::group_call::{
+            device_to_sfu::{AdminAction, GenericAdminAction},
+            DeviceToSfu,
+        };
+
+        let mut client1 = TestClient::new(vec![1], 1);
+
+        let remote1 = TestClient::new(vec![11], 16);
+        let remote2a = TestClient::new(vec![22], 32);
+        let remote2b = TestClient::new(vec![22], 48);
+
+        let (sender, receiver) = mpsc::channel();
+        client1.sfu_rtp_packet_sender = Some(sender);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_pending_clients_and_wait_until_applied(&[&remote1, &remote2a, &remote2b]);
+        client1.client.deny_user(vec![22]);
+
+        let (header, payload) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Get RTP packet to SFU");
+        assert_eq!(1, header.ssrc);
+        assert_eq!(
+            DeviceToSfu {
+                admin_action: Some(AdminAction::Deny(GenericAdminAction {
+                    target_demux_id: Some(32)
+                })),
                 ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
@@ -5337,8 +5696,8 @@ mod tests {
                 demux_id: 2,
                 user_id: None,
             }],
-            device_count: 1,
             max_devices: Some(1),
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5354,8 +5713,8 @@ mod tests {
                 demux_id: 2,
                 user_id: None,
             }],
-            device_count: 1,
             max_devices: Some(2),
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5372,8 +5731,8 @@ mod tests {
                 demux_id: 2,
                 user_id: None,
             }],
-            device_count: 1,
             max_devices: Some(2),
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5689,6 +6048,34 @@ mod tests {
     }
 
     #[test]
+    fn removal_before_approval() {
+        let client1 = TestClient::new(vec![1], 1);
+        let client2 = TestClient::new(vec![2], 2);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[&client2]);
+
+        client1.client.handle_removed_received();
+        assert_eq!(
+            Some(EndReason::DeniedRequestToJoinCall),
+            client1.observer.ended.wait(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn removal_after_approval() {
+        let client1 = TestClient::new(vec![1], 1);
+        let client2 = TestClient::new(vec![2], 2);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[&client2, &client1]);
+
+        client1.client.handle_removed_received();
+        assert_eq!(
+            Some(EndReason::RemovedFromCall),
+            client1.observer.ended.wait(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
     fn send_rates() {
         init_logging();
         let client1 = TestClient::new(vec![1], 1);
@@ -5713,8 +6100,8 @@ mod tests {
             .collect();
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: vec![],
-            device_count: 0,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5730,8 +6117,8 @@ mod tests {
 
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: devices[..1].to_vec(),
-            device_count: 1,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5747,8 +6134,8 @@ mod tests {
 
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: devices[..2].to_vec(),
-            device_count: 1,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5764,8 +6151,8 @@ mod tests {
 
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: devices[..5].to_vec(),
-            device_count: 5,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5781,8 +6168,8 @@ mod tests {
 
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: devices[..20].to_vec(),
-            device_count: 20,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5820,8 +6207,8 @@ mod tests {
 
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: devices[..0].to_vec(),
-            device_count: 0,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));
@@ -5848,8 +6235,8 @@ mod tests {
 
         client1.client.set_peek_result(Ok(PeekInfo {
             devices: devices[..20].to_vec(),
-            device_count: 20,
             max_devices: None,
+            pending_devices: vec![],
             creator: None,
             era_id: None,
         }));

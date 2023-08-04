@@ -17,7 +17,7 @@ use crate::android::android_platform::AndroidPlatform;
 use crate::android::call_manager;
 use crate::android::call_manager::AndroidCallManager;
 use crate::android::error;
-use crate::common::{CallMediaType, DataMode, DeviceId};
+use crate::common::{CallConfig, CallMediaType, DataMode, DeviceId};
 use crate::core::connection::Connection;
 use crate::core::util::try_scoped;
 use crate::core::{group_call, signaling};
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
         call_manager as *mut AndroidCallManager,
         call_id,
         jni_call_context,
-        DataMode::from_i32(data_mode),
+        CallConfig::default().with_data_mode(DataMode::from_i32(data_mode)),
         audio_levels_interval,
     ) {
         Ok(v) => v,
@@ -1002,6 +1002,92 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRequestVideo(
         client_id as group_call::ClientId,
         jni_rendered_resolutions,
         active_speaker_height,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcApproveUser(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    client_id: jlong,
+    other_user_id: jbyteArray,
+) {
+    match call_manager::approve_user(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        client_id as group_call::ClientId,
+        other_user_id,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDenyUser(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    client_id: jlong,
+    other_user_id: jbyteArray,
+) {
+    match call_manager::deny_user(
+        &env,
+        call_manager as *mut AndroidCallManager,
+        client_id as group_call::ClientId,
+        other_user_id,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRemoveClient(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    client_id: jlong,
+    other_client_demux_id: jlong,
+) {
+    match call_manager::remove_client(
+        call_manager as *mut AndroidCallManager,
+        client_id as group_call::ClientId,
+        other_client_demux_id,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&env, e);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcBlockClient(
+    env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    client_id: jlong,
+    other_client_demux_id: jlong,
+) {
+    match call_manager::block_client(
+        call_manager as *mut AndroidCallManager,
+        client_id as group_call::ClientId,
+        other_client_demux_id,
     ) {
         Ok(v) => v,
         Err(e) => {

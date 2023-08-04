@@ -78,7 +78,7 @@ impl group_call::Observer for Observer {
             "Peek info changed to creator: {:?}, era: {:?} devices: {:?}/{:?} {:?}",
             peek_info.creator,
             peek_info.era_id,
-            peek_info.device_count,
+            peek_info.device_count(),
             peek_info.max_devices,
             peek_info.devices,
         );
@@ -190,11 +190,9 @@ fn main() {
         hkdf_extra_info,
     ));
     let observer = Observer::default();
-    let config = peer_connection_factory::Config {
-        use_injectable_network: false,
-        ..Default::default()
-    };
-    let peer_connection_factory = PeerConnectionFactory::new(config).unwrap();
+    let peer_connection_factory =
+        PeerConnectionFactory::new(&peer_connection_factory::AudioConfig::default(), false)
+            .unwrap();
     let outgoing_audio_track = peer_connection_factory
         .create_outgoing_audio_track()
         .unwrap();

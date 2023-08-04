@@ -496,6 +496,82 @@ public final class GroupCall {
 
     /**
      *
+     * Approves a user to join the call.
+     *
+     * Should only be called if the current client is an admin for the call.
+     *
+     * @param userId  the ID of the user requesting to join the call, retrieved from PeekInfo
+     *
+     * @throws CallException for native code failures
+     *
+     */
+    public void approveUser(@NonNull UUID userId)
+        throws CallException
+    {
+        Log.i(TAG, "approveUser():");
+
+        ringrtcApproveUser(nativeCallManager, this.clientId, Util.getBytesFromUuid(userId));
+    }
+
+    /**
+     *
+     * Denies a user permission to join the call.
+     *
+     * Should only be called if the current client is an admin for the call.
+     *
+     * @param userId  the ID of the user requesting to join the call, retrieved from PeekInfo
+     *
+     * @throws CallException for native code failures
+     *
+     */
+    public void denyUser(@NonNull UUID userId)
+        throws CallException
+    {
+        Log.i(TAG, "denyUser():");
+
+        ringrtcDenyUser(nativeCallManager, this.clientId, Util.getBytesFromUuid(userId));
+    }
+
+    /**
+     *
+     * Removes another client from the call.
+     *
+     * Should only be called if the current client is an admin for the call.
+     *
+     * @param otherClientDemuxId  the demux ID of the client to remove, retrieved from RemoteDeviceState
+     *
+     * @throws CallException for native code failures
+     *
+     */
+    public void removeClient(long otherClientDemuxId)
+        throws CallException
+    {
+        Log.i(TAG, "removeClient():");
+
+        ringrtcRemoveClient(nativeCallManager, this.clientId, otherClientDemuxId);
+    }
+
+    /**
+     *
+     * Blocks another client for the duration of the call.
+     *
+     * Should only be called if the current client is an admin for the call.
+     *
+     * @param otherClientDemuxId  the demux ID of the client to remove, retrieved from RemoteDeviceState
+     *
+     * @throws CallException for native code failures
+     *
+     */
+    public void blockClient(long otherClientDemuxId)
+        throws CallException
+    {
+        Log.i(TAG, "blockClient():");
+
+        ringrtcBlockClient(nativeCallManager, this.clientId, otherClientDemuxId);
+    }
+
+    /**
+     *
      * Provides a collection of GroupMemberInfo objects representing all
      * the possible members of a group.
      *
@@ -772,6 +848,12 @@ public final class GroupCall {
 
         /** The server disconnected due to policy or some other controlled reason. */
         SERVER_EXPLICITLY_DISCONNECTED,
+
+        /** An admin denied your request to join the call. */
+        DENIED_REQUEST_TO_JOIN_CALL,
+
+        /** An admin removed you from the call. */
+        REMOVED_FROM_CALL,
 
         // Things that can go wrong
 
@@ -1157,6 +1239,30 @@ public final class GroupCall {
                                  long clientId,
                                  List<VideoRequest> renderedResolutions,
                                  int activeSpeakerHeight)
+        throws CallException;
+
+    private native
+        void ringrtcApproveUser(long nativeCallManager,
+                                long clientId,
+                                byte[] otherUserId)
+        throws CallException;
+
+    private native
+        void ringrtcDenyUser(long nativeCallManager,
+                             long clientId,
+                             byte[] otherUserId)
+        throws CallException;
+
+    private native
+        void ringrtcRemoveClient(long nativeCallManager,
+                                 long clientId,
+                                 long otherClientDemuxId)
+        throws CallException;
+
+    private native
+        void ringrtcBlockClient(long nativeCallManager,
+                                long clientId,
+                                long otherClientDemuxId)
         throws CallException;
 
     private native

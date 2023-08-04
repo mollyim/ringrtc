@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::common::{CallId, CallMediaType, DataMode, DeviceId, Result};
+use crate::common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result};
 use crate::core::call_manager::CallManager;
 use crate::core::group_call;
 use crate::core::group_call::{GroupId, SignalingMessageUrgency};
@@ -36,7 +36,7 @@ use crate::webrtc::media::{
 };
 use crate::webrtc::peer_connection::AudioLevel;
 use crate::webrtc::peer_connection_factory::{
-    self as pcf, AudioDevice, IceServer, PeerConnectionFactory,
+    self as pcf, AudioDevice, IceServer, PeerConnectionFactory, RffiAudioDeviceModuleType,
 };
 use crate::webrtc::peer_connection_observer::NetworkRoute;
 use neon::types::buffer::TypedArray;
@@ -338,10 +338,17 @@ impl CallEndpoint {
     ) -> Result<Self> {
         // Relevant for both group calls and 1:1 calls
         let (events_sender, events_receiver) = channel::<Event>();
-        let peer_connection_factory = PeerConnectionFactory::new(pcf::Config {
-            use_new_audio_device_module,
-            ..Default::default()
-        })?;
+        let peer_connection_factory = PeerConnectionFactory::new(
+            &pcf::AudioConfig {
+                audio_device_module_type: if use_new_audio_device_module {
+                    RffiAudioDeviceModuleType::New
+                } else {
+                    RffiAudioDeviceModuleType::Default
+                },
+                ..Default::default()
+            },
+            false,
+        )?;
         let outgoing_audio_track = peer_connection_factory.create_outgoing_audio_track()?;
         outgoing_audio_track.set_enabled(false);
         let outgoing_video_source = peer_connection_factory.create_outgoing_video_source()?;
@@ -513,6 +520,61 @@ fn to_js_buffer<'a>(cx: &mut FunctionContext<'a>, data: &[u8]) -> Handle<'a, JsV
     js_buffer.upcast()
 }
 
+fn to_js_peek_info<'a>(
+    cx: &mut FunctionContext<'a>,
+    peek_info: PeekInfo,
+) -> JsResult<'a, JsObject> {
+    let PeekInfo {
+        devices,
+        pending_devices: _pending_devices,
+        creator,
+        era_id,
+        max_devices,
+    } = &peek_info;
+
+    let js_devices = JsArray::new(cx, devices.len() as u32);
+    for (i, device) in devices.iter().enumerate() {
+        let js_device = cx.empty_object();
+        let js_demux_id = cx.number(device.demux_id);
+        js_device.set(cx, "demuxId", js_demux_id)?;
+        if let Some(user_id) = &device.user_id {
+            let js_user_id = to_js_buffer(cx, user_id);
+            js_device.set(cx, "userId", js_user_id)?;
+        }
+        js_devices.set(cx, i as u32, js_device)?;
+    }
+
+    let js_creator: Handle<JsValue> = match creator {
+        Some(creator) => to_js_buffer(cx, creator).upcast(),
+        None => cx.undefined().upcast(),
+    };
+    let era_id: Handle<JsValue> = match era_id {
+        None => cx.undefined().upcast(),
+        Some(id) => cx.string(id).upcast(),
+    };
+    let max_devices: Handle<JsValue> = match max_devices {
+        None => cx.undefined().upcast(),
+        Some(max_devices) => cx.number(*max_devices).upcast(),
+    };
+    let device_count: Handle<JsValue> = cx.number(peek_info.device_count() as u32).upcast();
+
+    let pending_users = peek_info.unique_pending_users();
+    let js_pending_users = JsArray::new(cx, pending_users.len() as u32);
+    for (i, user_id) in pending_users.iter().enumerate() {
+        let js_user_id = to_js_buffer(cx, user_id);
+        js_pending_users.set(cx, i as u32, js_user_id)?;
+    }
+
+    let js_info = cx.empty_object();
+    js_info.set(cx, "devices", js_devices)?;
+    js_info.set(cx, "creator", js_creator)?;
+    js_info.set(cx, "eraId", era_id)?;
+    js_info.set(cx, "maxDevices", max_devices)?;
+    js_info.set(cx, "deviceCount", device_count)?;
+    js_info.set(cx, "pendingUsers", js_pending_users)?;
+    Ok(js_info)
+}
+
 static CALL_ENDPOINT_PROPERTY_KEY: &str = "__call_endpoint_addr";
 
 fn with_call_endpoint<T>(cx: &mut FunctionContext, body: impl FnOnce(&mut CallEndpoint) -> T) -> T {
@@ -681,7 +743,6 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
         let call_context = NativeCallContext::new(
             hide_ip,
             ice_server,
-            50,
             endpoint.outgoing_audio_track.clone(),
             endpoint.outgoing_video_track.clone(),
             endpoint.incoming_video_sink.clone(),
@@ -690,10 +751,13 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
         // This should be cleared at with "call concluded", but just in case
         // we'll clear here as well.
         endpoint.incoming_video_sink.clear();
+        endpoint
+            .outgoing_video_source
+            .adapt_output_format(960, 720, 30);
         endpoint.call_manager.proceed(
             call_id,
             call_context,
-            DataMode::from_i32(data_mode),
+            CallConfig::default().with_data_mode(DataMode::from_i32(data_mode)),
             audio_levels_interval,
         )?;
         Ok(())
@@ -1185,6 +1249,10 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     };
 
     with_call_endpoint(&mut cx, |endpoint| {
+        endpoint
+            .outgoing_video_source
+            .adapt_output_format(640, 480, 30);
+
         let peer_connection_factory = endpoint.peer_connection_factory.clone();
         let outgoing_audio_track = endpoint.outgoing_audio_track.clone();
         let outgoing_video_track = endpoint.outgoing_video_track.clone();
@@ -1486,6 +1554,62 @@ fn requestVideo(mut cx: FunctionContext) -> JsResult<JsValue> {
         endpoint
             .call_manager
             .request_video(client_id, resolutions, active_speaker_height);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn approveUser(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
+    let other_user_id = cx.argument::<JsBuffer>(1)?.as_slice(&cx).to_vec();
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint.call_manager.approve_user(client_id, other_user_id);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn denyUser(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
+    let other_user_id = cx.argument::<JsBuffer>(1)?.as_slice(&cx).to_vec();
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint.call_manager.deny_user(client_id, other_user_id);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn removeClient(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
+    let other_demux_id = cx.argument::<JsNumber>(1)?.value(&mut cx) as DemuxId;
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint
+            .call_manager
+            .remove_client(client_id, other_demux_id);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn blockClient(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
+    let other_demux_id = cx.argument::<JsNumber>(1)?.value(&mut cx) as DemuxId;
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint
+            .call_manager
+            .block_client(client_id, other_demux_id);
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -2338,47 +2462,8 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 client_id,
                 peek_info,
             }) => {
-                let PeekInfo {
-                    devices,
-                    creator,
-                    era_id,
-                    max_devices,
-                    device_count,
-                } = peek_info;
-
                 let method_name = "handlePeekChanged";
-
-                let js_devices = JsArray::new(&mut cx, devices.len() as u32);
-                for (i, device) in devices.into_iter().enumerate() {
-                    let js_device = cx.empty_object();
-                    let js_demux_id = cx.number(device.demux_id);
-                    js_device.set(&mut cx, "demuxId", js_demux_id)?;
-                    if let Some(user_id) = device.user_id {
-                        let js_user_id = to_js_buffer(&mut cx, &user_id);
-                        js_device.set(&mut cx, "userId", js_user_id)?;
-                    }
-                    js_devices.set(&mut cx, i as u32, js_device)?;
-                }
-                let js_creator: neon::handle::Handle<JsValue> = match creator {
-                    Some(creator) => to_js_buffer(&mut cx, &creator).upcast(),
-                    None => cx.undefined().upcast(),
-                };
-                let era_id: neon::handle::Handle<JsValue> = match era_id {
-                    None => cx.undefined().upcast(),
-                    Some(id) => cx.string(id).upcast(),
-                };
-                let max_devices: neon::handle::Handle<JsValue> = match max_devices {
-                    None => cx.undefined().upcast(),
-                    Some(max_devices) => cx.number(max_devices).upcast(),
-                };
-                let device_count: neon::handle::Handle<JsValue> = cx.number(device_count).upcast();
-
-                let js_info = cx.empty_object();
-                js_info.set(&mut cx, "devices", js_devices)?;
-                js_info.set(&mut cx, "creator", js_creator)?;
-                js_info.set(&mut cx, "eraId", era_id)?;
-                js_info.set(&mut cx, "maxDevices", max_devices)?;
-                js_info.set(&mut cx, "deviceCount", device_count)?;
+                let js_info = to_js_peek_info(&mut cx, peek_info)?;
 
                 let args: Vec<Handle<JsValue>> =
                     vec![cx.number(client_id).upcast(), js_info.upcast()];
@@ -2391,46 +2476,8 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 peek_result,
             }) => {
                 let (js_status, js_info) = match peek_result {
-                    Ok(PeekInfo {
-                        devices,
-                        creator,
-                        era_id,
-                        max_devices,
-                        device_count,
-                    }) => {
-                        let js_info = cx.empty_object();
-                        let js_devices = JsArray::new(&mut cx, devices.len() as u32);
-                        for (i, device) in devices.into_iter().enumerate() {
-                            let js_device = cx.empty_object();
-                            let js_demux_id = cx.number(device.demux_id);
-                            js_device.set(&mut cx, "demuxId", js_demux_id)?;
-                            if let Some(user_id) = device.user_id {
-                                let js_user_id = to_js_buffer(&mut cx, &user_id);
-                                js_device.set(&mut cx, "userId", js_user_id)?;
-                            }
-                            js_devices.set(&mut cx, i as u32, js_device)?;
-                        }
-                        let js_creator: neon::handle::Handle<JsValue> = match creator {
-                            Some(creator) => to_js_buffer(&mut cx, &creator).upcast(),
-                            None => cx.undefined().upcast(),
-                        };
-                        let era_id: neon::handle::Handle<JsValue> = match era_id {
-                            None => cx.undefined().upcast(),
-                            Some(id) => cx.string(id).upcast(),
-                        };
-                        let max_devices: neon::handle::Handle<JsValue> = match max_devices {
-                            None => cx.undefined().upcast(),
-                            Some(devices) => cx.number(devices).upcast(),
-                        };
-                        let device_count: neon::handle::Handle<JsValue> =
-                            cx.number(device_count).upcast();
-
-                        js_info.set(&mut cx, "devices", js_devices)?;
-                        js_info.set(&mut cx, "creator", js_creator)?;
-                        js_info.set(&mut cx, "eraId", era_id)?;
-                        js_info.set(&mut cx, "maxDevices", max_devices)?;
-                        js_info.set(&mut cx, "deviceCount", device_count)?;
-
+                    Ok(peek_info) => {
+                        let js_info = to_js_peek_info(&mut cx, peek_info)?;
                         (cx.number(200), js_info.upcast())
                     }
                     Err(status) => (cx.number(status.code), cx.undefined().upcast()),
@@ -2644,6 +2691,10 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_resendMediaKeys", resendMediaKeys)?;
     cx.export_function("cm_setDataMode", setDataMode)?;
     cx.export_function("cm_requestVideo", requestVideo)?;
+    cx.export_function("cm_approveUser", approveUser)?;
+    cx.export_function("cm_denyUser", denyUser)?;
+    cx.export_function("cm_removeClient", removeClient)?;
+    cx.export_function("cm_blockClient", blockClient)?;
     cx.export_function("cm_setGroupMembers", setGroupMembers)?;
     cx.export_function("cm_setMembershipProof", setMembershipProof)?;
     cx.export_function("cm_peekGroupCall", peekGroupCall)?;

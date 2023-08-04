@@ -24,16 +24,16 @@ use crate::lite::http;
 /// The state that can be observed by "peeking".
 #[derive(Clone, Debug, Default)]
 pub struct PeekInfo {
-    /// Currently joined devices, excluding the local device and unknown users
+    /// All currently participating devices
     pub devices: Vec<PeekDeviceInfo>,
+    /// Devices waiting to be approved by an admin
+    pub pending_devices: Vec<PeekDeviceInfo>,
     /// The user who created the call
     pub creator: Option<UserId>,
     /// The "era" of this group call; changes every time the last partipant leaves and someone else joins again.
     pub era_id: Option<String>,
     /// The maximum number of devices that can join this group call.
     pub max_devices: Option<u32>,
-    /// The number of devices currently joined (including the local device and unknown users).
-    pub device_count: u32,
 }
 
 impl PeekInfo {
@@ -43,7 +43,21 @@ impl PeekInfo {
             .filter_map(|device| device.user_id.as_ref())
             .collect()
     }
+
+    pub fn unique_pending_users(&self) -> HashSet<&UserId> {
+        self.pending_devices
+            .iter()
+            .filter_map(|device| device.user_id.as_ref())
+            .collect()
+    }
+
+    /// The number of devices currently joined (including the local device, any pending devices, and
+    /// unknown users).
+    pub fn device_count(&self) -> usize {
+        self.devices.len() + self.pending_devices.len()
+    }
 }
+
 /// The per-device state observed by "peeking".
 #[derive(Clone, Debug)]
 pub struct PeekDeviceInfo {
@@ -62,6 +76,8 @@ struct SerializedPeekInfo {
     #[serde(rename = "participants")]
     devices: Vec<SerializedPeekDeviceInfo>,
     creator: Option<String>,
+    #[serde(rename = "pendingClients", default)]
+    pending_clients: Vec<SerializedPeekDeviceInfo>,
 }
 
 /// Form of PeekDeviceInfo sent over HTTP.
@@ -69,17 +85,21 @@ struct SerializedPeekInfo {
 #[derive(Deserialize, Debug)]
 struct SerializedPeekDeviceInfo {
     #[serde(rename = "opaqueUserId")]
-    opaque_user_id: OpaqueUserId,
+    opaque_user_id: Option<OpaqueUserId>,
     #[serde(rename = "demuxId")]
     demux_id: u32,
 }
 
 impl SerializedPeekInfo {
     fn deobfuscate(self, member_resolver: &dyn MemberResolver) -> PeekInfo {
-        let device_count = self.devices.len() as u32;
         PeekInfo {
             devices: self
                 .devices
+                .into_iter()
+                .map(|device| device.deobfuscate(member_resolver))
+                .collect(),
+            pending_devices: self
+                .pending_clients
                 .into_iter()
                 .map(|device| device.deobfuscate(member_resolver))
                 .collect(),
@@ -89,7 +109,6 @@ impl SerializedPeekInfo {
                 .and_then(|opaque_user_id| member_resolver.resolve(opaque_user_id)),
             era_id: self.era_id,
             max_devices: self.max_devices,
-            device_count,
         }
     }
 }
@@ -98,7 +117,9 @@ impl SerializedPeekDeviceInfo {
     fn deobfuscate(self, member_resolver: &dyn MemberResolver) -> PeekDeviceInfo {
         PeekDeviceInfo {
             demux_id: self.demux_id,
-            user_id: member_resolver.resolve(&self.opaque_user_id),
+            user_id: self
+                .opaque_user_id
+                .and_then(|user_id| member_resolver.resolve(&user_id)),
         }
     }
 }
@@ -345,8 +366,9 @@ pub fn peek(
             ) {
                 Ok(deserialized) => {
                     info!(
-                        "Got group call peek result with device count = {}",
-                        deserialized.devices.len()
+                        "Got group call peek result with device count = {}, pending count = {}",
+                        deserialized.devices.len(),
+                        deserialized.pending_clients.len(),
                     );
                     Ok(deserialized.deobfuscate(&*member_resolver))
                 }
@@ -613,6 +635,9 @@ pub mod ios {
             let joined_members = peek_info.unique_users();
             let rtc_joined_members: Vec<rtc_Bytes<'_>> =
                 joined_members.iter().map(rtc_Bytes::from).collect();
+            let pending_users = peek_info.unique_pending_users();
+            let rtc_pending_users: Vec<rtc_Bytes<'_>> =
+                pending_users.iter().map(rtc_Bytes::from).collect();
             let response = rtc_sfu_Response {
                 error_status_code,
                 value: rtc_sfu_PeekInfo {
@@ -620,7 +645,8 @@ pub mod ios {
                     creator: rtc_Bytes::from_or_default(peek_info.creator.as_ref()),
                     era_id: rtc_String::from_or_default(peek_info.era_id.as_ref()),
                     max_devices: rtc_OptionalU32::from_or_default(peek_info.max_devices),
-                    device_count: peek_info.device_count,
+                    device_count: peek_info.device_count() as u32,
+                    pending_users: rtc_UserIds::from(&rtc_pending_users),
                 },
             };
             let unretained = self.retained;
@@ -643,6 +669,7 @@ pub mod ios {
         max_devices: rtc_OptionalU32,
         device_count: u32,
         joined_members: rtc_UserIds<'a>,
+        pending_users: rtc_UserIds<'a>,
     }
 
     #[repr(C)]
@@ -691,11 +718,55 @@ mod tests {
             max_devices: Some(16),
             devices: vec![
                 SerializedPeekDeviceInfo {
-                    opaque_user_id: "u1".to_string(),
+                    opaque_user_id: Some("u1".to_string()),
                     demux_id: 0x11111110,
                 },
                 SerializedPeekDeviceInfo {
+                    opaque_user_id: Some("u2".to_string()),
+                    demux_id: 0x22222220,
+                },
+            ],
+            pending_clients: vec![],
+            creator: None,
+        };
+
+        let peek_info = peek_response.deobfuscate(&user_map);
+        assert_eq!(
+            peek_info
+                .devices
+                .iter()
+                .filter_map(|device| device.user_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec![[1u8; 4].as_ref(), [2u8; 4].as_ref()]
+        );
+    }
+
+    #[test]
+    fn endpoint_ids_to_user_ids_by_map_in_pending_clients() {
+        let user_map = MemberMap {
+            members: vec![
+                OpaqueUserIdMapping {
+                    user_id: vec![1u8; 4],
+                    opaque_user_id: "u1".to_string(),
+                },
+                OpaqueUserIdMapping {
+                    user_id: vec![2u8; 4],
                     opaque_user_id: "u2".to_string(),
+                },
+            ],
+        };
+
+        let peek_response = SerializedPeekInfo {
+            era_id: Some("paleozoic".to_string()),
+            max_devices: Some(16),
+            devices: vec![],
+            pending_clients: vec![
+                SerializedPeekDeviceInfo {
+                    opaque_user_id: Some("u1".to_string()),
+                    demux_id: 0x11111110,
+                },
+                SerializedPeekDeviceInfo {
+                    opaque_user_id: Some("u2".to_string()),
                     demux_id: 0x22222220,
                 },
             ],
@@ -705,7 +776,7 @@ mod tests {
         let peek_info = peek_response.deobfuscate(&user_map);
         assert_eq!(
             peek_info
-                .devices
+                .pending_devices
                 .iter()
                 .filter_map(|device| device.user_id.as_ref())
                 .collect::<Vec<_>>(),
@@ -740,14 +811,15 @@ mod tests {
                 max_devices: Some(16),
                 devices: vec![
                     SerializedPeekDeviceInfo {
-                        opaque_user_id: encrypt(uuid_1, &secret_params),
+                        opaque_user_id: Some(encrypt(uuid_1, &secret_params)),
                         demux_id: 0x11111110,
                     },
                     SerializedPeekDeviceInfo {
-                        opaque_user_id: encrypt(uuid_2, &secret_params),
+                        opaque_user_id: Some(encrypt(uuid_2, &secret_params)),
                         demux_id: 0x22222220,
                     },
                 ],
+                pending_clients: vec![],
                 creator: None,
             };
 

@@ -64,6 +64,16 @@ pub unsafe fn Rust_pushVideoFrame(
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_adaptOutputVideoFormat(
+    _source: webrtc::ptr::BorrowedRc<RffiVideoSource>,
+    _width: u16,
+    _height: u16,
+    _fps: u8,
+) {
+    info!("Rust_adaptOutputVideoFormat()");
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_copyVideoFrameBufferFromI420(
     _width: u32,
     _height: u32,
@@ -99,6 +109,14 @@ pub unsafe fn Rust_convertVideoFrameBufferToRgba(
     _rgba_out: *mut u8,
 ) {
     info!("Rust_convertVideoFrameBufferToRgba()");
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_getVideoFrameBufferAsI420(
+    _buffer: webrtc::ptr::BorrowedRc<RffiVideoFrameBuffer>,
+) -> webrtc::ptr::Borrowed<u8> {
+    info!("Rust_getVideoFrameBufferAsI420()");
+    webrtc::ptr::Borrowed::null()
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]

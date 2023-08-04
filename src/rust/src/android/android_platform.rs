@@ -18,7 +18,7 @@ use crate::android::error::AndroidError;
 use crate::android::jni_util::*;
 use crate::android::webrtc_java_media_stream::JavaMediaStream;
 use crate::common::{
-    ApplicationEvent, CallDirection, CallId, CallMediaType, DataMode, DeviceId, Result,
+    ApplicationEvent, CallConfig, CallDirection, CallId, CallMediaType, DeviceId, Result,
 };
 use crate::core::call::Call;
 use crate::core::connection::{Connection, ConnectionType};
@@ -270,15 +270,15 @@ impl Platform for AndroidPlatform {
         remote_device_id: DeviceId,
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
-        data_mode: DataMode,
+        call_config: CallConfig,
         audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<Self>> {
         info!(
-            "create_connection(): call_id: {} remote_device_id: {} signaling_version: {:?}, data_mode: {}, audio_levels_interval: {:?}",
+            "create_connection(): call_id: {} remote_device_id: {} signaling_version: {:?}, data_mode: {:?}, audio_levels_interval: {:?}",
             call.call_id(),
             remote_device_id,
             signaling_version,
-            data_mode,
+            call_config,
             audio_levels_interval,
         );
 
@@ -289,7 +289,7 @@ impl Platform for AndroidPlatform {
             call.clone(),
             remote_device_id,
             connection_type,
-            data_mode,
+            call_config,
             audio_levels_interval,
             None, // The app adds sinks to VideoTracks.
         )?;
@@ -589,7 +589,7 @@ impl Platform for AndroidPlatform {
             let call_id_jlong = u64::from(call_id) as jlong;
             let receiver_device_id = receiver_device_id as jint;
 
-            let ice_candidate_list = match jni_new_linked_list(&env) {
+            let ice_candidate_list = match jni_new_arraylist(&env, send.ice.candidates.len()) {
                 Ok(v) => v,
                 Err(error) => {
                     error!("ice_candidate_list: {:?}", error);
@@ -1021,7 +1021,7 @@ impl Platform for AndroidPlatform {
                         }
                     };
 
-                let received_levels_list = match jni_new_linked_list(&env) {
+                let received_levels_list = match jni_new_arraylist(&env, received_levels.len()) {
                     Ok(v) => v,
                     Err(error) => {
                         error!("{:?}", error);
@@ -1123,7 +1123,8 @@ impl Platform for AndroidPlatform {
                     }
                 };
 
-            let remote_device_state_list = match jni_new_linked_list(&env) {
+            let remote_device_state_list = match jni_new_arraylist(&env, remote_device_states.len())
+            {
                 Ok(v) => v,
                 Err(error) => {
                     error!("{:?}", error);
@@ -1518,7 +1519,7 @@ impl AndroidPlatform {
                     return Ok(JObject::null());
                 }
             };
-            let jni_headers = match jni_new_linked_list(&env) {
+            let jni_headers = match jni_new_arraylist(&env, headers.len()) {
                 Ok(v) => v,
                 Err(error) => {
                     error!("jni_headers: {:?}", error);
@@ -1674,11 +1675,11 @@ impl AndroidPlatform {
         &self,
         env: &JNIEnv<'a>,
         peek_info: &PeekInfo,
-        joined_members: &mut dyn Iterator<Item = &UserId>,
+        joined_members: &mut dyn ExactSizeIterator<Item = &UserId>,
     ) -> Result<JObject<'a>> {
-        let joined_member_list = jni_new_linked_list(env)?;
+        let joined_member_list = jni_new_arraylist(env, joined_members.len())?;
         for joined_member in joined_members {
-            let jni_opaque_user_id = match env.byte_array_from_slice(joined_member.as_ref()) {
+            let jni_opaque_user_id = match env.byte_array_from_slice(joined_member) {
                 Ok(v) => JObject::from(v),
                 Err(error) => {
                     error!("{:?}", error);
@@ -1707,7 +1708,25 @@ impl AndroidPlatform {
             Some(era_id) => env.new_string(era_id)?.into(),
         };
         let jni_max_devices = self.get_optional_u32_long_object(env, peek_info.max_devices)?;
-        let jni_device_count = peek_info.device_count as jlong;
+        let jni_device_count = peek_info.device_count() as jlong;
+
+        let pending_users = peek_info.unique_pending_users();
+        let pending_user_list = jni_new_arraylist(env, pending_users.len())?;
+        for pending_user in pending_users {
+            let jni_opaque_user_id = match env.byte_array_from_slice(pending_user) {
+                Ok(v) => JObject::from(v),
+                Err(error) => {
+                    error!("{:?}", error);
+                    continue;
+                }
+            };
+
+            let result = pending_user_list.add(jni_opaque_user_id);
+            if result.is_err() {
+                error!("{:?}", result.err());
+                continue;
+            }
+        }
 
         let args = jni_args!((
             joined_member_list => java.util.List,
@@ -1715,6 +1734,7 @@ impl AndroidPlatform {
             jni_era_id => java.lang.String,
             jni_max_devices => java.lang.Long,
             jni_device_count => long,
+            pending_user_list => java.util.List,
         ) -> org.signal.ringrtc.PeekInfo);
         let result = env.call_static_method(
             self.class_cache.get_class(PEEK_INFO_CLASS)?,

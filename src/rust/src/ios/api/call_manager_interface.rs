@@ -15,7 +15,7 @@ use libc::size_t;
 use crate::ios::call_manager;
 use crate::ios::call_manager::IosCallManager;
 
-use crate::common::{CallMediaType, DataMode, DeviceId};
+use crate::common::{CallConfig, CallMediaType, DataMode, DeviceId};
 use crate::core::group_call;
 use crate::core::signaling;
 use crate::lite::call_links::CallLinkRootKey;
@@ -473,6 +473,7 @@ pub struct AppInterface {
         eraId: AppByteSlice,
         maxDevices: AppOptionalUInt32,
         deviceCount: u32,
+        pendingUsers: AppUuidArray,
     ),
     ///
     pub handleEnded:
@@ -573,7 +574,7 @@ pub extern "C" fn ringrtcProceed(
         callManager as *mut IosCallManager,
         callId,
         appCallContext,
-        DataMode::from_i32(dataMode),
+        CallConfig::default().with_data_mode(DataMode::from_i32(dataMode)),
         audio_levels_interval,
     ) {
         Ok(_v) => {
@@ -1262,6 +1263,84 @@ pub extern "C" fn ringrtcRequestVideo(
         clientId,
         rendered_resolutions,
         activeSpeakerHeight,
+    );
+    if result.is_err() {
+        error!("{:?}", result.err());
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn ringrtcApproveUser(
+    callManager: *mut c_void,
+    clientId: group_call::ClientId,
+    otherUserId: AppByteSlice,
+) {
+    info!("ringrtcApproveUser():");
+
+    let Some(user_id) = byte_vec_from_app_slice(&otherUserId) else {
+        error!("Invalid userId");
+        return;
+    };
+
+    let result = call_manager::approve_user(callManager as *mut IosCallManager, clientId, user_id);
+    if result.is_err() {
+        error!("{:?}", result.err());
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn ringrtcDenyUser(
+    callManager: *mut c_void,
+    clientId: group_call::ClientId,
+    otherUserId: AppByteSlice,
+) {
+    info!("ringrtcDenyUser():");
+
+    let Some(user_id) = byte_vec_from_app_slice(&otherUserId) else {
+        error!("Invalid userId");
+        return;
+    };
+
+    let result = call_manager::deny_user(callManager as *mut IosCallManager, clientId, user_id);
+    if result.is_err() {
+        error!("{:?}", result.err());
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn ringrtcRemoveClient(
+    callManager: *mut c_void,
+    clientId: group_call::ClientId,
+    otherClientDemuxId: DemuxId,
+) {
+    info!("ringrtcRemoveClient():");
+
+    let result = call_manager::remove_client(
+        callManager as *mut IosCallManager,
+        clientId,
+        otherClientDemuxId,
+    );
+    if result.is_err() {
+        error!("{:?}", result.err());
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn ringrtcBlockClient(
+    callManager: *mut c_void,
+    clientId: group_call::ClientId,
+    otherClientDemuxId: DemuxId,
+) {
+    info!("ringrtcBlockClient():");
+
+    let result = call_manager::block_client(
+        callManager as *mut IosCallManager,
+        clientId,
+        otherClientDemuxId,
     );
     if result.is_err() {
         error!("{:?}", result.err());

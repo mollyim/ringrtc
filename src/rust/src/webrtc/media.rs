@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use std::slice;
+
 use crate::webrtc;
 
 pub use crate::webrtc::peer_connection_factory::RffiPeerConnectionFactoryOwner;
@@ -209,6 +211,23 @@ impl VideoFrame {
             )
         }
     }
+
+    /// Directly access the raw I420 data.
+    ///
+    /// Mostly used for testing.
+    pub fn as_i420(&self) -> Option<&[u8]> {
+        unsafe {
+            let ptr =
+                media::Rust_getVideoFrameBufferAsI420(self.rffi_buffer.as_borrowed()).as_ptr();
+            if ptr.is_null() {
+                return None;
+            }
+            Some(slice::from_raw_parts(
+                ptr,
+                self.width() as usize * self.height() as usize * 3 / 2,
+            ))
+        }
+    }
 }
 
 /// Rust wrapper around WebRTC C++ VideoTrackSourceInterface object.
@@ -229,6 +248,12 @@ impl VideoSource {
     pub fn push_frame(&self, frame: VideoFrame) {
         unsafe {
             media::Rust_pushVideoFrame(self.rffi.as_borrowed(), frame.rffi_buffer.as_borrowed());
+        }
+    }
+
+    pub fn adapt_output_format(&self, width: u16, height: u16, fps: u8) {
+        unsafe {
+            media::Rust_adaptOutputVideoFormat(self.rffi.as_borrowed(), width, height, fps);
         }
     }
 }

@@ -22,7 +22,7 @@ use crate::android::jni_util::*;
 use crate::android::logging::init_logging;
 use crate::android::webrtc_peer_connection_factory::*;
 
-use crate::common::{CallId, CallMediaType, DataMode, DeviceId, Result};
+use crate::common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result};
 use crate::core::call_manager::CallManager;
 use crate::core::connection::Connection;
 use crate::core::util::{ptr_as_box, ptr_as_mut};
@@ -187,7 +187,7 @@ pub fn proceed(
     call_manager: *mut AndroidCallManager,
     call_id: jlong,
     jni_call_context: JObject,
-    data_mode: DataMode,
+    call_config: CallConfig,
     audio_levels_interval: Option<Duration>,
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
@@ -202,7 +202,7 @@ pub fn proceed(
     call_manager.proceed(
         call_id,
         android_call_context,
-        data_mode,
+        call_config,
         audio_levels_interval,
     )
 }
@@ -1135,6 +1135,60 @@ pub fn request_video(
         rendered_resolutions,
         active_speaker_height as u16,
     );
+    Ok(())
+}
+
+pub fn approve_user(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    client_id: group_call::ClientId,
+    other_user_id: jbyteArray,
+) -> Result<()> {
+    info!("approve_user(): id: {}", client_id);
+
+    let other_user_id = env.convert_byte_array(other_user_id)?;
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.approve_user(client_id, other_user_id);
+    Ok(())
+}
+
+pub fn deny_user(
+    env: &JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    client_id: group_call::ClientId,
+    other_user_id: jbyteArray,
+) -> Result<()> {
+    info!("deny_user(): id: {}", client_id);
+
+    let other_user_id = env.convert_byte_array(other_user_id)?;
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.deny_user(client_id, other_user_id);
+    Ok(())
+}
+
+pub fn remove_client(
+    call_manager: *mut AndroidCallManager,
+    client_id: group_call::ClientId,
+    other_client_demux_id: jlong,
+) -> Result<()> {
+    info!("remove_client(): id: {}", client_id);
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.remove_client(client_id, other_client_demux_id as u32);
+    Ok(())
+}
+
+pub fn block_client(
+    call_manager: *mut AndroidCallManager,
+    client_id: group_call::ClientId,
+    other_client_demux_id: jlong,
+) -> Result<()> {
+    info!("block_client(): id: {}", client_id);
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.block_client(client_id, other_client_demux_id as u32);
     Ok(())
 }
 

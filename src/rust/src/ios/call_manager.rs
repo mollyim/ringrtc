@@ -14,7 +14,7 @@ use anyhow::anyhow;
 use crate::ios::api::call_manager_interface::{AppCallContext, AppInterface, AppObject};
 use crate::ios::ios_platform::IosPlatform;
 
-use crate::common::{CallId, CallMediaType, DataMode, DeviceId, Result};
+use crate::common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result};
 use crate::core::call_manager::CallManager;
 use crate::core::util::{ptr_as_box, ptr_as_mut, uuid_to_string};
 use crate::core::{call_manager, group_call, signaling};
@@ -22,7 +22,7 @@ use crate::error::RingRtcError;
 use crate::lite::call_links::CallLinkRootKey;
 use crate::lite::{
     http,
-    sfu::{GroupMember, UserId},
+    sfu::{DemuxId, GroupMember, UserId},
 };
 use crate::protobuf;
 use crate::webrtc;
@@ -74,7 +74,7 @@ pub fn proceed(
     call_manager: *mut IosCallManager,
     call_id: u64,
     app_call_context: AppCallContext,
-    data_mode: DataMode,
+    call_config: CallConfig,
     audio_levels_interval: Option<Duration>,
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
@@ -85,7 +85,7 @@ pub fn proceed(
     call_manager.proceed(
         call_id,
         Arc::new(app_call_context),
-        data_mode,
+        call_config,
         audio_levels_interval,
     )
 }
@@ -634,6 +634,54 @@ pub fn request_video(
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.request_video(client_id, rendered_resolutions, active_speaker_height);
+    Ok(())
+}
+
+pub fn approve_user(
+    call_manager: *mut IosCallManager,
+    client_id: group_call::ClientId,
+    other_user_id: UserId,
+) -> Result<()> {
+    info!("approve_user(): id: {}", client_id);
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.approve_user(client_id, other_user_id);
+    Ok(())
+}
+
+pub fn deny_user(
+    call_manager: *mut IosCallManager,
+    client_id: group_call::ClientId,
+    other_user_id: UserId,
+) -> Result<()> {
+    info!("deny_user(): id: {}", client_id);
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.deny_user(client_id, other_user_id);
+    Ok(())
+}
+
+pub fn remove_client(
+    call_manager: *mut IosCallManager,
+    client_id: group_call::ClientId,
+    other_client_demux_id: DemuxId,
+) -> Result<()> {
+    info!("remove_client(): id: {}", client_id);
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.remove_client(client_id, other_client_demux_id);
+    Ok(())
+}
+
+pub fn block_client(
+    call_manager: *mut IosCallManager,
+    client_id: group_call::ClientId,
+    other_client_demux_id: DemuxId,
+) -> Result<()> {
+    info!("block_client(): id: {}", client_id);
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.block_client(client_id, other_client_demux_id);
     Ok(())
 }
 

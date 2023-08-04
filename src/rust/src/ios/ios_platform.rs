@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::{
-    ApplicationEvent, CallDirection, CallId, CallMediaType, DataMode, DeviceId, Result,
+    ApplicationEvent, CallConfig, CallDirection, CallId, CallMediaType, DeviceId, Result,
 };
 use crate::core::call::Call;
 use crate::core::connection::{Connection, ConnectionType};
@@ -96,15 +96,15 @@ impl Platform for IosPlatform {
         remote_device_id: DeviceId,
         connection_type: ConnectionType,
         signaling_version: signaling::Version,
-        data_mode: DataMode,
+        call_config: CallConfig,
         audio_levels_interval: Option<Duration>,
     ) -> Result<Connection<Self>> {
         info!(
-            "create_connection(): call_id: {} remote_device_id: {}, signaling_version: {:?}, data_mode: {}, audio_levels_interval: {:?}",
+            "create_connection(): call_id: {} remote_device_id: {}, signaling_version: {:?}, call_config: {:?}, audio_levels_interval: {:?}",
             call.call_id(),
             remote_device_id,
             signaling_version,
-            data_mode,
+            call_config,
             audio_levels_interval,
         );
 
@@ -112,7 +112,7 @@ impl Platform for IosPlatform {
             call.clone(),
             remote_device_id,
             connection_type,
-            data_mode,
+            call_config,
             audio_levels_interval,
             None, // The app adds sinks to VideoTracks.
         )?;
@@ -668,11 +668,23 @@ impl Platform for IosPlatform {
             count: app_joined_members.len(),
         };
 
+        let mut app_pending_users: Vec<AppByteSlice> = Vec::new();
+
+        for member in peek_info.unique_pending_users() {
+            let app_pending_user = app_slice_from_bytes(Some(member));
+            app_pending_users.push(app_pending_user);
+        }
+
+        let app_pending_users_array = AppUuidArray {
+            uuids: app_pending_users.as_ptr(),
+            count: app_pending_users.len(),
+        };
+
         let app_creator = app_slice_from_bytes(peek_info.creator.as_ref());
         let app_era_id = app_slice_from_str(peek_info.era_id.as_ref());
 
         let app_max_devices = app_option_from_u32(peek_info.max_devices);
-        let device_count = peek_info.devices.len() as u32;
+        let device_count = peek_info.device_count() as u32;
 
         (self.app_interface.handlePeekChanged)(
             self.app_interface.object,
@@ -682,6 +694,7 @@ impl Platform for IosPlatform {
             app_era_id,
             app_max_devices,
             device_count,
+            app_pending_users_array,
         );
     }
 
