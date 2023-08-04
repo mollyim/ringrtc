@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+    - name: Free up disk space
+      run: sudo rm -rf /usr/share/dotnet /opt/ghc
+
     - uses: actions/checkout@v3
 
     - name: Validate Gradle Wrapper
