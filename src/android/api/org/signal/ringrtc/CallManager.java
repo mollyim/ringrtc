@@ -1065,6 +1065,7 @@ public class CallManager {
    * <ul>
    *   <li>401: the room does not exist (and this is the wrong API to create a new room)
    *   <li>403: the admin passkey is incorrect
+   *   <li>409: the room is currently in use, so restrictions cannot be changed at the moment
    * </ul>
    *
    * This request is idempotent; if it fails due to a network issue, it is safe to retry.
@@ -1163,7 +1164,7 @@ public class CallManager {
       if (result.isSuccess()) {
         handler.handleResponse(result.getValue());
       } else {
-        handler.handleResponse(new PeekInfo(Collections.emptyList(), null, null, null, 0, Collections.emptyList()));
+        handler.handleResponse(new PeekInfo(Collections.emptyList(), null, null, null, 0, 0, Collections.emptyList()));
       }
     });
     ringrtcPeekGroupCall(nativeCallManager, requestId, sfuUrl, membershipProof, Util.serializeFromGroupMemberInfo(groupMembers));

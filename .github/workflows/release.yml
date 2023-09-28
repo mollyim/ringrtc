@@ -5,6 +5,13 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: '25.2.9519653'
+
 jobs:
   publish:
     name: Publish
@@ -13,11 +20,6 @@ jobs:
     steps:
     - name: Free up disk space
       run: sudo rm -rf /usr/share/dotnet /opt/ghc
-
-    - uses: actions/checkout@v3
-
-    - name: Validate Gradle Wrapper
-      uses: gradle/wrapper-validation-action@v1
 
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -31,8 +33,17 @@ jobs:
       env:
         DEPOT_TOOLS_GIT_HASH: 3f3e2f789e27d41d3c20a555fd60a39ebd631e15
 
+    - uses: actions/checkout@v3
+
     - name: Install Rust targets
       run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v3
+      with:
+        distribution: temurin
+        java-version: 17
+        cache: gradle
 
     - name: Prepare workspace for Android
       run: bin/prepare-workspace android
@@ -40,7 +51,7 @@ jobs:
         DEPOT_TOOLS_UPDATE: 0
 
     - name: Build library
-      run: bin/build-aar --arch arm arm64 x64 --release-build
+      run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION" bin/build-aar --arch arm arm64 x64 --release-build
       env:
         OVERRIDE_VERSION: ${{ github.ref_name }}
 
@@ -54,7 +65,7 @@ jobs:
         path: out/release/libs/
 
     - name: Publish to GitHub Packages
-      run: ./bin/build-aar --arch arm arm64 x64 --release-build --publish
+      run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION" ./bin/build-aar --arch arm arm64 x64 --release-build --publish
       env:
         OVERRIDE_VERSION: ${{ github.ref_name }}
         GITHUB_TOKEN: ${{ secrets.PUBLISH_PAT }}

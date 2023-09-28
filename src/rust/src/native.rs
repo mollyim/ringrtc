@@ -433,6 +433,7 @@ impl Platform for NativePlatform {
             pc_observer,
             kind,
             connection.call_config().audio_jitter_buffer_max_packets,
+            connection.call_config().audio_rtcp_report_interval_ms,
             &context.ice_server,
             context.outgoing_audio_track.clone(),
             Some(context.outgoing_video_track.clone()),
@@ -914,7 +915,7 @@ impl Platform for NativePlatform {
             client_id,
             peek_info.era_id,
             peek_info.max_devices,
-            peek_info.device_count()
+            peek_info.device_count_including_pending_devices()
         );
 
         let result = self.send_group_update(GroupUpdate::PeekChanged {

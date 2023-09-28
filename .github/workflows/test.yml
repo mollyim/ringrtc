@@ -8,6 +8,9 @@ on:
       - '.github/FUNDING.yml'
       - '.github/ISSUE_TEMPLATE/**'
 
+permissions:
+  contents: read
+
 jobs:
   code_formatting:
     name: Code Formatting
@@ -71,6 +74,14 @@ jobs:
       run: >-
         grep -q '"prebuildChecksum": ""' package.json
       working-directory: src/node
+
+  wrapper_validation:
+    name: Validate Gradle wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Run wrapper validation
+        uses: gradle/wrapper-validation-action@v1
 
   tests:
     name: Tests

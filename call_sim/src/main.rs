@@ -75,7 +75,7 @@ async fn run_example(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "example".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         vec![TestCaseConfig {
@@ -99,7 +99,7 @@ async fn run_baseline_over_all_profiles(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "baseline_over_all_profiles".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         vec![TestCaseConfig {
@@ -130,7 +130,7 @@ async fn run_dtx_tests_with_loss(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "dtx_tests_with_loss".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         vec![
@@ -197,7 +197,7 @@ async fn run_example_with_relay(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "example_with_relay".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         vec![
@@ -305,11 +305,11 @@ async fn run_ptime_analysis(test: &mut Test) -> Result<()> {
     test.preprocess_sounds(vec!["speaker_a", "speaker_b"])
         .await?;
 
-    let test_cases = [20, 40, 60, 120].map(|packet_size_ms| TestCaseConfig {
-        test_case_name: format!("ptime_{packet_size_ms}"),
+    let test_cases = [20, 40, 60, 120].map(|initial_packet_size_ms| TestCaseConfig {
+        test_case_name: format!("ptime_{initial_packet_size_ms}"),
         client_a_config: CallConfig {
             audio: AudioConfig {
-                packet_size_ms,
+                initial_packet_size_ms,
                 ..Default::default()
             },
             ..Default::default()
@@ -317,7 +317,7 @@ async fn run_ptime_analysis(test: &mut Test) -> Result<()> {
         .with_audio_input_name("normal_phrasing"),
         client_b_config: CallConfig {
             audio: AudioConfig {
-                packet_size_ms,
+                initial_packet_size_ms,
                 ..Default::default()
             },
             ..Default::default()
@@ -329,7 +329,7 @@ async fn run_ptime_analysis(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "ptime_over_loss".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         test_cases.clone().into(),
@@ -347,7 +347,7 @@ async fn run_ptime_analysis(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "ptime_over_bandwidth".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         test_cases.into(),
@@ -373,7 +373,7 @@ async fn run_video_send_over_bandwidth(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "video_send_over_bandwidth".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         vec![TestCaseConfig {
@@ -419,7 +419,7 @@ async fn run_video_compare_vp8_vs_vp9(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "video_compare_vp8_vs_vp9".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         vec![
@@ -489,13 +489,13 @@ async fn run_video_compare_vp8_vs_vp9(test: &mut Test) -> Result<()> {
 // Uses a 12 second reference audio file so that the resulting 240 second session recording
 // can be chopped evenly and MOS calculated for each 12-second audio segment.
 async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
-    let test_cases = [20, 60, 120].map(|packet_size_ms| TestCaseConfig {
-        test_case_name: format!("ptime_{packet_size_ms}"),
+    let test_cases = [20, 60, 120].map(|initial_packet_size_ms| TestCaseConfig {
+        test_case_name: format!("ptime_{initial_packet_size_ms}"),
         length_seconds: 240,
         client_a_config: CallConfig {
             audio: AudioConfig {
                 input_name: "normal_12s".to_string(),
-                packet_size_ms,
+                initial_packet_size_ms,
                 analysis_mode: AudioAnalysisMode::Chopped,
                 generate_spectrogram: false,
                 ..Default::default()
@@ -505,7 +505,7 @@ async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
         client_b_config: CallConfig {
             audio: AudioConfig {
                 input_name: "normal_12s".to_string(),
-                packet_size_ms,
+                initial_packet_size_ms,
                 analysis_mode: AudioAnalysisMode::Chopped,
                 generate_spectrogram: false,
                 ..Default::default()
@@ -518,7 +518,7 @@ async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
     test.run(
         GroupConfig {
             group_name: "changing_bandwidth_audio_test".to_string(),
-            chart_dimensions: vec![ChartDimension::Mos],
+            chart_dimensions: vec![ChartDimension::MosSpeech],
             x_labels: &[],
         },
         test_cases.into(),

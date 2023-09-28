@@ -35,6 +35,8 @@ JAR_FILES      = [
 ]
 WEBRTC_SO_LIBS = ['libringrtc_rffi.so']
 SO_LIBS        = WEBRTC_SO_LIBS + ['libringrtc.so']
+# Android NDK used in webrtc/src/third_party/android_toolchain/.../ndk-version.h
+NDK_REVISION = '25.2.9519653'
 
 class Project(enum.Flag):
     WEBRTC = enum.auto()
@@ -110,9 +112,6 @@ def ParseArgs():
     parser.add_argument('--webrtc-version',
                         required=True,
                         help='WebRTC version')
-    parser.add_argument('--use-webrtc-ndk',
-                        action='store_true',
-                        help='''Use WebRTC's vendored NDK (and SDK) to build RingRTC''')
     parser.add_argument('--extra-gradle-args',
                         nargs='*', default=[],
                         help='Additional gradle arguments')
@@ -175,16 +174,9 @@ def GetOutputDir(build_dir, debug_build):
 def GetGradleBuildDir(build_dir):
     return os.path.join(build_dir, 'gradle')
 
-def RunSdkmanagerLicenses(webrtc_src_dir, dry_run):
-    executable = os.path.join(webrtc_src_dir, 'third_party', 'android_sdk', 'public',
-                              'cmdline-tools', 'latest', 'bin', 'sdkmanager')
-    cmd = [ executable, '--licenses' ]
-    RunCmd(dry_run, cmd)
-
 def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build,
-              use_webrtc_ndk,
               extra_gn_args, extra_gn_flags, extra_ninja_flags, extra_cargo_flags,
-              jobs, build_projects):
+              jobs, build_projects, publish_to_maven):
 
     logging.info('Building: {} ...'.format(arch))
 
@@ -216,10 +208,14 @@ def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build
         RunCmd(dry_run, ninja_args, cwd=webrtc_src_dir)
 
     if Project.RINGRTC in build_projects:
-        if use_webrtc_ndk:
-            ndk_dir = os.path.join(webrtc_src_dir, 'third_party', 'android_ndk')
-        else:
-            ndk_dir = os.environ['ANDROID_NDK_HOME']
+        ndk_dir = os.environ['ANDROID_NDK_HOME']
+        with open(os.path.join(ndk_dir, 'source.properties'), "r") as f:
+            kvs = {}
+            for line in f.readlines():
+                key, value = line.split("=")
+                kvs[key.strip()] = value.strip()
+            if kvs['Pkg.Revision'] != NDK_REVISION and publish_to_maven:
+                raise Exception('Android NDK must be ' + NDK_REVISION)
 
         ndk_host_os = platform.system().lower()
         ndk_toolchain_dir = os.path.join(
@@ -309,6 +305,17 @@ def GetAndroidApiLevel(arch):
     else:
         return 21
 
+def CollectWebrtcLicenses(dry_run, project_dir, webrtc_src_dir, build_dir, debug_build, archs):
+    assert len(NINJA_TARGETS) == 1, 'need to make this a loop'
+    md_gen_args = [
+        'vpython3',
+        os.path.join('tools_webrtc', 'libs', 'generate_licenses.py'),
+        '--target',
+        NINJA_TARGETS[0],
+        build_dir,
+    ] + [GetArchBuildDir(build_dir, arch, debug_build) for arch in archs]
+    RunCmd(dry_run, md_gen_args, cwd=webrtc_src_dir)
+
 def ArchiveWebrtc(dry_run, build_dir, debug_build, archs, webrtc_version):
     build_mode = 'debug' if debug_build else 'release'
     archive_name = f'webrtc-{webrtc_version}-android-{build_mode}.tar.bz2'
@@ -332,16 +339,23 @@ def ArchiveWebrtc(dry_run, build_dir, debug_build, archs, webrtc_version):
                 logging.debug('  Adding lib: {} (unstripped) ...'.format(lib))
                 add(os.path.join(output_arch_rel_path, 'lib.unstripped', lib))
 
+        logging.debug('  Adding acknowledgments file')
+        add('LICENSE.md')
+
 def CreateLibs(dry_run, project_dir, webrtc_src_dir, build_dir, archs, output,
-               debug_build, unstripped, use_webrtc_ndk,
+               debug_build, unstripped,
                extra_gn_args, extra_gn_flags, extra_ninja_flags,
-               extra_cargo_flags, jobs, build_projects, webrtc_version):
+               extra_cargo_flags, jobs, build_projects, webrtc_version,
+               publish_to_maven):
 
     for arch in archs:
         BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch,
-                  debug_build, use_webrtc_ndk,
+                  debug_build,
                   extra_gn_args, extra_gn_flags, extra_ninja_flags, extra_cargo_flags,
-                  jobs, build_projects)
+                  jobs, build_projects, publish_to_maven)
+
+    if Project.WEBRTC in build_projects:
+        CollectWebrtcLicenses(dry_run, project_dir, webrtc_src_dir, build_dir, debug_build, archs)
 
     if Project.WEBRTC_ARCHIVE in build_projects:
         ArchiveWebrtc(dry_run, build_dir, debug_build, archs, webrtc_version)
@@ -383,8 +397,8 @@ def CreateLibs(dry_run, project_dir, webrtc_src_dir, build_dir, archs, output,
                                          os.path.basename(lib)))
 
 def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
-                 gradle_dir, publish,
-                 use_webrtc_ndk, build_projects,
+                 gradle_dir, publish_to_maven,
+                 build_projects,
                  install_local, install_dir, project_dir, webrtc_src_dir, build_dir,
                  archs, output, debug_build, release_build, unstripped,
                  extra_gn_args, extra_gn_flags, extra_ninja_flags,
@@ -399,10 +413,6 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
             build_types = ['debug']
         if release_build:
             build_types = build_types + ['release']
-
-    if use_webrtc_ndk:
-        os.environ['ANDROID_SDK_ROOT'] = os.path.join(
-            webrtc_src_dir, 'third_party', 'android_sdk', 'public')
 
     gradle_build_dir = GetGradleBuildDir(build_dir)
     shutil.rmtree(gradle_build_dir, ignore_errors=True)
@@ -430,9 +440,10 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
                 "-PwebrtcJar={}/libwebrtc.jar".format(lib_dir),
             ]
         CreateLibs(dry_run, project_dir, webrtc_src_dir, build_dir,
-                   archs, output, build_debug, unstripped, use_webrtc_ndk,
+                   archs, output, build_debug, unstripped,
                    extra_gn_args, extra_gn_flags, extra_ninja_flags,
-                   extra_cargo_flags, jobs, build_projects, webrtc_version)
+                   extra_cargo_flags, jobs, build_projects, webrtc_version,
+                   publish_to_maven)
 
     if Project.AAR not in build_projects:
         return
@@ -447,7 +458,7 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
 
         gradle_exec.append('installArchives')
 
-    if publish is True:
+    if publish_to_maven:
         gradle_exec.append('uploadArchives')
 
     gradle_exec.extend(extra_gradle_args)
@@ -512,28 +523,23 @@ def main():
 
     if args.clean is True:
         for arch in DEFAULT_ARCHS:
-            rm_dir = GetArchBuildRoot(build_dir, arch)
             clean_dir(GetArchBuildRoot(build_dir, arch), args.dry_run)
         clean_dir(GetGradleBuildDir(build_dir), args.dry_run)
         for dir in ('debug', 'release', 'javadoc', 'rustdoc', 'rust-lint'):
             clean_dir(os.path.join(build_dir, dir), args.dry_run)
         return 0
 
-    if args.use_webrtc_ndk:
-        # This is potentially still useful for a non-WebRTC NDK,
-        # but trying to find the location of the sdkmanager tool is more trouble than it's worth,
-        # especially when most people install SDKs and NDKs through Android Studio.
-        RunSdkmanagerLicenses(args.webrtc_src_dir, args.dry_run)
-
     if args.publish is True:
         if args.debug_build is True:
             print('ERROR: Only the release build can be uploaded')
             return 1
 
+    publish_to_maven = args.publish
+
     PerformBuild(args.dry_run, args.extra_gradle_args, args.publish_version, args.webrtc_version,
                  args.gradle_dir,
-                 args.publish,
-                 args.use_webrtc_ndk, build_projects,
+                 publish_to_maven,
+                 build_projects,
                  args.install_local, args.install_dir,
                  args.project_dir, args.webrtc_src_dir, build_dir, args.arch, args.output,
                  args.debug_build, args.release_build, args.unstripped, args.extra_gn_args,

@@ -1,5 +1,43 @@
 # Changelog
 
+## v2.31.2
+
+- Update webrtc to 5845c
+  - Update the hardcoded PulseAudio device name to "Signal Calling"
+  - Add more audio control and safe defaults
+  - Add accessor for bandwidth estimate
+
+- Update webrtc to 5845d
+  - Disable early initialization of recording
+
+- Generate license files for WebRTC builds
+
+- call-sim: Add test iterations and mos averaging
+
+- Add more audio configuration and control
+
+- Improve builds on GitHub Actions
+
+- Build webrtc on AWS for android, ios, linux, mac
+
+## v2.31.1
+
+- Update tag for build automation
+
+## v2.31.0
+
+- Group Calls: Separate PeekInfo device counts on in/excluding pending devices
+
+- Desktop: Migrate to deviceCountIncluding/ExcludingPendingDevices as well
+
+- Update to WebRTC m116
+
+- Desktop: Use stack arrays for JS arguments rather than vectors
+
+- Build improvements; Support more build automation
+
+- Log improvements
+
 ## v2.30.0
 
 - Add JoinState.PENDING, for call link calls with admin approval

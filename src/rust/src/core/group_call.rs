@@ -1045,12 +1045,14 @@ impl Client {
                 let local_ice_ufrag = random_alphanumeric(4);
                 let local_ice_pwd = random_alphanumeric(22);
                 let audio_jitter_buffer_max_packets = 50;
+                let audio_rtcp_report_interval_ms = 5000;
                 let ice_server = IceServer::none();
                 let peer_connection = peer_connection_factory
                     .create_peer_connection(
                         peer_connection_observer,
                         pcf::RffiPeerConnectionKind::GroupCall,
                         audio_jitter_buffer_max_packets,
+                        audio_rtcp_report_interval_ms,
                         &ice_server,
                         outgoing_audio_track,
                         outgoing_video_track,
@@ -1424,8 +1426,8 @@ impl Client {
                 }
                 JoinState::NotJoined(ring_id) => {
                     if let Some(peek_info) = &state.last_peek_info {
-                        if peek_info.device_count() >= peek_info.max_devices.unwrap_or(u32::MAX) as usize {
-                            info!("Ending group call client because there are {}/{} devices in the call.", peek_info.device_count(), peek_info.max_devices.unwrap());
+                        if peek_info.device_count_including_pending_devices() >= peek_info.max_devices.unwrap_or(u32::MAX) as usize {
+                            info!("Ending group call client because there are {}/{} devices in the call.", peek_info.device_count_including_pending_devices(), peek_info.max_devices.unwrap());
                             Self::end(state, EndReason::HasMaxDevices);
                             return;
                         }
@@ -4211,7 +4213,7 @@ mod tests {
             owned_state.creator = peek_info.creator.clone();
             owned_state.era_id = peek_info.era_id.clone();
             owned_state.max_devices = peek_info.max_devices;
-            owned_state.device_count = peek_info.device_count();
+            owned_state.device_count = peek_info.device_count_including_pending_devices();
             self.peek_changed.set();
         }
 

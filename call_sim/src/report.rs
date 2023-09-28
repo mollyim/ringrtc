@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use plotly::{
     color::NamedColor,
-    common::{Font, Line, Marker, Mode, Title},
+    common::{Font, Line, LineShape, Marker, Mode, Title},
     layout::{Axis, AxisType, BarMode, Margin},
     Bar, ImageFormat, Layout, Plot, Scatter,
 };
@@ -22,7 +22,7 @@ use crate::test::{GroupRun, Sound, TestCase, TestResults};
 
 type ChartPoint = (f32, f32);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StatsConfig {
     pub title: String,
     pub chart_name: String,
@@ -34,6 +34,26 @@ pub struct StatsConfig {
     pub y_min: Option<f32>,
     /// By default, charts will use the StatsData.overall_max + 10% for y_max.
     pub y_max: Option<f32>,
+    /// Line presentation, the default is `Linear`, which connects each point to the
+    /// next. Some charts look better with the `Hv` type, which maintains its value until
+    /// the next point along the x-axis.
+    pub line_shape: LineShape,
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            title: "".to_string(),
+            chart_name: "".to_string(),
+            x_label: "".to_string(),
+            y_label: "".to_string(),
+            x_min: Option::None,
+            x_max: Option::None,
+            y_min: Option::None,
+            y_max: Option::None,
+            line_shape: LineShape::Linear,
+        }
+    }
 }
 
 /// Our current standard value for ignoring the first "5 seconds" of garbage data.
@@ -68,6 +88,9 @@ pub struct StatsData {
     pub min: f32,
     pub max: f32,
     pub ave: f32,
+
+    /// Track the max inserted index in case data is aperiodic.
+    pub max_index: f32,
 }
 
 impl Default for StatsData {
@@ -83,6 +106,7 @@ impl Default for StatsData {
             min: f32::MAX,
             max: 0.0,
             ave: 0.0,
+            max_index: 0.0,
         }
     }
 }
@@ -107,10 +131,9 @@ impl StatsData {
         self.period = period;
     }
 
-    // Push data to the next periodic index and update statistics.
-    pub fn push(&mut self, value: f32) {
-        self.points
-            .push((((self.points.len() + 1) as f32) * self.period, value));
+    /// Push data to an arbitrary index and update statistics.
+    pub fn push_with_index(&mut self, index: f32, value: f32) {
+        self.points.push((index, value));
 
         if self.points.len() > self.filter_min && self.points.len() <= self.filter_max {
             self.sum += value as f64;
@@ -122,6 +145,12 @@ impl StatsData {
         // To ensure good ranges for charting, we need to keep the overall min/max.
         self.overall_min = self.overall_min.min(value);
         self.overall_max = self.overall_max.max(value);
+        self.max_index = self.max_index.max(index);
+    }
+
+    /// Push data to the next periodic index and update statistics.
+    pub fn push(&mut self, value: f32) {
+        self.push_with_index(((self.points.len() + 1) as f32) * self.period, value);
     }
 }
 
@@ -139,7 +168,7 @@ pub enum AnalysisReportMos {
     /// There is a single mos value available.
     Single(f32),
     /// There is a stats collection of mos values available.
-    Series(Stats),
+    Series(Box<Stats>),
 }
 
 impl AnalysisReportMos {
@@ -155,7 +184,8 @@ impl AnalysisReportMos {
 
 #[derive(Debug)]
 pub struct AnalysisReport {
-    pub mos: AnalysisReportMos,
+    pub mos_s: AnalysisReportMos,
+    pub mos_a: AnalysisReportMos,
     pub vmaf: Option<f32>,
 }
 
@@ -199,7 +229,8 @@ impl AnalysisReport {
 
     // There isn't much to build for audio, now that its only item, mos, is pre-calculated.
     pub async fn build(
-        mos: AnalysisReportMos,
+        mos_s: AnalysisReportMos,
+        mos_a: AnalysisReportMos,
         video_analysis_file_name: Option<&str>,
     ) -> Result<Self> {
         let vmaf = if let Some(video_analysis_file_name) = video_analysis_file_name {
@@ -208,7 +239,7 @@ impl AnalysisReport {
             None
         };
 
-        Ok(Self { mos, vmaf })
+        Ok(Self { mos_s, mos_a, vmaf })
     }
 }
 
@@ -375,6 +406,12 @@ pub struct VideoReceiveStatsTransfer {
     pub key_frames_decoded: StatsData,
 }
 
+#[derive(Debug, Default)]
+pub struct AudioAdaptationTransfer {
+    pub bitrate: StatsData,
+    pub packet_length: StatsData,
+}
+
 #[derive(Debug)]
 pub struct ConnectionStats {
     pub timestamp_us: Vec<u64>,
@@ -433,6 +470,12 @@ pub struct VideoReceiveStats {
     pub key_frames_decoded_stats: Stats,
 }
 
+#[derive(Debug, Default)]
+pub struct AudioAdaptation {
+    pub bitrate_stats: Stats,
+    pub packet_length_stats: Stats,
+}
+
 #[derive(Debug)]
 pub struct ClientLogReport {
     pub connection_stats: ConnectionStats,
@@ -440,6 +483,7 @@ pub struct ClientLogReport {
     pub video_send_stats: VideoSendStats,
     pub audio_receive_stats: AudioReceiveStats,
     pub video_receive_stats: VideoReceiveStats,
+    pub audio_adaptation: AudioAdaptation,
 }
 
 impl ClientLogReport {
@@ -451,6 +495,7 @@ impl ClientLogReport {
         VideoSendStatsTransfer,
         AudioReceiveStatsTransfer,
         VideoReceiveStatsTransfer,
+        AudioAdaptationTransfer,
     )> {
         // Look through the file and pull out RingRTC logs, particularly the `stats!` details.
         let file = File::open(file_name).await?;
@@ -481,11 +526,20 @@ impl ClientLogReport {
             r".*ringrtc_stats!,video,recv,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<bitrate>[0-9]+)bps,(?P<framerate>[0-9]*\.?[0-9]+)fps,(?P<key_frames_decoded>\d+),(?P<decode_time_per_frame>[0-9]*\.?[0-9]+)ms,(?P<resolution>\d+x\d+)",
         )?;
 
+        // Example: ringrtc_adapt!,audio,240,18000,60
+        let re_adaptation_line = Regex::new(
+            r".*ringrtc_adapt!,audio,(?P<time>\d+),(?P<bitrate>\d+),(?P<packet_length>\d+)",
+        )?;
+
         let mut connection_stats = ConnectionStatsTransfer::default();
         let mut audio_send_stats = AudioSendStatsTransfer::default();
         let mut video_send_stats = VideoSendStatsTransfer::default();
         let mut audio_receive_stats = AudioReceiveStatsTransfer::default();
         let mut video_receive_stats = VideoReceiveStatsTransfer::default();
+        let mut audio_adaptation_stats = AudioAdaptationTransfer {
+            bitrate: StatsData::new_skip_n(0),
+            packet_length: StatsData::new_skip_n(0),
+        };
 
         let mut lines = reader.lines();
         while let Some(line) = lines.next_line().await? {
@@ -567,6 +621,7 @@ impl ClientLogReport {
                 video_send_stats
                     .remote_round_trip_time
                     .push(f32::from_str(&cap["remote_round_trip_time"])?);
+                continue;
             }
 
             if let Some(cap) = re_audio_receive_line.captures(&line) {
@@ -609,6 +664,17 @@ impl ClientLogReport {
                     .push(f32::from_str(&cap["key_frames_decoded"])?);
                 continue;
             }
+
+            if let Some(cap) = re_adaptation_line.captures(&line) {
+                let time_index = f32::from_str(&cap["time"])?;
+                audio_adaptation_stats
+                    .bitrate
+                    .push_with_index(time_index, f32::from_str(&cap["bitrate"])? / 1000.0);
+                audio_adaptation_stats
+                    .packet_length
+                    .push_with_index(time_index, f32::from_str(&cap["packet_length"])?);
+                continue;
+            }
         }
 
         Ok((
@@ -617,6 +683,7 @@ impl ClientLogReport {
             video_send_stats,
             audio_receive_stats,
             video_receive_stats,
+            audio_adaptation_stats,
         ))
     }
 
@@ -627,6 +694,7 @@ impl ClientLogReport {
             video_send_stats,
             audio_receive_stats,
             video_receive_stats,
+            audio_adaptation,
         ) = ClientLogReport::parse(file_name).await?;
 
         // We assume that all entries in the stats vectors are in sync.
@@ -1060,12 +1128,44 @@ impl ClientLogReport {
             key_frames_decoded_stats,
         };
 
+        let bitrate_stats = Stats {
+            config: StatsConfig {
+                title: "Adaptation Bitrate Changes".to_string(),
+                chart_name: format!("{}.audio.adaptation.bitrate.svg", client_name),
+                x_label: "Test Seconds".to_string(),
+                y_label: "Kbps".to_string(),
+                x_max: Some(audio_adaptation.bitrate.max_index + 5.0),
+                line_shape: LineShape::Hv,
+                ..Default::default()
+            },
+            data: audio_adaptation.bitrate,
+        };
+
+        let packet_length_stats = Stats {
+            config: StatsConfig {
+                title: "Adaptation Packet Length Changes".to_string(),
+                chart_name: format!("{}.audio.adaptation.packet_length.svg", client_name),
+                x_label: "Test Seconds".to_string(),
+                y_label: "milliseconds".to_string(),
+                x_max: Some(audio_adaptation.packet_length.max_index + 5.0),
+                line_shape: LineShape::Hv,
+                ..Default::default()
+            },
+            data: audio_adaptation.packet_length,
+        };
+
+        let audio_adaptation = AudioAdaptation {
+            bitrate_stats,
+            packet_length_stats,
+        };
+
         Ok(Self {
             connection_stats,
             audio_send_stats,
             video_send_stats,
             audio_receive_stats,
             video_receive_stats,
+            audio_adaptation,
         })
     }
 }
@@ -1086,6 +1186,11 @@ pub struct Report {
     pub analysis_report: AnalysisReport,
     pub docker_stats_report: DockerStatsReport,
     pub client_log_report: ClientLogReport,
+
+    /// If there is no video being tested, don't generate charts or columns for it.
+    pub show_video: bool,
+    /// Keep track of how many iterations were assigned for the test case.
+    pub iterations: u16,
 }
 
 impl Report {
@@ -1096,7 +1201,8 @@ impl Report {
         test_results: TestResults,
     ) -> Result<Self> {
         let analysis_report = AnalysisReport::build(
-            test_results.mos,
+            test_results.mos_s,
+            test_results.mos_a,
             test_case
                 .client_b
                 .output_yuv
@@ -1135,15 +1241,12 @@ impl Report {
             analysis_report,
             docker_stats_report,
             client_log_report,
+            show_video: test_case_config.client_a_config.video.input_name.is_some()
+                || test_case_config.client_b_config.video.input_name.is_some(),
+            iterations: test_case_config.iterations,
         };
 
-        test_report
-            .create_charts(
-                &test_case.test_path,
-                test_case_config.client_a_config.video.input_name.is_some()
-                    || test_case_config.client_b_config.video.input_name.is_some(),
-            )
-            .await;
+        test_report.create_charts(&test_case.test_path).await;
 
         Ok(test_report)
     }
@@ -1216,7 +1319,12 @@ impl Report {
         let trace = Scatter::new(x_trace, y_trace)
             .mode(Mode::LinesMarkers)
             .marker(Marker::new().size(marker_size))
-            .line(Line::new().color(NamedColor::SteelBlue).width(2.0));
+            .line(
+                Line::new()
+                    .color(NamedColor::SteelBlue)
+                    .width(2.0)
+                    .shape(stats.config.line_shape.clone()),
+            );
 
         let x_min = stats.config.x_min.unwrap_or(0.0);
         let x_max = stats.config.x_max.unwrap_or({
@@ -1266,12 +1374,13 @@ impl Report {
         );
     }
 
-    pub async fn create_charts(&self, test_path: &str, show_video_charts: bool) {
+    pub async fn create_charts(&self, test_path: &str) {
         let connection_stats = &self.client_log_report.connection_stats;
         let audio_send_stats = &self.client_log_report.audio_send_stats;
         let audio_receive_stats = &self.client_log_report.audio_receive_stats;
         let video_send_stats = &self.client_log_report.video_send_stats;
         let video_receive_stats = &self.client_log_report.video_receive_stats;
+        let audio_adaptation = &self.client_log_report.audio_adaptation;
 
         let mut line_chart_stats = vec![
             &self.docker_stats_report.cpu_usage,
@@ -1293,9 +1402,11 @@ impl Report {
             &audio_receive_stats.jitter_stats,
             &audio_receive_stats.audio_energy_stats,
             &audio_receive_stats.jitter_buffer_delay_stats,
+            &audio_adaptation.bitrate_stats,
+            &audio_adaptation.packet_length_stats,
         ];
 
-        if show_video_charts {
+        if self.show_video {
             line_chart_stats.append(&mut vec![
                 &video_send_stats.packets_per_second_stats,
                 &video_send_stats.average_packet_size_stats,
@@ -1318,7 +1429,11 @@ impl Report {
             ]);
         }
 
-        if let AnalysisReportMos::Series(stats) = &self.analysis_report.mos {
+        if let AnalysisReportMos::Series(stats) = &self.analysis_report.mos_s {
+            line_chart_stats.push(stats);
+        }
+
+        if let AnalysisReportMos::Series(stats) = &self.analysis_report.mos_a {
             line_chart_stats.push(stats);
         }
 
@@ -1347,15 +1462,26 @@ impl Report {
                 set_name,
                 &self.report_name,
                 &self.client_name,
-                self.analysis_report.mos.get_mos_for_display(),
+                self.analysis_report.mos_s.get_mos_for_display(),
+                self.analysis_report.mos_a.get_mos_for_display(),
             )
             .as_bytes(),
         );
         buf.extend_from_slice(html.network_config_section(network_configs).as_bytes());
         buf.extend_from_slice(html.call_config_section(test_case_config).as_bytes());
 
-        if let AnalysisReportMos::Series(stats) = &self.analysis_report.mos {
-            let audio_core_stats = Self::build_stats_rows(&html, &[stats]);
+        let mut audio_core_stats: Vec<&Stats> = vec![];
+
+        if let AnalysisReportMos::Series(stats) = &self.analysis_report.mos_s {
+            audio_core_stats.push(stats);
+        }
+
+        if let AnalysisReportMos::Series(stats) = &self.analysis_report.mos_a {
+            audio_core_stats.push(stats);
+        }
+
+        if !audio_core_stats.is_empty() {
+            let audio_core_stats = Self::build_stats_rows(&html, &audio_core_stats);
             buf.extend_from_slice(
                 html.accordion_section(
                     "audioCore",
@@ -1409,6 +1535,28 @@ impl Report {
             )
             .as_bytes(),
         );
+
+        if test_case_config.client_b_config.audio.adaptation > 0 {
+            let audio_adaptation = &self.client_log_report.audio_adaptation;
+            let audio_adaptation = Self::build_stats_rows(
+                &html,
+                &[
+                    &audio_adaptation.bitrate_stats,
+                    &audio_adaptation.packet_length_stats,
+                ],
+            );
+            buf.extend_from_slice(
+                html.accordion_section(
+                    "audioAdaptation",
+                    vec![HtmlAccordionItem {
+                        label: "Audio Adaptation".to_string(),
+                        body: audio_adaptation,
+                        collapsed: true,
+                    }],
+                )
+                .as_bytes(),
+            );
+        }
 
         let connection_stats = &self.client_log_report.connection_stats;
         let connection_stats = Self::build_stats_rows(
@@ -1582,9 +1730,14 @@ impl Report {
     /// Return the stats value (the average) for the given dimension.
     fn get_stats_value_for_chart(report: &Report, chart_dimension: &ChartDimension) -> f32 {
         match chart_dimension {
-            ChartDimension::Mos => report
+            ChartDimension::MosSpeech => report
                 .analysis_report
-                .mos
+                .mos_s
+                .get_mos_for_display()
+                .unwrap_or(0f32),
+            ChartDimension::MosAudio => report
+                .analysis_report
+                .mos_a
                 .get_mos_for_display()
                 .unwrap_or(0f32),
             ChartDimension::ContainerCpuUsage => report.docker_stats_report.cpu_usage.data.ave,
@@ -2018,6 +2171,143 @@ impl Report {
     }
 }
 
+/// A summary row can represent a single record, an aggregate item, or an aggregate average,
+/// calculated from 2 or more aggregate items.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SummaryRowType {
+    Single,
+    Aggregate,
+    AggregateItem,
+}
+
+/// A convenience struct for tracking the averaged values for a row in the summary report. This
+/// is particularly useful when aggregating values from several rows.
+#[derive(Clone, Copy)]
+struct SummaryRow {
+    pub audio_send_packet_size: f32,
+    pub audio_send_packet_rate: f32,
+    pub audio_send_bitrate: f32,
+
+    pub audio_receive_packet_rate: f32,
+    pub audio_receive_bitrate: f32,
+    pub audio_receive_loss: f32,
+
+    pub container_cpu: f32,
+    pub container_memory: f32,
+    pub container_tx_bitrate: f32,
+    pub container_rx_bitrate: f32,
+
+    pub mos_s: Option<f32>,
+    pub mos_a: Option<f32>,
+
+    pub vmaf: Option<f32>,
+
+    pub row_type: SummaryRowType,
+    pub row_index: usize,
+}
+
+impl SummaryRow {
+    pub fn new(report: &Report) -> Self {
+        Self {
+            audio_send_packet_size: report
+                .client_log_report
+                .audio_send_stats
+                .average_packet_size_stats
+                .data
+                .ave,
+            audio_send_packet_rate: report
+                .client_log_report
+                .audio_send_stats
+                .packets_per_second_stats
+                .data
+                .ave,
+            audio_send_bitrate: report
+                .client_log_report
+                .audio_send_stats
+                .bitrate_stats
+                .data
+                .ave,
+            audio_receive_packet_rate: report
+                .client_log_report
+                .audio_receive_stats
+                .packets_per_second_stats
+                .data
+                .ave,
+            audio_receive_bitrate: report
+                .client_log_report
+                .audio_receive_stats
+                .bitrate_stats
+                .data
+                .ave,
+            audio_receive_loss: report
+                .client_log_report
+                .audio_receive_stats
+                .packet_loss_stats
+                .data
+                .ave,
+            container_cpu: report.docker_stats_report.cpu_usage.data.ave,
+            container_memory: report.docker_stats_report.mem_usage.data.ave,
+            container_tx_bitrate: report.docker_stats_report.tx_bitrate.data.ave,
+            container_rx_bitrate: report.docker_stats_report.rx_bitrate.data.ave,
+            mos_s: report.analysis_report.mos_s.get_mos_for_display(),
+            mos_a: report.analysis_report.mos_a.get_mos_for_display(),
+            vmaf: report.analysis_report.vmaf,
+            row_type: SummaryRowType::Single,
+            row_index: 0,
+        }
+    }
+
+    pub fn new_aggregate(report: &Report) -> Self {
+        let mut aggregate = Self::new(report);
+        aggregate.row_type = SummaryRowType::Aggregate;
+        aggregate
+    }
+
+    pub fn set_aggregate_item(&mut self, row_index: usize) {
+        self.row_type = SummaryRowType::AggregateItem;
+        self.row_index = row_index;
+    }
+
+    /// Update the aggregated averages for all values.
+    pub fn update(&mut self, new: &Self, count: usize) {
+        let new_average = |old_value: f32, new_value: f32| -> f32 {
+            (old_value * (count as f32 - 1f32) + new_value) / count as f32
+        };
+
+        if count > 1 {
+            self.audio_send_packet_size =
+                new_average(self.audio_send_packet_size, new.audio_send_packet_size);
+            self.audio_send_packet_rate =
+                new_average(self.audio_send_packet_rate, new.audio_send_packet_rate);
+            self.audio_send_bitrate = new_average(self.audio_send_bitrate, new.audio_send_bitrate);
+            self.audio_receive_packet_rate = new_average(
+                self.audio_receive_packet_rate,
+                new.audio_receive_packet_rate,
+            );
+            self.audio_receive_bitrate =
+                new_average(self.audio_receive_bitrate, new.audio_receive_bitrate);
+            self.audio_receive_loss = new_average(self.audio_receive_loss, new.audio_receive_loss);
+            self.container_cpu = new_average(self.container_cpu, new.container_cpu);
+            self.container_memory = new_average(self.container_memory, new.container_memory);
+            self.container_tx_bitrate =
+                new_average(self.container_tx_bitrate, new.container_tx_bitrate);
+            self.container_rx_bitrate =
+                new_average(self.container_rx_bitrate, new.container_rx_bitrate);
+
+            // We expect mos and vmaf to always be there or never.
+            if let (Some(mos_s), Some(new_mos_s)) = (self.mos_s, new.mos_s) {
+                self.mos_s = Some(new_average(mos_s, new_mos_s));
+            }
+            if let (Some(mos_a), Some(new_mos_a)) = (self.mos_a, new.mos_a) {
+                self.mos_a = Some(new_average(mos_a, new_mos_a));
+            }
+            if let (Some(vmaf), Some(new_vmaf)) = (self.vmaf, new.vmaf) {
+                self.vmaf = Some(new_average(vmaf, new_vmaf));
+            }
+        }
+    }
+}
+
 pub struct HtmlAccordionItem {
     label: String,
     body: String,
@@ -2114,12 +2404,32 @@ impl Html {
         buf
     }
 
+    fn get_text_emphasis_for_mos(mos_s: Option<f32>, mos_a: Option<f32>) -> &'static str {
+        let weight = match (mos_s, mos_a) {
+            (Some(mos_s), Some(mos_a)) => (mos_s + mos_a) / 2.0,
+            (Some(mos_s), None) => mos_s,
+            (None, Some(mos_a)) => mos_a,
+            (None, None) => 0.0,
+        };
+
+        if weight > 4.0 {
+            "table-success"
+        } else if weight > 3.5 {
+            "table-warning"
+        } else if weight > 0.0 {
+            "table-danger"
+        } else {
+            ""
+        }
+    }
+
     pub fn report_heading(
         &self,
         set_name: &str,
         test_name: &str,
         client_name: &str,
-        mos: Option<f32>,
+        mos_s: Option<f32>,
+        mos_a: Option<f32>,
     ) -> String {
         let mut buf = String::new();
 
@@ -2132,26 +2442,20 @@ impl Html {
         buf.push_str("</div>\n");
         buf.push_str("<div class=\"col-md-6\">\n");
 
-        match mos {
-            None => {
-                buf.push_str("<h2 class=\"text-right\">MOS: None</h2>");
-            }
-            Some(mos) => {
-                let text_emphasis = if mos > 4.0 {
-                    "text-success"
-                } else if mos > 3.5 {
-                    "text-warning"
-                } else {
-                    "text-danger"
-                };
+        let mos_s_string = mos_s
+            .map(|mos| format!("{:.3}", mos))
+            .unwrap_or_else(|| "None".to_string());
+        let mos_a_string = mos_a
+            .map(|mos| format!("{:.3}", mos))
+            .unwrap_or_else(|| "None".to_string());
 
-                let _ = writeln!(
-                    buf,
-                    "<h2 class=\"text-right {}\">MOS: {:.3}</h2>",
-                    text_emphasis, mos
-                );
-            }
-        }
+        let _ = writeln!(
+            buf,
+            "<h2 class=\"text-right {}\">MOS_S: {}/MOS_A: {}</h2>",
+            Html::get_text_emphasis_for_mos(mos_s, mos_a),
+            mos_s_string,
+            mos_a_string
+        );
 
         buf.push_str("</div>\n");
         buf.push_str("</div>\n");
@@ -2368,6 +2672,131 @@ impl Html {
         buf
     }
 
+    fn summary_report_row(
+        &self,
+        group_name: &str,
+        report: &Report,
+        summary_row: &SummaryRow,
+        iteration_count_for_group: usize,
+    ) -> String {
+        let mut buf = String::new();
+
+        let table_emphasis = Html::get_text_emphasis_for_mos(summary_row.mos_s, summary_row.mos_a);
+
+        match summary_row.row_type {
+            SummaryRowType::Single => {
+                let _ = writeln!(
+                    buf,
+                    r#"<tr class="{} clickable" onclick="window.location='{}/{}/report.html'">"#,
+                    table_emphasis, group_name, report.report_name
+                );
+            }
+            SummaryRowType::Aggregate => {
+                let _ = writeln!(
+                    buf,
+                    r#"<tr class="{}" data-bs-toggle="collapse" data-bs-target=".{}_{}_collapsed">"#,
+                    table_emphasis, group_name, iteration_count_for_group
+                );
+            }
+            SummaryRowType::AggregateItem => {
+                let _ = writeln!(
+                    buf,
+                    r#"<tr class="{} clickable w-auto small fw-light collapse {}_{}_collapsed" onclick="window.location='{}/{}_{}/report.html'">"#,
+                    table_emphasis,
+                    group_name,
+                    iteration_count_for_group,
+                    group_name,
+                    report.report_name,
+                    summary_row.row_index
+                );
+            }
+        }
+
+        let indent = if summary_row.row_type == SummaryRowType::AggregateItem {
+            "&nbsp;&nbsp"
+        } else {
+            ""
+        };
+
+        let _ = writeln!(buf, "<td>{}{}</td>", indent, report.test_case_name);
+        let _ = writeln!(buf, "<td>{}{}</td>", indent, report.sound_name);
+        let _ = writeln!(buf, "<td>{}{}</td>", indent, report.video_name);
+        let _ = writeln!(
+            buf,
+            "<td>{}{}</td>",
+            indent,
+            report.network_profile.get_name()
+        );
+
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.0}</td>",
+            indent, summary_row.audio_send_packet_size
+        );
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.audio_send_packet_rate
+        );
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.audio_send_bitrate
+        );
+
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.audio_receive_packet_rate
+        );
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.audio_receive_bitrate
+        );
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.audio_receive_loss
+        );
+
+        let _ = writeln!(buf, "<td>{}{:.2}</td>", indent, summary_row.container_cpu);
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.container_memory
+        );
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.container_tx_bitrate
+        );
+        let _ = writeln!(
+            buf,
+            "<td>{}{:.2}</td>",
+            indent, summary_row.container_rx_bitrate
+        );
+
+        if let Some(mos) = summary_row.mos_s {
+            let _ = writeln!(buf, "<td>{}{:.3}</td>", indent, mos);
+        } else {
+            buf.push_str("<td></td>\n");
+        }
+        if let Some(mos) = summary_row.mos_a {
+            let _ = writeln!(buf, "<td>{}{:.3}</td>", indent, mos);
+        } else {
+            buf.push_str("<td></td>\n");
+        }
+        if let Some(vmaf) = summary_row.vmaf {
+            let _ = writeln!(buf, "<td>{}{:.3}</td>", indent, vmaf);
+        } else {
+            buf.push_str("<td></td>\n");
+        }
+        buf.push_str("</tr>\n");
+
+        buf
+    }
+
     pub fn summary_report_section(
         &self,
         reports: &Vec<Result<Report>>,
@@ -2385,7 +2814,7 @@ impl Html {
         buf.push_str("<th colspan=\"3\">Client Send Stats (average)</th>\n");
         buf.push_str("<th colspan=\"3\">Client Receive Stats (average)</th>\n");
         buf.push_str("<th colspan=\"4\">Container Stats (average)</th>\n");
-        buf.push_str("<th rowspan=\"2\">MOS</th>\n");
+        buf.push_str("<th colspan=\"2\">MOS</th>\n");
         buf.push_str("<th rowspan=\"2\">VMAF</th>\n");
         buf.push_str("</tr>\n");
         buf.push_str("<tr>\n");
@@ -2403,126 +2832,91 @@ impl Html {
         buf.push_str("<th>Mem</th>\n");
         buf.push_str("<th>TX Bitrate</th>\n");
         buf.push_str("<th>RX Bitrate</th>\n");
+        buf.push_str("<th>Speech</th>\n");
+        buf.push_str("<th>Audio</th>\n");
         buf.push_str("</tr>\n");
         buf.push_str("</thead>\n");
 
         buf.push_str("<tbody>\n");
 
+        let mut summary_rows: Vec<SummaryRow> = vec![];
+        let mut aggregate_summary_row: Option<SummaryRow> = None;
+
+        // Keep track of the number of iterable items there are for the group so that we
+        // can make sure class names are unique.
+        let mut iteration_count_for_group = 0;
+
         for result in reports {
+            // Each report will result in a row in the summary. Each row can be either for
+            // a specific test case or an aggregate of several iterations, and then the
+            // actual aggregated items themselves. The aggregated items are hidden by default.
             match result {
                 Ok(report) => {
-                    let table_emphasis = match report.analysis_report.mos.get_mos_for_display() {
-                        Some(mos) => {
-                            if mos > 4.0 {
-                                "table-success"
-                            } else if mos > 3.5 {
-                                "table-warning"
+                    let mut current_summary_row = SummaryRow::new(report);
+
+                    if report.iterations > 1 {
+                        if !summary_rows.is_empty() {
+                            // We are already aggregating the test iterations.
+                            if let Some(aggregate) = &mut aggregate_summary_row {
+                                aggregate.update(&current_summary_row, summary_rows.len() + 1);
+                                current_summary_row.set_aggregate_item(summary_rows.len() + 1);
+                                summary_rows.push(current_summary_row);
+
+                                if summary_rows.len() == report.iterations as usize {
+                                    // This is the end. Show the aggregate summary row first. Use
+                                    // the current report for naming.
+                                    buf.push_str(&self.summary_report_row(
+                                        group_name,
+                                        report,
+                                        aggregate,
+                                        iteration_count_for_group,
+                                    ));
+
+                                    // Show all the iterations.
+                                    summary_rows.iter().for_each(|summary_line| {
+                                        buf.push_str(&self.summary_report_row(
+                                            group_name,
+                                            report,
+                                            summary_line,
+                                            iteration_count_for_group,
+                                        ));
+                                    });
+
+                                    summary_rows.clear();
+                                    aggregate_summary_row = None;
+                                    iteration_count_for_group += 1;
+                                }
                             } else {
-                                "table-danger"
+                                // This would be a bad state, warn and reset.
+                                println!(
+                                    "There are summary_lines but averaged_summary_line is None!"
+                                );
+                                summary_rows.clear();
+                                aggregate_summary_row = None;
+                                iteration_count_for_group += 1;
                             }
+                        } else {
+                            // This is the first of N iterations to track.
+
+                            // Make a new aggregate for all rows in the test iteration.
+                            aggregate_summary_row = Some(SummaryRow::new_aggregate(report));
+
+                            // Set the current row as the first iteration item.
+                            current_summary_row.set_aggregate_item(1);
+
+                            // Add the current row to our list for display once all rows in the
+                            // test iterations are aggregated.
+                            summary_rows.push(current_summary_row);
                         }
-                        None => "",
-                    };
-                    let _ = writeln!(buf, "<tr class=\"{} clickable\" onclick=\"window.location='{}/{}/report.html'\">", table_emphasis, group_name, report.report_name);
-                    let _ = writeln!(buf, "<td>{}</td>", report.test_case_name);
-                    let _ = writeln!(buf, "<td>{}</td>", report.sound_name);
-                    let _ = writeln!(buf, "<td>{}</td>", report.video_name);
-                    let _ = writeln!(buf, "<td>{}</td>", report.network_profile.get_name());
-
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.0}</td>",
-                        report
-                            .client_log_report
-                            .audio_send_stats
-                            .average_packet_size_stats
-                            .data
-                            .ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report
-                            .client_log_report
-                            .audio_send_stats
-                            .packets_per_second_stats
-                            .data
-                            .ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report
-                            .client_log_report
-                            .audio_send_stats
-                            .bitrate_stats
-                            .data
-                            .ave
-                    );
-
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report
-                            .client_log_report
-                            .audio_receive_stats
-                            .packets_per_second_stats
-                            .data
-                            .ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report
-                            .client_log_report
-                            .audio_receive_stats
-                            .bitrate_stats
-                            .data
-                            .ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report
-                            .client_log_report
-                            .audio_receive_stats
-                            .packet_loss_stats
-                            .data
-                            .ave
-                    );
-
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report.docker_stats_report.cpu_usage.data.ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report.docker_stats_report.mem_usage.data.ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report.docker_stats_report.tx_bitrate.data.ave
-                    );
-                    let _ = writeln!(
-                        buf,
-                        "<td>{:.2}</td>",
-                        report.docker_stats_report.rx_bitrate.data.ave
-                    );
-
-                    if let Some(mos) = report.analysis_report.mos.get_mos_for_display() {
-                        let _ = writeln!(buf, "<td>{:.3}</td>", mos);
                     } else {
-                        buf.push_str("<td></td>");
+                        // Display the report normally, one measurement for the line.
+                        buf.push_str(&self.summary_report_row(
+                            group_name,
+                            report,
+                            &current_summary_row,
+                            iteration_count_for_group,
+                        ));
                     }
-                    if let Some(vmaf) = report.analysis_report.vmaf {
-                        let _ = writeln!(buf, "<td>{:.3}</td>", vmaf);
-                    } else {
-                        buf.push_str("<td></td>");
-                    }
-                    buf.push_str("</tr>\n");
                 }
                 Err(err) => {
                     buf.push_str("<tr class=\"table-dark\">\n");
