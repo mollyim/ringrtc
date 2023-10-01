@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
   s.name             = "SignalRingRTC"
-  s.version          = "2.31.2"
+  s.version          = "2.33.0"
   s.summary          = "A Swift & Objective-C library used by the Signal iOS app for WebRTC interactions."
 
   s.description      = <<-DESC
@@ -33,12 +33,16 @@ Pod::Spec.new do |s|
   s.module_map = 'src/ios/SignalRingRTC/SignalRingRTC/SignalRingRTC.modulemap'
 
   s.preserve_paths = [
-    'out/release/libringrtc', # a symlink controlled by bin/set-up-for-cocoapods
+    'acknowledgments/acknowledgments.plist',
     'bin/set-up-for-cocoapods',
     'bin/fetch-artifact.py', # env.sh has extra dependencies, so we go directly to the Python script
     'config/version.sh',
     'config/version.properties',
     'prebuild-checksum',
+
+    # controlled by bin/set-up-for-cocoapods
+    'out/release/libringrtc',
+    'out/release/acknowledgments-webrtc-ios.plist',
   ]
 
   s.dependency 'SignalCoreKit'
@@ -54,15 +58,6 @@ Pod::Spec.new do |s|
     'CARGO_BUILD_TARGET[sdk=iphonesimulator*][arch=arm64]' => 'aarch64-apple-ios-sim',
     'CARGO_BUILD_TARGET[sdk=iphonesimulator*][arch=*]' => 'x86_64-apple-ios',
     'CARGO_BUILD_TARGET[sdk=iphoneos*]' => 'aarch64-apple-ios',
-    # Presently, there's no special SDK or arch for maccatalyst,
-    # so we need to hackily use the "IS_MACCATALYST" build flag
-    # to set the appropriate cargo target
-    'CARGO_BUILD_TARGET_MAC_CATALYST_ARM_' => 'aarch64-apple-darwin',
-    'CARGO_BUILD_TARGET_MAC_CATALYST_ARM_YES' => 'aarch64-apple-ios-macabi',
-    'CARGO_BUILD_TARGET[sdk=macosx*][arch=arm64]' => '$(CARGO_BUILD_TARGET_MAC_CATALYST_ARM_$(IS_MACCATALYST))',
-    'CARGO_BUILD_TARGET_MAC_CATALYST_X86_' => 'x86_64-apple-darwin',
-    'CARGO_BUILD_TARGET_MAC_CATALYST_X86_YES' => 'x86_64-apple-ios-macabi',
-    'CARGO_BUILD_TARGET[sdk=macosx*][arch=*]' => '$(CARGO_BUILD_TARGET_MAC_CATALYST_X86_$(IS_MACCATALYST))',
   }
 
   s.script_phases = [

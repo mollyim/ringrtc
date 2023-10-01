@@ -7,15 +7,12 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use bytes::{BufMut, BytesMut};
-
-use futures::channel::mpsc::{Receiver, Sender};
-use futures::channel::oneshot;
-use futures::future::{self, TryFutureExt};
 
 use prost::Message;
 
@@ -24,6 +21,7 @@ use rand::rngs::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use crate::common::actor::{Actor, Stopper};
 use crate::common::{
     units::DataRate, CallConfig, CallDirection, CallId, CallMediaType, ConnectionState, DataMode,
     DeviceId, Result, RingBench,
@@ -33,7 +31,7 @@ use crate::core::call_mutex::CallMutex;
 use crate::core::connection_fsm::{ConnectionEvent, ConnectionStateMachine};
 use crate::core::platform::Platform;
 use crate::core::signaling;
-use crate::core::util::{ptr_as_box, redact_string, TaskQueueRuntime};
+use crate::core::util::{ptr_as_box, redact_string};
 use crate::error::RingRtcError;
 use crate::protobuf;
 
@@ -59,6 +57,21 @@ const TICK_INTERVAL: Duration = Duration::from_millis(TICK_INTERVAL_MILLIS);
 const SEND_RTP_DATA_MESSAGE_INTERVAL_MILLIS: u64 = 1000;
 const SEND_RTP_DATA_MESSAGE_INTERVAL_TICKS: u64 =
     SEND_RTP_DATA_MESSAGE_INTERVAL_MILLIS / TICK_INTERVAL_MILLIS;
+
+/// How often to check the latest bandwidth estimate from WebRTC
+const CHECK_BWE_INTERVAL_MILLIS: u64 = 1000;
+const CHECK_BWE_INTERVAL_TICKS: u64 = CHECK_BWE_INTERVAL_MILLIS / TICK_INTERVAL_MILLIS;
+
+const DELAYED_BWE_CHECK_INTERVAL_MILLIS: u64 = 10000;
+const DELAYED_BWE_CHECK_INTERVAL_TICKS: u64 =
+    DELAYED_BWE_CHECK_INTERVAL_MILLIS / TICK_INTERVAL_MILLIS;
+
+const BWE_THRESHOLD_FOR_LOW_NOTIFICATION: DataRate = DataRate::from_kbps(60);
+const BWE_THRESHOLD_FOR_RECOVERED_NOTIFICATION: DataRate = DataRate::from_kbps(70);
+
+const DELAY_FOR_RECOVERED_BWE_CALLBACK_MILLIS: u64 = 6000;
+const DELAY_FOR_RECOVERED_BWE_CALLBACK_TICKS: u64 =
+    DELAY_FOR_RECOVERED_BWE_CALLBACK_MILLIS / TICK_INTERVAL_MILLIS;
 
 pub const RTP_DATA_PAYLOAD_TYPE: rtp::PayloadType = 101;
 pub const OLD_RTP_DATA_SSRC_FOR_OUTGOING: rtp::Ssrc = 1001;
@@ -86,6 +99,10 @@ pub enum ConnectionObserverEvent {
     AudioLevels {
         captured_level: AudioLevel,
         received_level: AudioLevel,
+    },
+
+    LowBandwidthForVideo {
+        recovered: bool,
     },
 }
 
@@ -170,25 +187,7 @@ where
     }
 }
 
-/// Encapsulates the FSM and runtime upon which a Connection runs.
-struct Context {
-    /// Runtime upon which the ConnectionStateMachine runs.
-    pub worker_runtime: TaskQueueRuntime,
-}
-
-impl Context {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            worker_runtime: TaskQueueRuntime::new("connection-fsm-worker")?,
-        })
-    }
-}
-
-/// A mpsc::Receiver for receiving ConnectionEvents in the
-/// [ConnectionStateMachine](../call_fsm/struct.CallStateMachine.html)
-///
-/// The event stream is the tuple (Connection, ConnectionEvent).
-pub type EventStream<T> = Receiver<(Connection<T>, ConnectionEvent)>;
+pub type EventStream<T> = crate::core::util::EventStream<(Connection<T>, ConnectionEvent)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionType {
@@ -232,22 +231,9 @@ impl ConnectionId {
     }
 }
 
-/// Encapsulates the tick timer and runtime.
-struct TickContext {
-    /// Tokio runtime for background task execution of periodic ticks.
-    runtime: Option<TaskQueueRuntime>,
-    /// Sender for the "cancel" event.
-    cancel_sender: Option<oneshot::Sender<()>>,
-}
-
-impl TickContext {
-    /// Create a new TickContext.
-    pub fn new() -> Self {
-        Self {
-            runtime: None,
-            cancel_sender: None,
-        }
-    }
+struct TickState {
+    ticks_elapsed: u64,
+    actor: Actor<TickState>,
 }
 
 // Don't send below this, even if the remote side requests lower.
@@ -323,6 +309,29 @@ impl PollStatsConfig {
     }
 }
 
+/// State which determines when `ConnectionObserverEvent::LowBandwidthForVideo` is sent.
+///
+/// The initial state is `CheckIfLow`. Possible state transitions:
+///
+///   CheckIfLow -> CheckIfRecovered  (after callback is made for low bandwidth)
+///   CheckIfRecovered -> Done        (after callback is made for bandwidth recovered)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BweCallbackState {
+    /// Poll the BWE to see if it drops below `BWE_THRESHOLD_FOR_LOW_NOTIFICATION`.
+    CheckIfLow {
+        /// The BWE shouldn't be checked until after this number of ticks have elapsed. This is used
+        /// to delay checks when WebRTC needs time to adjust the bandwidth estimate.
+        delayed_check_tick: u64,
+    },
+    /// Poll the BWE to see if it exceeds `BWE_THRESHOLD_FOR_RECOVERED_NOTIFICATION`.
+    CheckIfRecovered {
+        /// The tick at which the last callback was made.
+        last_callback_tick: u64,
+    },
+    /// No more callbacks will be made.
+    Done,
+}
+
 /// Represents the connection between a local client and one remote peer.
 ///
 /// This object is thread-safe.
@@ -333,7 +342,7 @@ where
     /// The parent Call object of this connection.
     call: Arc<CallMutex<Call<T>>>,
     /// Injects events into the [ConnectionStateMachine](../call_fsm/struct.CallStateMachine.html).
-    fsm_sender: Sender<(Connection<T>, ConnectionEvent)>,
+    fsm_sender: SyncSender<(Connection<T>, ConnectionEvent)>,
     /// Kept around between new() and start() so we can delay the starting of the FSM
     /// but queue events that happen while starting.
     fsm_receiver: Option<Receiver<(Connection<T>, ConnectionEvent)>>,
@@ -345,8 +354,6 @@ where
     direction: CallDirection,
     /// The current state of the call connection
     state: Arc<CallMutex<ConnectionState>>,
-    /// Execution context for the call connection FSM
-    context: Arc<CallMutex<Context>>,
     /// Ancillary WebRTC data.
     webrtc: Arc<CallMutex<WebRtcData<T>>>,
     /// State that decides what bandwidth to use for sending.
@@ -364,7 +371,7 @@ where
     /// This is write-once configuration and will not change.
     connection_type: ConnectionType,
     /// Execution context for the connection periodic timer tick
-    tick_context: Arc<CallMutex<TickContext>>,
+    tick_context: Actor<TickState>,
     /// The accumulated state of sending messages over RTP data
     accumulated_rtp_data_message: Arc<CallMutex<protobuf::rtp_data::Message>>,
     /// We use this to drop out-of-order messages.
@@ -372,6 +379,8 @@ where
     // If set, all of the video frames will go here.
     // This is separate from the observer so it can bypass a thread hop.
     incoming_video_sink: Option<Box<dyn VideoSink>>,
+    /// Tracks when to send `ConnectionObserverEvent::LowBandwidthForVideo`.
+    bwe_callback_state: BweCallbackState,
 }
 
 impl<T> fmt::Display for Connection<T>
@@ -444,7 +453,6 @@ where
             connection_id: self.connection_id,
             direction: self.direction,
             state: Arc::clone(&self.state),
-            context: Arc::clone(&self.context),
             webrtc: Arc::clone(&self.webrtc),
             bandwidth_controller: Arc::clone(&self.bandwidth_controller),
             call_config: self.call_config.clone(),
@@ -453,10 +461,11 @@ where
             buffered_local_ice_candidates: Arc::clone(&self.buffered_local_ice_candidates),
             terminate_condvar: Arc::clone(&self.terminate_condvar),
             connection_type: self.connection_type,
-            tick_context: Arc::clone(&self.tick_context),
+            tick_context: self.tick_context.clone(),
             accumulated_rtp_data_message: Arc::clone(&self.accumulated_rtp_data_message),
             last_received_rtp_data_timestamp: Arc::clone(&self.last_received_rtp_data_timestamp),
             incoming_video_sink: self.incoming_video_sink.clone(),
+            bwe_callback_state: self.bwe_callback_state,
         }
     }
 }
@@ -475,9 +484,8 @@ where
         audio_levels_interval: Option<Duration>,
         incoming_video_sink: Option<Box<dyn VideoSink>>,
     ) -> Result<Self> {
-        // Create a FSM runtime for this connection.
-        let context = Context::new()?;
-        let (fsm_sender, fsm_receiver) = futures::channel::mpsc::channel(256);
+        // Create a FSM worker for this connection.
+        let (fsm_sender, fsm_receiver) = std::sync::mpsc::sync_channel(256);
 
         let call_id = call.call_id();
         let direction = call.direction();
@@ -504,7 +512,6 @@ where
             direction,
             call: Arc::new(CallMutex::new(call, "call")),
             state: Arc::new(CallMutex::new(ConnectionState::NotYetStarted, "state")),
-            context: Arc::new(CallMutex::new(context, "context")),
             webrtc: Arc::new(CallMutex::new(webrtc, "webrtc")),
             bandwidth_controller: Arc::new(CallMutex::new(
                 BandwidthController {
@@ -529,7 +536,12 @@ where
             )),
             terminate_condvar: Arc::new((Mutex::new(false), Condvar::new())),
             connection_type,
-            tick_context: Arc::new(CallMutex::new(TickContext::new(), "tick_context")),
+            tick_context: Actor::start("tick_context", Stopper::new(), |actor| {
+                Ok(TickState {
+                    ticks_elapsed: 0,
+                    actor,
+                })
+            })?,
             accumulated_rtp_data_message: Arc::new(CallMutex::new(
                 protobuf::rtp_data::Message::default(),
                 "accumulated_rtp_data_message",
@@ -539,6 +551,9 @@ where
                 "last_received_rtp_data_timestamp",
             )),
             incoming_video_sink,
+            bwe_callback_state: BweCallbackState::CheckIfLow {
+                delayed_check_tick: 0,
+            },
         };
 
         connection.init_connection_ptr()?;
@@ -547,12 +562,12 @@ where
     }
 
     fn start_fsm(&mut self) -> Result<()> {
-        let context = self.context.lock()?;
         if let Some(fsm_receiver) = self.fsm_receiver.take() {
             info!("Starting Connection FSM for {}", self.connection_id);
-            let connection_fsm = ConnectionStateMachine::new(fsm_receiver)?
-                .unwrap_or_else(|e| info!("connection state machine returned error: {}", e));
-            context.worker_runtime.spawn(connection_fsm);
+            let mut connection_fsm = ConnectionStateMachine::new(fsm_receiver.into())?;
+            thread::Builder::new()
+                .name("connection-fsm-worker".to_string())
+                .spawn(move || connection_fsm.run())?;
         } else {
             warn!(
                 "Starting Connection FSM for {} more than once",
@@ -629,6 +644,7 @@ where
     // 1. Using the ICE gatherer from the outgoing parent.
     // 2. Combining the offer from the parent and the answer from the remote peer
     //    to configure PeerConnection correctly.
+    // 3. Make sure no media flows except for incoming RTP until a remote accepts.
     pub fn start_outgoing_child(
         &mut self,
         local_secret: &StaticSecret,
@@ -651,10 +667,6 @@ where
             let peer_connection = webrtc.peer_connection()?;
 
             peer_connection.use_shared_ice_gatherer(ice_gatherer)?;
-
-            // Don't enable audio flow until the call is accepted.
-            peer_connection.set_audio_recording_enabled(false);
-            peer_connection.set_audio_playout_enabled(false);
 
             let (mut offer, mut answer, remote_public_key) =
                 if let (Some(v4_offer), Some(v4_answer)) = (offer.to_v4(), received.answer.to_v4())
@@ -696,23 +708,20 @@ where
             peer_connection.set_local_description(observer.as_ref(), offer);
             observer.get_result()?;
 
-            // Setup RTP data support before we set remote description to make sure we can handle
-            // the "accepted" message before we get ICE Connected. Warning: we're holding the
-            // lock to webrtc_data while we block on the WebRTC network thread, so we need to
-            // make sure we don't grab the webrtc_data lock in handle_rtp_received.
-            peer_connection.receive_rtp(RTP_DATA_PAYLOAD_TYPE)?;
+            // Setup RTP data support.
+            // Do this before set_remote_description() is called and enable incoming traffic
+            // to make sure we can handle the `accepted` message before we get ICE connected.
+            // Warning: We are holding the lock to webrtc_data while we block on the WebRTC
+            // network thread, so make sure we don't grab the lock in handle_rtp_received.
+            peer_connection.receive_rtp(RTP_DATA_PAYLOAD_TYPE, true)?;
 
             let observer = create_ssd_observer();
             peer_connection.set_remote_description(observer.as_ref(), answer);
 
-            // on_add_stream and on_ice_connected can all happen while
-            // SetRemoteDescription is happening. But none of those will be processed
-            // until start_fsm() is called below.
+            // on_add_stream and on_ice_connected can all happen while SetRemoteDescription
+            // is happening. But none of those will be processed until start_fsm() is called below.
             observer.get_result()?;
 
-            // Don't enable outgoing media until the call is accepted.
-            peer_connection.set_outgoing_media_enabled(false);
-            peer_connection.set_incoming_media_enabled(true);
             peer_connection.configure_audio_encoders(&self.call_config.audio_encoder_config);
 
             self.apply_bandwidth_controller(&mut bandwidth_controller, &mut webrtc)?;
@@ -734,6 +743,7 @@ where
     // 1. Creating an answer to send back to the caller
     // 2. Configuring the PeerConnection with the offer and the answer,
     //    and any remote ICE candidates that came that have arrived.
+    // 3. Make sure no media can flow until the user has explicitly accepted.
     pub fn start_incoming(
         &mut self,
         received: signaling::ReceivedOffer,
@@ -752,10 +762,6 @@ where
             webrtc.stats_observer = Some(stats_observer);
 
             let peer_connection = webrtc.peer_connection()?;
-
-            // Don't enable audio flow until the call is accepted.
-            peer_connection.set_audio_recording_enabled(false);
-            peer_connection.set_audio_playout_enabled(false);
 
             let v4_offer = received.offer.to_v4();
             let (mut offer, remote_public_key) = if let Some(v4_offer) = v4_offer.as_ref() {
@@ -796,9 +802,8 @@ where
 
             let observer = create_ssd_observer();
             peer_connection.set_remote_description(observer.as_ref(), offer);
-            // on_add_stream can happen while SetRemoteDescription
-            // is happening.  But they won't be processed until start_fsm() is called
-            // below.
+            // on_add_stream can happen while SetRemoteDescription is happening.
+            // But they won't be processed until start_fsm() is called below.
             observer.get_result()?;
 
             let observer = create_csd_observer();
@@ -831,10 +836,10 @@ where
                 return Err(RingRtcError::UnknownSignaledProtocolVersion.into());
             };
 
-            // Don't enable incoming media until the call is accepted.
-            // This should be done before we set local description to make sure
-            // we don't get ICE connected really fast and allow any packets through.
-            peer_connection.set_incoming_media_enabled(false);
+            // Setup RTP data support.
+            // Warning: We are holding the lock to webrtc_data while we block on the WebRTC
+            // network thread, so make sure we don't grab the lock in handle_rtp_received.
+            peer_connection.receive_rtp(RTP_DATA_PAYLOAD_TYPE, false)?;
 
             let observer = create_ssd_observer();
             peer_connection.set_local_description(observer.as_ref(), answer);
@@ -842,14 +847,6 @@ where
             // on_ice_connected can happen while SetLocalDescription is happening.
             // But it won't be processed until start_fsm() is called below.
             observer.get_result()?;
-
-            // Don't enable outgoing media until the call is accepted.
-            peer_connection.set_outgoing_media_enabled(false);
-
-            // Setup RTP data support. Warning: we're holding the lock to webrtc_data while
-            // we block on the WebRTC network thread, so we need to make sure we don't grab
-            // the webrtc_data lock in handle_rtp_received.
-            peer_connection.receive_rtp(RTP_DATA_PAYLOAD_TYPE)?;
 
             peer_connection.configure_audio_encoders(&self.call_config.audio_encoder_config);
 
@@ -1098,41 +1095,31 @@ where
         Ok(())
     }
 
-    /// Creates a runtime for statistics to run a timer for the given interval
-    /// duration to invoke PeerConnection::GetStats which will pass specific stats
-    /// to StatsObserver::on_stats_complete.
+    /// Creates a timer that will regularly invoke the [`tick`](Self::tick) method.
+    ///
+    /// The timer will continue until the call is terminated.
     pub fn start_tick(&self) -> Result<()> {
-        // Define the future for stats logging.
-        let mut connection = self.clone();
-
-        let (cancel_sender, cancel_receiver) = oneshot::channel::<()>();
-        let tick_forever = async move {
-            let mut interval = tokio::time::interval(TICK_INTERVAL);
-            let mut ticks_elapsed = 0u64;
-            loop {
-                interval.tick().await;
-                ticks_elapsed += 1;
-                if let Err(err) = connection.tick(ticks_elapsed) {
-                    warn!("connection.tick() failed: {:?}", err);
-                }
+        fn tick_and_reschedule<T: Platform>(
+            mut connection: Connection<T>,
+            tick_context: &mut TickState,
+        ) {
+            tick_context.ticks_elapsed += 1;
+            if let Err(err) = connection.tick(tick_context.ticks_elapsed) {
+                warn!("connection.tick() failed: {:?}", err);
             }
-        };
-        let tick_until_cancel = async move {
-            pin_mut!(tick_forever);
-            future::select(tick_forever, cancel_receiver).await;
-        };
-        debug!("start_tick(): starting the tick runtime");
-        let mut tick_context = self.tick_context.lock()?;
-        match tick_context.runtime {
-            Some(_) => warn!("start_tick(): tick timer already running"),
-            None => {
-                // Start the tick runtime.
-                let runtime = TaskQueueRuntime::new("connection-tick")?;
-                runtime.spawn(tick_until_cancel);
-                tick_context.runtime = Some(runtime);
-                tick_context.cancel_sender = Some(cancel_sender);
-            }
+            tick_context
+                .actor
+                .send_delayed(TICK_INTERVAL, move |tick_context| {
+                    tick_and_reschedule(connection, tick_context)
+                });
         }
+
+        debug!("start_tick():");
+        let connection = self.clone();
+        self.tick_context
+            .send_delayed(TICK_INTERVAL, move |tick_context| {
+                tick_and_reschedule(connection, tick_context)
+            });
 
         Ok(())
     }
@@ -1157,7 +1144,6 @@ where
         if let Some(audio_levels_interval) = self.audio_levels_interval {
             let audio_levels_interval_ticks =
                 (audio_levels_interval.as_millis() as u64) / TICK_INTERVAL_MILLIS;
-            #[allow(clippy::modulo_one)]
             if ticks_elapsed % audio_levels_interval_ticks == 0 {
                 let (captured_level, received_levels) =
                     webrtc.peer_connection()?.get_audio_levels();
@@ -1175,6 +1161,68 @@ where
             }
         }
 
+        if ticks_elapsed % CHECK_BWE_INTERVAL_TICKS == 0 {
+            match self.bwe_callback_state {
+                BweCallbackState::CheckIfLow { delayed_check_tick } => {
+                    let is_video_enabled = self
+                        .accumulated_rtp_data_message
+                        .lock()?
+                        .sender_status
+                        .as_ref()
+                        .map(|status| status.video_enabled())
+                        .unwrap_or(false);
+
+                    if is_video_enabled {
+                        if self
+                            .state()
+                            .map(|state| state == ConnectionState::ConnectedAndAccepted)
+                            .unwrap_or(false)
+                        {
+                            if ticks_elapsed > delayed_check_tick {
+                                let bwe = webrtc.peer_connection()?.get_last_bandwidth_estimate();
+
+                                if bwe < BWE_THRESHOLD_FOR_LOW_NOTIFICATION {
+                                    let event = ConnectionObserverEvent::LowBandwidthForVideo {
+                                        recovered: false,
+                                    };
+                                    if let Err(err) = self.notify_observer(event) {
+                                        warn!(
+                                            "tick(): failed to notify of low bandwidth: {:?}",
+                                            err
+                                        );
+                                    }
+                                    self.bwe_callback_state = BweCallbackState::CheckIfRecovered {
+                                        last_callback_tick: ticks_elapsed,
+                                    };
+                                }
+                            }
+                        } else {
+                            self.bwe_callback_state = BweCallbackState::CheckIfLow {
+                                delayed_check_tick: ticks_elapsed
+                                    + DELAYED_BWE_CHECK_INTERVAL_TICKS,
+                            }
+                        }
+                    }
+                }
+                BweCallbackState::CheckIfRecovered { last_callback_tick } => {
+                    if ticks_elapsed >= last_callback_tick + DELAY_FOR_RECOVERED_BWE_CALLBACK_TICKS
+                    {
+                        let bwe = webrtc.peer_connection()?.get_last_bandwidth_estimate();
+
+                        if bwe > BWE_THRESHOLD_FOR_RECOVERED_NOTIFICATION {
+                            let event =
+                                ConnectionObserverEvent::LowBandwidthForVideo { recovered: true };
+                            if let Err(err) = self.notify_observer(event) {
+                                warn!("tick(): failed to notify of recovered bandwidth: {:?}", err);
+                            }
+                            self.bwe_callback_state = BweCallbackState::Done;
+                        }
+                    }
+                }
+                BweCallbackState::Done => {}
+            }
+        }
+
         Ok(())
     }
 
@@ -1185,14 +1233,6 @@ where
             self.state(),
             Ok(ConnectionState::Terminating) | Ok(ConnectionState::Terminated)
         )
-    }
-
-    pub fn set_outgoing_media_enabled(&self, enabled: bool) -> Result<()> {
-        let webrtc = self.webrtc.lock()?;
-        webrtc
-            .peer_connection()?
-            .set_outgoing_media_enabled(enabled);
-        Ok(())
     }
 
     /// Buffer local ICE candidates, and maybe send them immediately
@@ -1482,25 +1522,25 @@ where
         self.set_incoming_media(incoming_media)
     }
 
-    /// Connect incoming media (stored by handle_incoming_media) to the application connection,
-    /// and enabled audio playout, and enable outgoing and incoming RTP.
-    /// Make sure that if you call this, you also notify the app that media is flowing.
+    /// Connect incoming media (stored by webrtc.incoming_media) to the call, and enable
+    /// audio playout, incoming and outgoing RTP, and finally audio recording. The client
+    /// should be notified that media is flowing.
     pub fn enable_media(&self) -> Result<()> {
         info!("enable_media(): id: {}", self.connection_id);
 
         let webrtc = self.webrtc.lock()?;
         let pc = webrtc.peer_connection()?;
-        pc.set_audio_recording_enabled(true);
         pc.set_audio_playout_enabled(true);
-        pc.set_outgoing_media_enabled(true);
         pc.set_incoming_media_enabled(true);
+        pc.set_outgoing_media_enabled(true);
+        pc.set_audio_recording_enabled(true);
 
         let incoming_media = match webrtc.incoming_media.as_ref() {
             Some(v) => v,
             None => {
                 return Err(RingRtcError::OptionValueNotSet(
-                    String::from("connect_incoming_media()"),
-                    String::from("incoming_media"),
+                    String::from("enable_media()"),
+                    String::from("webrtc.incoming_media"),
                 )
                 .into())
             }
@@ -1512,16 +1552,19 @@ where
 
     /// Send a ConnectionEvent to the internal FSM.
     fn inject_event(&mut self, event: ConnectionEvent) -> Result<()> {
-        if self.fsm_sender.is_closed() {
-            // The stream is closed, just eat the request
-            debug!(
-                "cc.inject_event(): stream is closed while sending: {}",
-                event
-            );
-            return Ok(());
-        }
-        self.fsm_sender.try_send((self.clone(), event))?;
-        Ok(())
+        self.fsm_sender
+            .try_send((self.clone(), event))
+            .or_else(|err| match &err {
+                std::sync::mpsc::TrySendError::Disconnected((_state, event)) => {
+                    // The stream is closed, just eat the request
+                    debug!(
+                        "cc.inject_event(): stream is closed while sending: {}",
+                        event
+                    );
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!("{err}")),
+            })
     }
 
     /// Terminate the connection.
@@ -1540,16 +1583,8 @@ where
 
         self.set_state(ConnectionState::Terminated)?;
 
-        // Stop the timer runtime, if any.
-        let mut tick_context = self.tick_context.lock()?;
-        if let Some(rt) = tick_context.runtime.take() {
-            info!("close(): stopping the tick runtime");
-            // Send the cancel event
-            let sender = tick_context.cancel_sender.take().unwrap();
-            let _ = sender.send(());
-            // Drop the runtime to shut it down
-            std::mem::drop(rt);
-        }
+        // Stop the timer thread, if any.
+        self.tick_context.stopper().stop_all_and_join();
 
         // Free up webrtc related resources.
         let mut webrtc = self.webrtc.lock()?;
@@ -1959,10 +1994,12 @@ where
     fn inject_synchronize(&mut self) -> Result<()> {
         match self.state()? {
             ConnectionState::Terminating => {
-                if self.fsm_sender.is_closed() {
-                    self.wait_for_terminate()?;
-                    return Ok(());
-                }
+                // This may be redundant, but that's okay in this case:
+                // it's always acceptable to cut off a terminated connection early in a test.
+                // (A terminated call may still have cleanup work.)
+                self.inject_event(ConnectionEvent::Terminate)?;
+                self.wait_for_terminate()?;
+                return Ok(());
             }
             ConnectionState::Terminated => {
                 info!(

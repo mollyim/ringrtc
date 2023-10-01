@@ -71,6 +71,12 @@ extern "C" {
         enabled: bool,
     );
 
+    pub fn Rust_setIncomingAudioMuted(
+        peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+        ssrc: u32,
+        muted: bool,
+    );
+
     pub fn Rust_addIceCandidateFromSdp(
         peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
         sdp: webrtc::ptr::Borrowed<c_char>,
@@ -124,6 +130,7 @@ extern "C" {
     pub fn Rust_receiveRtp(
         peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
         pt: rtp::PayloadType,
+        enable_incoming: bool,
     ) -> bool;
 
     pub fn Rust_configureAudioEncoders(
@@ -138,6 +145,10 @@ extern "C" {
         received_out_size: usize,
         received_size_out: webrtc::ptr::Borrowed<usize>,
     );
+
+    pub fn Rust_getLastBandwidthEstimateBps(
+        peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+    ) -> u32;
 
     pub fn Rust_closePeerConnection(peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>);
 }

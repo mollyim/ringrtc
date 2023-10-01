@@ -256,6 +256,10 @@ pub trait Observer {
         received_levels: Vec<ReceivedAudioLevel>,
     );
 
+    fn handle_low_bandwidth_for_video(&self, client_id: ClientId, recovered: bool);
+
+    fn handle_reactions(&self, client_id: ClientId, reactions: Vec<Reaction>);
+
     // This will be the last callback.
     // The observer can assume the Call is completely shut down and can be deleted.
     fn handle_ended(&self, client_id: ClientId, reason: EndReason);
@@ -441,6 +445,13 @@ pub enum EndReason {
     IceFailedAfterConnected,
     ServerChangedDemuxId,
     HasMaxDevices,
+}
+
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct Reaction {
+    pub demux_id: DemuxId,
+    pub value: String,
 }
 
 // The callbacks from the Client to the "SFU client" for the group call.
@@ -735,6 +746,11 @@ const LOW_MAX_RECEIVE_RATE: DataRate = DataRate::from_kbps(500);
 
 const NORMAL_MAX_RECEIVE_RATE: DataRate = DataRate::from_mbps(20);
 
+const BWE_THRESHOLD_FOR_LOW_NOTIFICATION: DataRate = DataRate::from_kbps(70);
+const BWE_THRESHOLD_FOR_RECOVERED_NOTIFICATION: DataRate = DataRate::from_kbps(80);
+
+const DELAY_FOR_RECOVERED_BWE_CALLBACK: Duration = Duration::from_secs(6);
+
 // The time between when a sender generates a new media send key
 // and applies it.  It needs to be big enough that there is
 // a high probability that receivers will receive the
@@ -848,6 +864,29 @@ pub enum GroupCallKind {
     CallLink,
 }
 
+/// The next time to check WebRTC's bandwidth estimate (BWE).
+///
+/// The initial state is Disabled. Possible state transitions:
+///
+///   Disabled -> At       (when video is enabled)
+///   At -> Disabled       (when video is disabled)
+///   At -> RecoveredAt    (after callback is made for low bandwidth)
+///   RecoveredAt -> None  (after callback is made for bandwidth recovered)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BweCheckState {
+    /// Check again after the `Instant` has passed.
+    At(Instant),
+    /// Check to see whether the BWE has recovered after `check_at` has passed.
+    RecoveredAt {
+        next_bwe_time: Instant,
+        last_callback: Instant,
+    },
+    /// Don't check now, but there might be another check later in the call.
+    Disabled,
+    /// Don't check again for the remainder of the call.
+    None,
+}
+
 /// The state inside the Actor
 struct State {
     // Things passed in that never change
@@ -899,11 +938,13 @@ struct State {
     next_stats_time: Option<Instant>,
     stats_observer: Box<StatsObserver>,
 
-    audio_levels_interval: Option<Duration>,
     // Things for getting audio levels from the PeerConnection
+    audio_levels_interval: Option<Duration>,
     next_audio_levels_time: Option<Instant>,
 
     next_membership_proof_request_time: Option<Instant>,
+
+    bwe_check_state: BweCheckState,
 
     // We have to put this inside the actor state also because
     // we change the keys from within the actor.
@@ -946,6 +987,8 @@ struct State {
     forwarding_videos: HashMap<DemuxId, u16>,
 
     outgoing_ring_state: OutgoingRingState,
+
+    reactions: Vec<Reaction>,
 
     actor: Actor<State>,
 }
@@ -991,6 +1034,14 @@ const STATS_INITIAL_OFFSET: Duration = Duration::from_secs(2);
 // How often to request an updated membership proof (24 hours).
 const MEMBERSHIP_PROOF_REQUEST_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+// How often to check the latest bandwidth estimate from WebRTC
+const BWE_INTERVAL: Duration = Duration::from_secs(1);
+/// How much to delay the check for the bandwidth estimate to allow for the estimator to update
+/// when connecting.
+const DELAYED_BWE_CHECK: Duration = Duration::from_secs(10);
+
+const REACTION_STRING_MAX_SIZE: usize = 256;
+
 impl Client {
     #[allow(clippy::too_many_arguments)]
     pub fn start(
@@ -1021,7 +1072,7 @@ impl Client {
         let client = Self {
             client_id,
             group_id: group_id.clone(),
-            actor: Actor::start(stopper, move |actor| {
+            actor: Actor::start("group-call-client", stopper, move |actor| {
                 debug!("group_call::Client(inner)::new(client_id: {})", client_id);
 
                 let peer_connection_factory = match peer_connection_factory {
@@ -1045,6 +1096,7 @@ impl Client {
                 let local_ice_ufrag = random_alphanumeric(4);
                 let local_ice_pwd = random_alphanumeric(22);
                 let audio_jitter_buffer_max_packets = 50;
+                let audio_jitter_buffer_max_target_delay_ms = 500;
                 let audio_rtcp_report_interval_ms = 5000;
                 let ice_server = IceServer::none();
                 let peer_connection = peer_connection_factory
@@ -1052,6 +1104,7 @@ impl Client {
                         peer_connection_observer,
                         pcf::RffiPeerConnectionKind::GroupCall,
                         audio_jitter_buffer_max_packets,
+                        audio_jitter_buffer_max_target_delay_ms,
                         audio_rtcp_report_interval_ms,
                         &ice_server,
                         outgoing_audio_track,
@@ -1117,6 +1170,8 @@ impl Client {
 
                     next_membership_proof_request_time: None,
 
+                    bwe_check_state: BweCheckState::Disabled,
+
                     frame_crypto_context,
                     pending_media_receive_keys: Vec::new(),
                     media_send_key_rotation_state: KeyRotationState::Applied,
@@ -1134,6 +1189,8 @@ impl Client {
                     forwarding_videos: HashMap::default(),
 
                     outgoing_ring_state: OutgoingRingState::Unknown,
+
+                    reactions: Vec::new(),
 
                     actor,
                 })
@@ -1240,6 +1297,56 @@ impl Client {
                         Some(now + MEMBERSHIP_PROOF_REQUEST_INTERVAL);
                 }
             }
+        }
+
+        match state.bwe_check_state {
+            BweCheckState::At(next_bwe_time) => {
+                if state.connection_state == ConnectionState::Connected {
+                    if now >= next_bwe_time {
+                        let bwe = state.peer_connection.get_last_bandwidth_estimate();
+                        if bwe < BWE_THRESHOLD_FOR_LOW_NOTIFICATION {
+                            state
+                                .observer
+                                .handle_low_bandwidth_for_video(state.client_id, false);
+                            state.bwe_check_state = BweCheckState::RecoveredAt {
+                                next_bwe_time: now + BWE_INTERVAL,
+                                last_callback: now,
+                            };
+                        } else {
+                            state.bwe_check_state = BweCheckState::At(now + BWE_INTERVAL);
+                        }
+                    }
+                } else {
+                    state.bwe_check_state = BweCheckState::At(now + DELAYED_BWE_CHECK);
+                }
+            }
+            BweCheckState::RecoveredAt {
+                next_bwe_time,
+                last_callback,
+            } => {
+                if now >= next_bwe_time && now >= last_callback + DELAY_FOR_RECOVERED_BWE_CALLBACK {
+                    let bwe = state.peer_connection.get_last_bandwidth_estimate();
+                    if bwe > BWE_THRESHOLD_FOR_RECOVERED_NOTIFICATION {
+                        state
+                            .observer
+                            .handle_low_bandwidth_for_video(state.client_id, true);
+                        state.bwe_check_state = BweCheckState::None;
+                    } else {
+                        state.bwe_check_state = BweCheckState::RecoveredAt {
+                            next_bwe_time: now + BWE_INTERVAL,
+                            last_callback,
+                        };
+                    }
+                }
+            }
+            BweCheckState::Disabled => {}
+            BweCheckState::None => {}
+        }
+
+        if !state.reactions.is_empty() {
+            state
+                .observer
+                .handle_reactions(state.client_id, std::mem::take(&mut state.reactions));
         }
 
         state.actor.send_delayed(TICK_INTERVAL, Self::tick);
@@ -1803,13 +1910,19 @@ impl Client {
             if send_rates.max == Some(ALL_ALONE_MAX_SEND_RATE) {
                 info!("Disable audio and outgoing media because there are no other devices.");
                 state.peer_connection.set_audio_recording_enabled(false);
-                state.peer_connection.set_audio_playout_enabled(false);
                 state.peer_connection.set_outgoing_media_enabled(false);
+                state.peer_connection.set_audio_playout_enabled(false);
+                if let BweCheckState::At(_) = state.bwe_check_state {
+                    state.bwe_check_state = BweCheckState::Disabled;
+                }
             } else {
                 info!("Enable audio and outgoing media because there are other devices.");
-                state.peer_connection.set_audio_recording_enabled(true);
                 state.peer_connection.set_audio_playout_enabled(true);
                 state.peer_connection.set_outgoing_media_enabled(true);
+                state.peer_connection.set_audio_recording_enabled(true);
+                if state.bwe_check_state == BweCheckState::Disabled {
+                    state.bwe_check_state = BweCheckState::At(Instant::now() + BWE_INTERVAL);
+                }
             }
             if let Err(e) = state.peer_connection.set_send_rates(send_rates.clone()) {
                 warn!("Could not set send rates to {:?}: {}", send_rates, e);
@@ -2081,6 +2194,33 @@ impl Client {
                 Self::request_remote_devices_as_soon_as_possible(state);
             }
         })
+    }
+
+    pub fn react(&self, value: String) {
+        debug!(
+            "group_call::Client(outer)::react(client_id: {} value: {})",
+            self.client_id, value
+        );
+
+        if value.is_empty() {
+            warn!("group_call::Client(outer)::react value is empty");
+        } else if value.len() > REACTION_STRING_MAX_SIZE {
+            warn!(
+                "group_call::Client(outer)::react reaction value size of {} exceeded allowed size of {}",
+                value.len(),
+                REACTION_STRING_MAX_SIZE
+            );
+        } else {
+            self.actor.send(move |state| {
+                debug!(
+                    "group_call::Client(inner)::react(client_id: {}, value: {})",
+                    state.client_id, value
+                );
+                if let Err(err) = Self::send_reaction(state, value) {
+                    warn!("Failed to send reaction: {:?}", err);
+                }
+            });
+        }
     }
 
     // Pulled into a named private method because it can be called in many places.
@@ -2376,7 +2516,7 @@ impl Client {
 
         if state
             .peer_connection
-            .receive_rtp(RTP_DATA_PAYLOAD_TYPE)
+            .receive_rtp(RTP_DATA_PAYLOAD_TYPE, true)
             .is_err()
         {
             warn!("Could not tell PeerConnection to receive RTP");
@@ -3100,6 +3240,16 @@ impl Client {
         Self::broadcast_data_through_sfu(state, &heartbeat_msg.encode_to_vec())
     }
 
+    fn send_reaction(state: &mut State, value: String) -> Result<()> {
+        let react_msg = protobuf::group_call::DeviceToDevice {
+            reaction: {
+                Some(protobuf::group_call::device_to_device::Reaction { value: Some(value) })
+            },
+            ..Default::default()
+        };
+        Self::broadcast_data_through_sfu(state, &react_msg.encode_to_vec())
+    }
+
     fn send_leave_to_sfu(state: &mut State) {
         use protobuf::group_call::{device_to_sfu::LeaveMessage, DeviceToSfu};
         let msg = DeviceToSfu {
@@ -3300,6 +3450,9 @@ impl Client {
                                 Self::handle_leaving_received(state, demux_id);
                             });
                         }
+                        if let Some(reaction) = msg.reaction {
+                            self.handle_reaction(demux_id, reaction);
+                        }
                     } else {
                         warn!(
                             "Ignoring received RTP data because decoding failed. demux_id: {}",
@@ -3453,6 +3606,12 @@ impl Client {
                             remote_device.recalculate_higher_resolution_pending();
                         }
 
+                        if let Some(muted) = heartbeat_state.audio_muted {
+                            state
+                                .peer_connection
+                                .set_incoming_audio_muted(demux_id, muted);
+                        }
+
                         remote_device.heartbeat_state = heartbeat_state;
 
                         state.observer.handle_remote_devices_changed(
@@ -3491,6 +3650,30 @@ impl Client {
                         Self::request_remote_devices_as_soon_as_possible(state);
                     });
             }
+        }
+    }
+
+    fn handle_reaction(
+        &self,
+        demux_id: DemuxId,
+        reaction: protobuf::group_call::device_to_device::Reaction,
+    ) {
+        trace!("handle_reaction(): demux_id = {}", demux_id);
+
+        let value = reaction.value.unwrap_or(String::new());
+
+        if value.is_empty() {
+            warn!("group_call::handle_reaction reaction value is empty");
+        } else if value.len() > REACTION_STRING_MAX_SIZE {
+            warn!(
+                "group_call::handle_reaction reaction value size of {} exceeded allowed size of {}",
+                value.len(),
+                REACTION_STRING_MAX_SIZE
+            );
+        } else {
+            self.actor.send(move |state| {
+                state.reactions.push(Reaction { demux_id, value });
+            });
         }
     }
 
@@ -4008,6 +4191,7 @@ mod tests {
         connecting: Event,
         joined: Event,
         peek_changed: Event,
+        reactions_called: Event,
         remote_devices_changed: Event,
         remote_devices: Arc<CallMutex<Vec<RemoteDeviceState>>>,
         remote_devices_at_join_time: Arc<CallMutex<Vec<RemoteDeviceState>>>,
@@ -4015,11 +4199,14 @@ mod tests {
         send_rates: Arc<CallMutex<Option<SendRates>>>,
         ended: Waitable<EndReason>,
         era_id: Option<String>,
+        reactions: Arc<CallMutex<Vec<Reaction>>>,
 
         request_membership_proof_invocation_count: Arc<AtomicU64>,
         request_group_members_invocation_count: Arc<AtomicU64>,
         handle_remote_devices_changed_invocation_count: Arc<AtomicU64>,
         handle_audio_levels_invocation_count: Arc<AtomicU64>,
+        handle_reactions_invocation_count: Arc<AtomicU64>,
+        reactions_count: Arc<AtomicU64>,
     }
 
     impl FakeObserver {
@@ -4038,6 +4225,7 @@ mod tests {
                 connecting: Event::default(),
                 joined: Event::default(),
                 peek_changed: Event::default(),
+                reactions_called: Event::default(),
                 remote_devices_changed: Event::default(),
                 remote_devices: Arc::new(CallMutex::new(Vec::new(), "FakeObserver remote devices")),
                 remote_devices_at_join_time: Arc::new(CallMutex::new(
@@ -4051,10 +4239,13 @@ mod tests {
                 send_rates: Arc::new(CallMutex::new(None, "FakeObserver send rates")),
                 ended: Waitable::default(),
                 era_id: None,
+                reactions: Arc::new(CallMutex::new(Default::default(), "FakeObserver reactions")),
                 request_membership_proof_invocation_count: Default::default(),
                 request_group_members_invocation_count: Default::default(),
                 handle_remote_devices_changed_invocation_count: Default::default(),
                 handle_audio_levels_invocation_count: Default::default(),
+                handle_reactions_invocation_count: Default::default(),
+                reactions_count: Default::default(),
             }
         }
 
@@ -4113,6 +4304,11 @@ mod tests {
             send_rates.clone()
         }
 
+        fn reactions(&self) -> Vec<Reaction> {
+            let reactions = self.reactions.lock().expect("Lock reactions to read it");
+            reactions.clone()
+        }
+
         /// Gets the number of `request_membership_proof` since last checked.
         fn request_membership_proof_invocation_count(&self) -> u64 {
             self.request_membership_proof_invocation_count
@@ -4135,6 +4331,15 @@ mod tests {
         fn handle_audio_levels_invocation_count(&self) -> u64 {
             self.handle_audio_levels_invocation_count
                 .swap(0, Ordering::Relaxed)
+        }
+
+        fn handle_reactions_invocation_count(&self) -> u64 {
+            self.handle_reactions_invocation_count
+                .swap(0, Ordering::Relaxed)
+        }
+
+        fn reactions_count(&self) -> u64 {
+            self.reactions_count.swap(0, Ordering::Relaxed)
         }
     }
 
@@ -4197,6 +4402,22 @@ mod tests {
         ) {
             self.handle_audio_levels_invocation_count
                 .fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn handle_low_bandwidth_for_video(&self, _client_id: ClientId, _recovered: bool) {}
+
+        fn handle_reactions(&self, _client_id: ClientId, reactions: Vec<Reaction>) {
+            let mut owned = self
+                .reactions
+                .lock()
+                .expect("Lock reactions to handle update");
+            *owned = reactions.clone();
+
+            self.handle_reactions_invocation_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.reactions_count
+                .fetch_add(reactions.len() as u64, Ordering::Relaxed);
+            self.reactions_called.set();
         }
 
         fn handle_peek_changed(
@@ -5006,6 +5227,30 @@ mod tests {
 
     fn hash_set<T: std::hash::Hash + Eq + Clone>(vals: impl IntoIterator<Item = T>) -> HashSet<T> {
         vals.into_iter().collect()
+    }
+
+    #[test]
+    fn reactions() {
+        let client1 = TestClient::new(vec![1], 1);
+        client1.connect_join_and_wait_until_joined();
+
+        let client2 = TestClient::new(vec![2], 2);
+        client2.connect_join_and_wait_until_joined();
+
+        set_group_and_wait_until_applied(&[&client1, &client2]);
+
+        let value = "hello".to_string();
+
+        client1.client.react(value.clone());
+        assert!(client2
+            .observer
+            .reactions_called
+            .wait(Duration::from_secs(5)));
+        assert_eq!(1, client2.observer.handle_reactions_invocation_count());
+        assert_eq!(1, client2.observer.reactions_count());
+        assert_eq!(1, client2.observer.reactions().len());
+        assert_eq!(value, client2.observer.reactions()[0].value.to_string());
+        assert_eq!(1, client2.observer.reactions()[0].demux_id)
     }
 
     #[test]
@@ -6078,7 +6323,7 @@ mod tests {
         };
         let set_client_decoded_height = |client: &TestClient, height: u32| {
             let mut remote_devices = client.observer.remote_devices.lock().unwrap();
-            let mut device = remote_devices.get_mut(0).unwrap();
+            let device = remote_devices.get_mut(0).unwrap();
             device.client_decoded_height = Some(height);
             device.recalculate_higher_resolution_pending();
         };

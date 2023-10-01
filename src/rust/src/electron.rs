@@ -163,6 +163,10 @@ pub enum Event {
         captured_level: AudioLevel,
         received_level: AudioLevel,
     },
+    LowBandwidthForVideo {
+        peer_id: PeerId,
+        recovered: bool,
+    },
 }
 
 /// Wraps a [`std::sync::mpsc::Sender`] with a callback to report new events.
@@ -290,6 +294,14 @@ impl CallStateHandler for EventReporter {
             peer_id: remote_peer_id.to_string(),
             captured_level,
             received_level,
+        })?;
+        Ok(())
+    }
+
+    fn handle_low_bandwidth_for_video(&self, remote_peer_id: &str, recovered: bool) -> Result<()> {
+        self.send(Event::LowBandwidthForVideo {
+            peer_id: remote_peer_id.to_string(),
+            recovered,
         })?;
         Ok(())
     }
@@ -1543,6 +1555,19 @@ fn groupRing(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
+fn groupReact(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
+    let reaction = cx.argument::<JsString>(1)?.value(&mut cx);
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint.call_manager.react(client_id, reaction);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
 fn resendMediaKeys(mut cx: FunctionContext) -> JsResult<JsValue> {
     let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
 
@@ -2260,6 +2285,14 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 method.call(&mut cx, observer, args)?;
             }
 
+            Event::LowBandwidthForVideo { peer_id, recovered } => {
+                let method_name = "onLowBandwidthForVideo";
+                let args = [cx.string(peer_id).upcast(), cx.boolean(recovered).upcast()];
+
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+
             Event::SendHttpRequest {
                 request_id,
                 request:
@@ -2596,6 +2629,39 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
             }
+
+            Event::GroupUpdate(GroupUpdate::LowBandwidthForVideo {
+                group_id: client_id,
+                recovered,
+            }) => {
+                let method_name = "handleLowBandwidthForVideo";
+                let args = [
+                    cx.number(client_id).upcast(),
+                    cx.boolean(recovered).upcast(),
+                ];
+
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+
+            Event::GroupUpdate(GroupUpdate::Reactions(client_id, reactions)) => {
+                let method_name = "handleReactions";
+
+                let js_reactions = JsArray::new(&mut cx, reactions.len() as u32);
+                for (i, reaction) in reactions.into_iter().enumerate() {
+                    let js_reaction = JsObject::new(&mut cx);
+                    let js_demux_id = cx.number(reaction.demux_id);
+                    js_reaction.set(&mut cx, "demuxId", js_demux_id)?;
+                    let js_value = cx.string(reaction.value);
+                    js_reaction.set(&mut cx, "value", js_value)?;
+                    js_reactions.set(&mut cx, i as u32, js_reaction)?;
+                }
+
+                let args = [cx.number(client_id).upcast(), js_reactions.upcast()];
+
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
         }
     }
     Ok(cx.undefined().upcast())
@@ -2735,6 +2801,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
         setOutgoingGroupCallVideoIsScreenShare,
     )?;
     cx.export_function("cm_groupRing", groupRing)?;
+    cx.export_function("cm_groupReact", groupReact)?;
     cx.export_function("cm_resendMediaKeys", resendMediaKeys)?;
     cx.export_function("cm_setDataMode", setDataMode)?;
     cx.export_function("cm_requestVideo", requestVideo)?;

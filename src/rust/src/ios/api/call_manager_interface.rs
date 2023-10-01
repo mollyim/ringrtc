@@ -270,6 +270,22 @@ pub struct AppReceivedAudioLevelArray {
 #[repr(C)]
 #[derive(Debug)]
 #[allow(non_snake_case)]
+pub struct AppReaction {
+    pub demuxId: DemuxId,
+    pub value: AppByteSlice,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+#[allow(non_snake_case)]
+pub struct AppReactionsArray {
+    pub reactions: *const AppReaction,
+    pub count: size_t,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+#[allow(non_snake_case)]
 pub struct AppGroupMemberInfo {
     pub userId: AppByteSlice,
     pub memberId: AppByteSlice,
@@ -339,6 +355,9 @@ pub struct AppInterface {
         receivedLevel: u16,
     ),
     ///
+    pub onLowBandwidthForVideo:
+        extern "C" fn(object: *mut c_void, remote: *const c_void, recovered: bool),
+    ///
     pub onSendOffer: extern "C" fn(
         object: *mut c_void,
         callId: u64,
@@ -403,6 +422,8 @@ pub struct AppInterface {
         observer: *mut c_void,
         deviceId: u32,
         context: *mut c_void,
+        audioJitterBufferMaxPackets: i32,
+        audioJitterBufferMaxTargetDelayMs: i32,
     ) -> AppConnectionInterface,
     /// Request that the application create an application Media Stream object
     /// associated with the given application Connection object.
@@ -448,6 +469,15 @@ pub struct AppInterface {
         capturedLevel: u16,
         receivedAudioLevels: AppReceivedAudioLevelArray,
     ),
+    pub handleLowBandwidthForVideo:
+        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, recovered: bool),
+
+    pub handleReactions: extern "C" fn(
+        object: *mut c_void,
+        clientId: group_call::ClientId,
+        reactions: AppReactionsArray,
+    ),
+
     ///
     pub handleJoinStateChanged:
         extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, joinState: i32),
@@ -1412,6 +1442,26 @@ pub extern "C" fn ringrtcSetMembershipProof(
         clientId,
         proof.unwrap(),
     );
+    if result.is_err() {
+        error!("{:?}", result.err());
+    }
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "C" fn ringrtcReact(
+    callManager: *mut c_void,
+    clientId: group_call::ClientId,
+    value: AppByteSlice,
+) {
+    info!("ringrtcReact():");
+    let v = string_from_app_slice(&value);
+    if v.is_none() {
+        error!("Invalid reaction value");
+        return;
+    }
+
+    let result = call_manager::react(callManager as *mut IosCallManager, clientId, v.unwrap());
     if result.is_err() {
         error!("{:?}", result.err());
     }

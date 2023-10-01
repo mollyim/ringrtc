@@ -15,12 +15,14 @@ use crate::common::{
 };
 use crate::core::call::Call;
 use crate::core::connection::{Connection, ConnectionType};
+use crate::core::group_call::{ClientId, Reaction};
 use crate::core::platform::{Platform, PlatformItem};
 use crate::core::{group_call, signaling};
 use crate::ios::api::call_manager_interface::{
     AppByteSlice, AppCallContext, AppConnectionInterface, AppIceCandidateArray, AppInterface,
-    AppObject, AppOptionalBool, AppOptionalUInt32, AppReceivedAudioLevel,
-    AppReceivedAudioLevelArray, AppRemoteDeviceState, AppRemoteDeviceStateArray, AppUuidArray,
+    AppObject, AppOptionalBool, AppOptionalUInt32, AppReaction, AppReactionsArray,
+    AppReceivedAudioLevel, AppReceivedAudioLevelArray, AppRemoteDeviceState,
+    AppRemoteDeviceStateArray, AppUuidArray,
 };
 use crate::ios::error::IosError;
 use crate::ios::ios_media_stream::IosMediaStream;
@@ -108,6 +110,14 @@ impl Platform for IosPlatform {
             audio_levels_interval,
         );
 
+        let audio_jitter_buffer_max_packets: i32 = call_config
+            .audio_jitter_buffer_max_packets
+            .try_into()
+            .expect("isize fits in an i32");
+        let audio_jitter_buffer_max_target_delay_ms: i32 = call_config
+            .audio_jitter_buffer_max_target_delay_ms
+            .try_into()
+            .expect("isize fits in an i32");
         let connection = Connection::new(
             call.clone(),
             remote_device_id,
@@ -134,6 +144,8 @@ impl Platform for IosPlatform {
             pc_observer.into_rffi().into_owned().as_ptr() as *mut std::ffi::c_void,
             remote_device_id,
             call.call_context()?.object,
+            audio_jitter_buffer_max_packets,
+            audio_jitter_buffer_max_target_delay_ms,
         );
 
         if app_connection_interface.object.is_null() || app_connection_interface.pc.is_null() {
@@ -233,6 +245,20 @@ impl Platform for IosPlatform {
             received_level,
         );
 
+        Ok(())
+    }
+
+    fn on_low_bandwidth_for_video(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        recovered: bool,
+    ) -> Result<()> {
+        info!("on_low_bandwidth_for_video(): {}", recovered);
+        (self.app_interface.onLowBandwidthForVideo)(
+            self.app_interface.object,
+            remote_peer.ptr,
+            recovered,
+        );
         Ok(())
     }
 
@@ -576,6 +602,38 @@ impl Platform for IosPlatform {
             client_id,
             captured_level,
             app_received_levels_array,
+        );
+    }
+
+    fn handle_low_bandwidth_for_video(&self, client_id: group_call::ClientId, recovered: bool) {
+        info!("handle_low_bandwidth_for_video():");
+        (self.app_interface.handleLowBandwidthForVideo)(
+            self.app_interface.object,
+            client_id,
+            recovered,
+        );
+    }
+
+    fn handle_reactions(&self, client_id: ClientId, reactions: Vec<Reaction>) {
+        trace!("handle_reactions(): {:?}", reactions);
+
+        let mut app_reactions: Vec<AppReaction> = Vec::new();
+        for reaction in reactions.iter() {
+            app_reactions.push(AppReaction {
+                demuxId: reaction.demux_id,
+                value: app_slice_from_str(Some(&reaction.value)),
+            });
+        }
+
+        let app_reactions_array = AppReactionsArray {
+            reactions: app_reactions.as_ptr(),
+            count: app_reactions.len(),
+        };
+
+        (self.app_interface.handleReactions)(
+            self.app_interface.object,
+            client_id,
+            app_reactions_array,
         );
     }
 

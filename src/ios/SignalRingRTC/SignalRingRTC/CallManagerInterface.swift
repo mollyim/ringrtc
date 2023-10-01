@@ -13,6 +13,7 @@ protocol CallManagerInterfaceDelegate: AnyObject {
     func onEvent(remote: UnsafeRawPointer, event: CallManagerEvent)
     func onNetworkRouteChangedFor(remote: UnsafeRawPointer, networkRoute: NetworkRoute)
     func onAudioLevelsFor(remote: UnsafeRawPointer, capturedLevel: UInt16, receivedLevel: UInt16)
+    func onLowBandwidthForVideoFor(remote: UnsafeRawPointer, recovered: Bool)
     func onSendOffer(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?, opaque: Data, callMediaType: CallMediaType)
     func onSendAnswer(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?, opaque: Data)
     func onSendIceCandidates(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?, candidates: [Data])
@@ -20,7 +21,7 @@ protocol CallManagerInterfaceDelegate: AnyObject {
     func onSendBusy(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?)
     func sendCallMessage(recipientUuid: UUID, message: Data, urgency: CallMessageUrgency)
     func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency)
-    func onCreateConnection(pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, appCallContext: CallContext) -> (connection: Connection, pc: UnsafeMutableRawPointer?)
+    func onCreateConnection(pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, appCallContext: CallContext, audioJitterBufferMaxPackets: Int32, audioJitterBufferMaxTargetDelayMs: Int32) -> (connection: Connection, pc: UnsafeMutableRawPointer?)
     func onConnectMedia(remote: UnsafeRawPointer, appCallContext: CallContext, stream: RTCMediaStream)
     func onCompareRemotes(remote1: UnsafeRawPointer, remote2: UnsafeRawPointer) -> Bool
     func onCallConcluded(remote: UnsafeRawPointer)
@@ -34,6 +35,8 @@ protocol CallManagerInterfaceDelegate: AnyObject {
     func handleConnectionStateChanged(clientId: UInt32, connectionState: ConnectionState)
     func handleNetworkRouteChanged(clientId: UInt32, networkRoute: NetworkRoute)
     func handleAudioLevels(clientId: UInt32, capturedLevel: UInt16, receivedLevels: [ReceivedAudioLevel])
+    func handleLowBandwidthForVideo(clientId: UInt32, recovered: Bool)
+    func handleReactions(clientId: UInt32, reactions: [Reaction])
     func handleJoinStateChanged(clientId: UInt32, joinState: JoinState)
     func handleRemoteDevicesChanged(clientId: UInt32, remoteDeviceStates: [RemoteDeviceState])
     func handleIncomingVideoTrack(clientId: UInt32, remoteDemuxId: UInt32, nativeVideoTrackBorrowedRc: UnsafeMutableRawPointer?)
@@ -66,6 +69,7 @@ class CallManagerInterface {
             onEvent: callManagerInterfaceOnCallEvent,
             onNetworkRouteChanged: callManagerInterfaceOnNetworkRouteChanged,
             onAudioLevels: callManagerInterfaceOnAudioLevels,
+            onLowBandwidthForVideo: callManagerInterfaceOnLowBandwidthForVideo,
             onSendOffer: callManagerInterfaceOnSendOffer,
             onSendAnswer: callManagerInterfaceOnSendAnswer,
             onSendIceCandidates: callManagerInterfaceOnSendIceCandidates,
@@ -88,6 +92,8 @@ class CallManagerInterface {
             handleConnectionStateChanged: callManagerInterfaceHandleConnectionStateChanged,
             handleNetworkRouteChanged: callManagerInterfaceHandleNetworkRouteChanged,
             handleAudioLevels: callManagerInterfaceHandleAudioLevels,
+            handleLowBandwidthForVideo: callManagerInterfaceHandleLowBandwidthForVideo,
+            handleReactions: callManagerInterfaceHandleReactions,
             handleJoinStateChanged: callManagerInterfaceHandleJoinStateChanged,
             handleRemoteDevicesChanged: callManagerInterfaceHandleRemoteDevicesChanged,
             handleIncomingVideoTrack: callManagerInterfaceHandleIncomingVideoTrack,
@@ -138,6 +144,14 @@ class CallManagerInterface {
         }
 
         delegate.onAudioLevelsFor(remote: remote, capturedLevel: capturedLevel, receivedLevel: receivedLevel)
+    }
+
+    func onLowBandwidthForVideoFor(remote: UnsafeRawPointer, recovered: Bool) {
+        guard let delegate = self.callManagerObserverDelegate else {
+            return
+        }
+
+        delegate.onLowBandwidthForVideoFor(remote: remote, recovered: recovered)
     }
 
     func onSendOffer(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?, opaque: Data, callMediaType: CallMediaType) {
@@ -196,12 +210,12 @@ class CallManagerInterface {
         delegate.sendCallMessageToGroup(groupId: groupId, message: message, urgency: urgency)
     }
 
-    func onCreateConnection(pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, appCallContext: CallContext) -> (connection: Connection, pc: UnsafeMutableRawPointer?)? {
+    func onCreateConnection(pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, appCallContext: CallContext, audioJitterBufferMaxPackets: Int32, audioJitterBufferMaxTargetDelayMs: Int32) -> (connection: Connection, pc: UnsafeMutableRawPointer?)? {
         guard let delegate = self.callManagerObserverDelegate else {
             return nil
         }
 
-        return delegate.onCreateConnection(pcObserverOwned: pcObserverOwned, deviceId: deviceId, appCallContext: appCallContext)
+        return delegate.onCreateConnection(pcObserverOwned: pcObserverOwned, deviceId: deviceId, appCallContext: appCallContext, audioJitterBufferMaxPackets: audioJitterBufferMaxPackets, audioJitterBufferMaxTargetDelayMs: audioJitterBufferMaxTargetDelayMs)
     }
 
     func onConnectedMedia(remote: UnsafeRawPointer, appCallContext: CallContext, stream: RTCMediaStream) {
@@ -276,6 +290,22 @@ class CallManagerInterface {
         }
 
         delegate.handleAudioLevels(clientId: clientId, capturedLevel: capturedLevel, receivedLevels: receivedLevels)
+    }
+
+    func handleLowBandwidthForVideo(clientId: UInt32, recovered: Bool) {
+        guard let delegate = self.callManagerObserverDelegate else {
+            return
+        }
+
+        delegate.handleLowBandwidthForVideo(clientId: clientId, recovered: recovered)
+    }
+
+    func handleReactions(clientId: UInt32, reactions: [Reaction]) {
+        guard let delegate = self.callManagerObserverDelegate else {
+            return
+        }
+
+        delegate.handleReactions(clientId: clientId, reactions: reactions)
     }
 
     func handleJoinStateChanged(clientId: UInt32, joinState: JoinState) {
@@ -401,6 +431,22 @@ func callManagerInterfaceOnAudioLevels(object: UnsafeMutableRawPointer?, remote:
     }
 
     obj.onAudioLevelsFor(remote: remote, capturedLevel: capturedLevel, receivedLevel: receivedLevel)
+}
+
+@available(iOSApplicationExtension, unavailable)
+func callManagerInterfaceOnLowBandwidthForVideo(object: UnsafeMutableRawPointer?, remote: UnsafeRawPointer?, recovered: Bool) {
+    guard let object = object else {
+        owsFailDebug("object was unexpectedly nil")
+        return
+    }
+    let obj: CallManagerInterface = Unmanaged.fromOpaque(object).takeUnretainedValue()
+
+    guard let remote = remote else {
+        owsFailDebug("remote was unexpectedly nil")
+        return
+    }
+
+    obj.onLowBandwidthForVideoFor(remote: remote, recovered: recovered)
 }
 
 @available(iOSApplicationExtension, unavailable)
@@ -606,7 +652,7 @@ func callManagerInterfaceSendCallMessageToGroup(object: UnsafeMutableRawPointer?
 }
 
 @available(iOSApplicationExtension, unavailable)
-func callManagerInterfaceOnCreateConnectionInterface(object: UnsafeMutableRawPointer?, pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, context: UnsafeMutableRawPointer?) -> AppConnectionInterface {
+func callManagerInterfaceOnCreateConnectionInterface(object: UnsafeMutableRawPointer?, pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, context: UnsafeMutableRawPointer?, audioJitterBufferMaxPackets: Int32, audioJitterBufferMaxTargetDelayMs: Int32) -> AppConnectionInterface {
     guard let object = object else {
         owsFailDebug("object was unexpectedly nil")
 
@@ -635,7 +681,7 @@ func callManagerInterfaceOnCreateConnectionInterface(object: UnsafeMutableRawPoi
 
     let appCallContext: CallContext = Unmanaged.fromOpaque(callContext).takeUnretainedValue()
 
-    if let connectionDetails = obj.onCreateConnection(pcObserverOwned: pcObserverOwned, deviceId: deviceId, appCallContext: appCallContext) {
+    if let connectionDetails = obj.onCreateConnection(pcObserverOwned: pcObserverOwned, deviceId: deviceId, appCallContext: appCallContext, audioJitterBufferMaxPackets: audioJitterBufferMaxPackets, audioJitterBufferMaxTargetDelayMs: audioJitterBufferMaxTargetDelayMs) {
         return connectionDetails.connection.getWrapper(pc: connectionDetails.pc)
     } else {
         // Swift was problematic to pass back some nullable structure, so we
@@ -828,6 +874,43 @@ func callManagerInterfaceHandleAudioLevels(object: UnsafeMutableRawPointer?, cli
     }
 
     obj.handleAudioLevels(clientId: clientId, capturedLevel: capturedLevel, receivedLevels: finalReceivedLevels)
+}
+
+@available(iOSApplicationExtension, unavailable)
+func callManagerInterfaceHandleLowBandwidthForVideo(object: UnsafeMutableRawPointer?, clientId: UInt32, recovered: Bool) {
+    guard let object = object else {
+        owsFailDebug("object was unexpectedly nil")
+        return
+    }
+    let obj: CallManagerInterface = Unmanaged.fromOpaque(object).takeUnretainedValue()
+
+    obj.handleLowBandwidthForVideo(clientId: clientId, recovered: recovered)
+}
+
+@available(iOSApplicationExtension, unavailable)
+func callManagerInterfaceHandleReactions(object: UnsafeMutableRawPointer?, clientId: UInt32, reactions: AppReactionsArray) {
+    guard let object = object else {
+        owsFailDebug("object was unexpectedly nil")
+        return
+    }
+    let obj: CallManagerInterface = Unmanaged.fromOpaque(object).takeUnretainedValue()
+
+    var finalReactions: [Reaction] = []
+
+    for index in 0..<reactions.count {
+        let reaction = reactions.reactions[index]
+
+        guard let value = reaction.value.asString() else {
+            Logger.debug("missing reaction for demuxId: 0x\(String(reaction.demuxId, radix: 16))")
+            continue
+        }
+
+        finalReactions.append(Reaction(demuxId: reaction.demuxId, value: value))
+    }
+
+    if !finalReactions.isEmpty {
+        obj.handleReactions(clientId: clientId, reactions: finalReactions)
+    }
 }
 
 @available(iOSApplicationExtension, unavailable)

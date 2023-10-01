@@ -171,6 +171,10 @@ impl PeerConnection {
         unsafe { pc::Rust_setAudioRecordingEnabled(self.rffi.as_borrowed(), enabled) };
     }
 
+    pub fn set_incoming_audio_muted(&self, ssrc: u32, muted: bool) {
+        unsafe { pc::Rust_setIncomingAudioMuted(self.rffi.as_borrowed(), ssrc, muted) };
+    }
+
     /// Rust wrapper around C++ PeerConnection::AddIceCandidate().
     pub fn add_ice_candidate_from_sdp(&self, sdp: &str) -> Result<()> {
         info!("Remote ICE candidate: {}", redact_string(sdp));
@@ -305,11 +309,10 @@ impl PeerConnection {
 
     // Must be called after either SetLocalDescription or SetRemoteDescription.
     // Received RTP with the matching PT will be sent to PeerConnectionObserver::handle_rtp_received.
-    // Warning: this blocks on the WebRTC network thread, so avoid calling it
-    // while holding a lock, especially a lock also taken in a callback
-    // from the network thread.
-    pub fn receive_rtp(&self, pt: rtp::PayloadType) -> Result<()> {
-        let ok = unsafe { pc::Rust_receiveRtp(self.rffi.as_borrowed(), pt) };
+    // Warning: this blocks on the WebRTC network thread, so avoid calling it while holding
+    // a lock, especially a lock also taken in a callback from the network thread.
+    pub fn receive_rtp(&self, pt: rtp::PayloadType, enable_incoming: bool) -> Result<()> {
+        let ok = unsafe { pc::Rust_receiveRtp(self.rffi.as_borrowed(), pt, enable_incoming) };
         if ok {
             Ok(())
         } else {
@@ -343,6 +346,12 @@ impl PeerConnection {
             received_levels.set_len(len);
         }
         (captured_level, received_levels)
+    }
+
+    pub fn get_last_bandwidth_estimate(&self) -> DataRate {
+        let bps = unsafe { pc::Rust_getLastBandwidthEstimateBps(self.rffi.as_borrowed()) };
+
+        DataRate::from_bps(bps.into())
     }
 
     pub fn close(&self) {

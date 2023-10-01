@@ -53,7 +53,7 @@ impl RffiPeerConnection {
             state: Arc::new(Mutex::new(RffiPeerConnectionState {
                 local_description_set: false,
                 remote_description_set: false,
-                outgoing_audio_enabled: true,
+                outgoing_audio_enabled: false,
                 rtp_packet_sink: None,
                 removed_ice_candidates: vec![],
                 max_bitrate_bps: None,
@@ -212,6 +212,15 @@ pub unsafe fn Rust_setAudioRecordingEnabled(
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_setIncomingAudioMuted(
+    _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+    _ssrc: u32,
+    _muted: bool,
+) {
+    info!("Rust_setIncomingAudioMuted:");
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_addIceCandidateFromSdp(
     _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
     _sdp: webrtc::ptr::Borrowed<c_char>,
@@ -312,6 +321,7 @@ pub unsafe fn Rust_sendRtp(
 pub unsafe fn Rust_receiveRtp(
     _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
     _pt: rtp::PayloadType,
+    _enable_incoming: bool,
 ) -> bool {
     info!("Rust_receiveRtp:");
     true
@@ -342,6 +352,14 @@ pub fn Rust_getAudioLevels(
             *received_size_out = 0;
         }
     }
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_getLastBandwidthEstimateBps(
+    _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+) -> u32 {
+    info!("Rust_getLastBandwidthEstimateBps");
+    0
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]

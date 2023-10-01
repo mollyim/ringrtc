@@ -14,6 +14,7 @@ use crate::common::{
 };
 use crate::core::call::Call;
 use crate::core::connection::{Connection, ConnectionType};
+use crate::core::group_call::Reaction;
 use crate::core::{group_call, signaling};
 use crate::lite::{
     sfu,
@@ -83,6 +84,13 @@ pub trait Platform: sfu::Delegate + fmt::Debug + fmt::Display + Send + Sized + '
         remote_peer: &Self::AppRemotePeer,
         captured_level: AudioLevel,
         received_level: AudioLevel,
+    ) -> Result<()>;
+
+    /// Notify the client application of low upload bandwidth for sending video
+    fn on_low_bandwidth_for_video(
+        &self,
+        remote_peer: &Self::AppRemotePeer,
+        recovered: bool,
     ) -> Result<()>;
 
     /// Send an offer to a remote peer using the signaling
@@ -250,6 +258,10 @@ pub trait Platform: sfu::Delegate + fmt::Debug + fmt::Display + Send + Sized + '
         _received_levels: Vec<ReceivedAudioLevel>,
     ) {
     }
+
+    fn handle_low_bandwidth_for_video(&self, _client_id: group_call::ClientId, _recovered: bool) {}
+
+    fn handle_reactions(&self, client_id: group_call::ClientId, reactions: Vec<Reaction>);
 
     fn handle_ended(&self, client_id: group_call::ClientId, reason: group_call::EndReason);
 }

@@ -13,6 +13,8 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::time::{Duration, SystemTime};
 
+use base64::engine::general_purpose::STANDARD as base64;
+use base64::Engine;
 use rand::SeedableRng;
 use ringrtc::lite::call_links::{
     CallLinkRestrictions, CallLinkRootKey, CallLinkState, CallLinkUpdateRequest,
@@ -88,6 +90,62 @@ fn issue_and_present_auth_credential(
     )
 }
 
+fn make_testing_request(
+    id: &str,
+    server_zkparams: &zkgroup::generic_server_params::GenericServerSecretParams,
+    public_zkparams: &zkgroup::generic_server_params::GenericServerPublicParams,
+    http_client: &http_client::HttpClient,
+    url: &'static str,
+    method: http::Method,
+    path: &str,
+) {
+    let root_key = root_key_from_id(id);
+    let auth_credential_presentation =
+        issue_and_present_auth_credential(server_zkparams, public_zkparams, &root_key);
+    let http_client_inner = http_client.clone();
+    http_client.send_request(
+        http::Request {
+            method,
+            url: format!("{url}{path}"),
+            headers: HashMap::from_iter([
+                (
+                    "Authorization".to_string(),
+                    ringrtc::lite::call_links::auth_header_from_auth_credential(
+                        &bincode::serialize(&auth_credential_presentation).unwrap(),
+                    ),
+                ),
+                (
+                    "X-Room-Id".to_string(),
+                    hex::encode(root_key.derive_room_id()),
+                ),
+            ]),
+            body: None,
+        },
+        Box::new(move |response| match response {
+            Some(response) if response.status.is_success() => {
+                // Do a regular read to show the update.
+                // zkgroup sin: we're reusing a presentation.
+                // But this is a testing client only.
+                ringrtc::lite::call_links::read_call_link(
+                    &http_client_inner,
+                    url,
+                    root_key,
+                    &bincode::serialize(&auth_credential_presentation).unwrap(),
+                    Box::new(show_result),
+                )
+            }
+            Some(response) => {
+                println!("failed: {}", response.status);
+                prompt("\n> ");
+            }
+            None => {
+                println!("request failed");
+                prompt("\n> ");
+            }
+        }),
+    )
+}
+
 fn show_result(result: Result<CallLinkState, http::ResponseStatus>) {
     match result {
         Ok(state) => println!("{state:#?}"),
@@ -105,7 +163,9 @@ fn main() {
     let zkparams_base64 = args.get(2).map(String::as_str).unwrap_or(DEFAULT_ZKPARAMS);
     let server_zkparams: zkgroup::generic_server_params::GenericServerSecretParams =
         bincode::deserialize(
-            &base64::decode(zkparams_base64).expect("zkparams should be valid base64"),
+            &base64
+                .decode(zkparams_base64)
+                .expect("zkparams should be valid base64"),
         )
         .expect("zkparams should be a valid GenericServerSecretParams (not public!)");
     let public_zkparams = server_zkparams.get_public_params();
@@ -132,6 +192,7 @@ create <id>                  - create a new link
 read <id>                    - fetch the current state of a link
 set-title <id> <new-title>   - change the title of a link
 admin-approval <id> (on|off) - turn on/off admin approval for a link
+reset-approvals <id>         - reset a link's list of approved users (if the server has this enabled)
 reset-expiration <id>        - reset a link's expiration (if the server has this enabled)
 root-key <id>                - print the root key for a link
 exit                         - quit
@@ -240,57 +301,27 @@ The admin passkey for any created links is a constant {ADMIN_PASSKEY:?}.
                     Box::new(show_result),
                 );
             }
-            ["reset-expiration", id] => {
-                let root_key = root_key_from_id(id);
-                let auth_credential_presentation = issue_and_present_auth_credential(
+            ["reset-approvals", id] => {
+                make_testing_request(
+                    id,
                     &server_zkparams,
                     &public_zkparams,
-                    &root_key,
+                    &http_client,
+                    url,
+                    http::Method::Delete,
+                    "/v1/call-link/approvals",
                 );
-                // This is a testing-only API, so RingRTC doesn't implement it for us.
-                // Manually construct the request here.
-                let http_client_inner = http_client.clone();
-                http_client.send_request(
-                    http::Request {
-                        method: http::Method::Post,
-                        url: format!("{url}/v1/call-link/reset-expiration"),
-                        headers: HashMap::from_iter([
-                            (
-                                "Authorization".to_string(),
-                                ringrtc::lite::call_links::auth_header_from_auth_credential(
-                                    &bincode::serialize(&auth_credential_presentation).unwrap(),
-                                ),
-                            ),
-                            (
-                                "X-Room-Id".to_string(),
-                                hex::encode(root_key.derive_room_id()),
-                            ),
-                        ]),
-                        body: None,
-                    },
-                    Box::new(move |response| match response {
-                        Some(response) if response.status.is_success() => {
-                            // Do a regular read to show the update.
-                            // zkgroup sin: we're reusing a presentation.
-                            // But this is a testing client only.
-                            ringrtc::lite::call_links::read_call_link(
-                                &http_client_inner,
-                                url,
-                                root_key,
-                                &bincode::serialize(&auth_credential_presentation).unwrap(),
-                                Box::new(show_result),
-                            )
-                        }
-                        Some(response) => {
-                            println!("failed: {}", response.status);
-                            prompt("\n> ");
-                        }
-                        None => {
-                            println!("request failed");
-                            prompt("\n> ");
-                        }
-                    }),
-                )
+            }
+            ["reset-expiration", id] => {
+                make_testing_request(
+                    id,
+                    &server_zkparams,
+                    &public_zkparams,
+                    &http_client,
+                    url,
+                    http::Method::Post,
+                    "/v1/call-link/reset-expiration",
+                );
             }
             ["root-key", id] => {
                 let root_key = root_key_from_id(id);
