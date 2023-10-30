@@ -749,10 +749,11 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
     let call_id = CallId::new(get_id_arg(&mut cx, 0));
     let ice_server_username = cx.argument::<JsString>(1)?.value(&mut cx);
     let ice_server_password = cx.argument::<JsString>(2)?.value(&mut cx);
-    let js_ice_server_urls = cx.argument::<JsArray>(3)?;
-    let hide_ip = cx.argument::<JsBoolean>(4)?.value(&mut cx);
-    let data_mode = cx.argument::<JsNumber>(5)?.value(&mut cx) as i32;
-    let audio_levels_interval_millis = cx.argument::<JsNumber>(6)?.value(&mut cx) as u64;
+    let ice_server_hostname = cx.argument::<JsString>(3)?.value(&mut cx);
+    let js_ice_server_urls = cx.argument::<JsArray>(4)?;
+    let hide_ip = cx.argument::<JsBoolean>(5)?.value(&mut cx);
+    let data_mode = cx.argument::<JsNumber>(6)?.value(&mut cx) as i32;
+    let audio_levels_interval_millis = cx.argument::<JsNumber>(7)?.value(&mut cx) as u64;
 
     let mut ice_server_urls = Vec::with_capacity(js_ice_server_urls.len(&mut cx) as usize);
     for i in 0..js_ice_server_urls.len(&mut cx) {
@@ -767,7 +768,12 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
         info!("  server: {}", ice_server_url);
     }
 
-    let ice_server = IceServer::new(ice_server_username, ice_server_password, ice_server_urls);
+    let ice_server = IceServer::new(
+        ice_server_username,
+        ice_server_password,
+        ice_server_hostname,
+        ice_server_urls,
+    );
 
     let audio_levels_interval = if audio_levels_interval_millis == 0 {
         None
@@ -1561,6 +1567,19 @@ fn groupReact(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     with_call_endpoint(&mut cx, |endpoint| {
         endpoint.call_manager.react(client_id, reaction);
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn groupRaiseHand(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
+    let raise = cx.argument::<JsBoolean>(1)?.value(&mut cx);
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint.call_manager.raise_hand(client_id, raise);
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -2662,6 +2681,20 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
             }
+
+            Event::GroupUpdate(GroupUpdate::RaisedHands(client_id, raised_hands)) => {
+                let js_raised_hands = JsArray::new(&mut cx, raised_hands.len() as u32);
+                for (i, raised_hand) in raised_hands.into_iter().enumerate() {
+                    let js_demux_id = cx.number(raised_hand);
+                    js_raised_hands.set(&mut cx, i as u32, js_demux_id)?;
+                }
+
+                let method_name = "handleRaisedHands";
+                let args = [cx.number(client_id).upcast(), js_raised_hands.upcast()];
+
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
         }
     }
     Ok(cx.undefined().upcast())
@@ -2802,6 +2835,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     )?;
     cx.export_function("cm_groupRing", groupRing)?;
     cx.export_function("cm_groupReact", groupReact)?;
+    cx.export_function("cm_groupRaiseHand", groupRaiseHand)?;
     cx.export_function("cm_resendMediaKeys", resendMediaKeys)?;
     cx.export_function("cm_setDataMode", setDataMode)?;
     cx.export_function("cm_requestVideo", requestVideo)?;
