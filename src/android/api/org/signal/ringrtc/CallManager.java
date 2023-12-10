@@ -1327,11 +1327,8 @@ public class CallManager {
     MediaConstraints                constraints   = new MediaConstraints();
     PeerConnection.RTCConfiguration configuration = new PeerConnection.RTCConfiguration(callContext.iceServers);
 
-    @SuppressWarnings("deprecation")
-    PeerConnection.SdpSemantics     sdpSemantics = PeerConnection.SdpSemantics.PLAN_B;
-
-    configuration.proxyInfo = callContext.proxyInfo;
-    configuration.sdpSemantics  = sdpSemantics;
+    configuration.proxyInfo     = callContext.proxyInfo;
+    configuration.sdpSemantics  = PeerConnection.SdpSemantics.UNIFIED_PLAN;
     configuration.bundlePolicy  = PeerConnection.BundlePolicy.MAXBUNDLE;
     configuration.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
     configuration.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
@@ -1363,25 +1360,17 @@ public class CallManager {
       connection.setAudioPlayout(false);
       connection.setAudioRecording(false);
 
-      MediaStream      mediaStream      = factory.createLocalMediaStream("ARDAMS");
       MediaConstraints audioConstraints = new MediaConstraints();
 
       AudioSource audioSource = factory.createAudioSource(audioConstraints);
       // Note: This must stay "audio1" to stay in sync with V4 signaling.
       AudioTrack  audioTrack  = factory.createAudioTrack("audio1", audioSource);
       audioTrack.setEnabled(false);
-      mediaStream.addTrack(audioTrack);
 
+      connection.addTrack(audioTrack, Collections.singletonList("s"));
       if (callContext.videoTrack != null) {
-        // We are sharing a single videoTrack with all the media
-        // streams.  As such, use addPreservedTrack() here so that
-        // when this MediaStream is disposed() the VideoTrack remains.
-        // We need to explicitly dispose() the VideoTrack at call
-        // termination.
-        mediaStream.addPreservedTrack(callContext.videoTrack);
+        connection.addTrack(callContext.videoTrack, Collections.singletonList("s"));
       }
-
-      connection.addStream(mediaStream);
 
       connection.setAudioSource(audioSource,
                                 audioTrack);
@@ -1708,7 +1697,7 @@ public class CallManager {
   }
 
   @CalledByNative
-  private void handleJoinStateChanged(long clientId, GroupCall.JoinState joinState) {
+  private void handleJoinStateChanged(long clientId, GroupCall.JoinState joinState, Long demuxId) {
     Log.i(TAG, "handleJoinStateChanged():");
 
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
@@ -1717,7 +1706,7 @@ public class CallManager {
       return;
     }
 
-    groupCall.handleJoinStateChanged(joinState);
+    groupCall.handleJoinStateChanged(joinState, demuxId);
   }
 
   @CalledByNative

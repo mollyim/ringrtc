@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.34.5
+
+- Use unified plan for 1:1 calls
+
+- iOS: Make trivial RemoteDeviceState for IndividualCalls
+
+- iOS: Make isUsingFrontCamera publically readable
+
+- Call Sim: Add deterministic loss handling and lbred test
+
+- Build webrtc using github actions
+
+## v2.34.4
+
+- Fetch build artifacts using a proxy where necessary
+
+- Update to WebRTC m118
+
+## v2.34.3
+
+- Update to webrtc 5845j
+  - Add low bitrate redundancy support
+  - Lower port allocation step delay
+  - Prune TurnPorts on a per-server basis
+  - Unregister sink properly when closing
+
+- Call Sim: Improvements for running large test sets
+
+## v2.34.2
+
+- Group Calls: Propagate demux_id to LocalDeviceState
+
 ## v2.34.1
 
 - Cleanup logging

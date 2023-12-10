@@ -184,6 +184,9 @@ pub struct TestCaseConfig {
     pub tcp_dump: bool,
     /// The number of times to run the test case.
     pub iterations: u16,
+    /// Whether to create charts for reports. This takes time and is sometimes not needed
+    /// when running large test sets.
+    pub create_charts: bool,
 }
 
 impl Default for TestCaseConfig {
@@ -195,8 +198,19 @@ impl Default for TestCaseConfig {
             client_b_config: Default::default(),
             tcp_dump: false,
             iterations: 1,
+            create_charts: true,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum CallProfile {
+    /// Don't set any special profile for the call.
+    None,
+    /// Sets loss percentage using a pre-determined loss map (via a client's injectable network).
+    /// Should allow for _almost_ reproducible measurements. Note that all packets for WebRTC
+    /// will flow through the lossy stream.
+    DeterministicLoss(u8),
 }
 
 /// General structure for configuration settings to send to the cli.
@@ -225,6 +239,8 @@ pub struct CallConfig {
     pub stats_interval_secs: u16,
     /// How soon to post stats to the log file before the first interval.
     pub stats_initial_offset_secs: u16,
+    /// Application of a profile for the call, to be set in the client.
+    pub profile: CallProfile,
 }
 
 impl CallConfig {
@@ -256,6 +272,7 @@ impl Default for CallConfig {
             extra_cli_args: vec![],
             stats_interval_secs: 1,
             stats_initial_offset_secs: 0,
+            profile: CallProfile::None,
         }
     }
 }
@@ -344,6 +361,8 @@ pub struct AudioConfig {
     pub enable_agc: bool,
     /// The maximum number of packets the jitter buffer can hold.
     pub jitter_buffer_max_packets: i32,
+    /// The maximum amount of delay to allow in the jitter buffer.
+    pub jitter_buffer_max_target_delay_ms: i32,
     /// How often RTCP reports should be sent. Subject to jitter applied by WebRTC.
     pub rtcp_report_interval_ms: i32,
     /// Whether or not speech (wideband) analysis should be performed.
@@ -389,6 +408,7 @@ impl Default for AudioConfig {
             enable_ns: true,
             enable_agc: true,
             jitter_buffer_max_packets: 200,
+            jitter_buffer_max_target_delay_ms: 500,
             rtcp_report_interval_ms: 5000,
             speech_analysis: true,
             audio_analysis: false,

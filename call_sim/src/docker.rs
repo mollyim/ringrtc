@@ -16,7 +16,8 @@ use tokio::io::{stdout, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::common::{
-    CallConfig, DelayVariationStrategy, GeLossModel, Loss, MarkovLossModel, NetworkConfig,
+    CallConfig, CallProfile, DelayVariationStrategy, GeLossModel, Loss, MarkovLossModel,
+    NetworkConfig,
 };
 
 /// This function builds all docker images that we need.
@@ -750,6 +751,11 @@ pub async fn start_cli(
     ));
 
     args.push(format!(
+        "--audio-jitter-buffer-max-target-delay-ms={}",
+        call_config.audio.jitter_buffer_max_target_delay_ms
+    ));
+
+    args.push(format!(
         "--audio-rtcp-report-interval-ms={}",
         call_config.audio.rtcp_report_interval_ms
     ));
@@ -764,6 +770,16 @@ pub async fn start_cli(
     if let Some((width, height)) = remote_call_config.video.dimensions() {
         args.push(format!("--output-video-width={}", width));
         args.push(format!("--output-video-height={}", height));
+    }
+
+    if name == "client_a" {
+        args.push("--ip=172.28.0.2".to_string());
+    } else {
+        args.push("--ip=172.28.0.3".to_string());
+    }
+
+    if let CallProfile::DeterministicLoss(loss_rate) = call_config.profile {
+        args.push(format!("--deterministic-loss={}", loss_rate));
     }
 
     args.extend(call_config.extra_cli_args.iter().cloned());
@@ -917,7 +933,13 @@ pub async fn generate_spectrogram(location: &str, wav_file: &str, extension: &st
             "mysox",
             wav_file,
             "-n",
+            // Only show the first channel.
+            "remix",
+            "1",
             "spectrogram",
+            // Limit height since we are only showing one channel.
+            "-y",
+            "257",
             "-o",
             &format!("{}.{}", wav_file, extension),
         ])

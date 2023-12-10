@@ -1,6 +1,6 @@
 {
   "name": "@signalapp/ringrtc",
-  "version": "2.34.1",
+  "version": "2.34.5",
   "description": "Signal Messenger voice and video calling library.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,6 +29,7 @@
   "author": "",
   "license": "AGPL-3.0-only",
   "dependencies": {
+    "https-proxy-agent": "7.0.1",
     "tar": "^6.1.0"
   },
   "devDependencies": {

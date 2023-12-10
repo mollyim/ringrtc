@@ -56,6 +56,7 @@ public class LocalDeviceState {
     public internal(set) var networkRoute: NetworkRoute
     public internal(set) var joinState: JoinState
     public internal(set) var audioLevel: UInt16
+    public internal(set) var demuxId: UInt32?
 
     init() {
         self.connectionState = .notConnected
@@ -123,6 +124,20 @@ public class RemoteDeviceState: Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(demuxId)
         hasher.combine(userId)
+    }
+
+    /// A trivial `RemoteDeviceState` to use for individual calls.
+    /// The `RemoteDeviceState` is a group call construct, but we
+    /// wish to bridge between call modes at times.
+    public static func individualCallRemoteDeviceState(userId: UUID) -> RemoteDeviceState {
+        return RemoteDeviceState(
+            demuxId: 0,
+            userId: userId,
+            mediaKeysReceived: true,
+            addedTime: 0,
+            speakerTime: 0,
+            isHigherResolutionPending: false
+        )
     }
 }
 
@@ -771,10 +786,11 @@ public class GroupCall {
         self.delegate?.groupCall(onRaisedHands: self, raisedHands: raisedHands)
     }
 
-    func handleJoinStateChanged(joinState: JoinState) {
+    func handleJoinStateChanged(joinState: JoinState, demuxId: UInt32?) {
        AssertIsOnMainThread()
 
        self.localDeviceState.joinState = joinState
+       self.localDeviceState.demuxId = demuxId
 
        self.delegate?.groupCall(onLocalDeviceStateChanged: self)
     }
