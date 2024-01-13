@@ -22,21 +22,23 @@ try:
     import os
     import platform
     import shutil
+    import sys
     import tarfile
 
 except ImportError as e:
     raise ImportError(str(e) + '- required module not found')
 
 
-DEFAULT_ARCHS  = ['arm', 'arm64', 'x86', 'x64']
-NINJA_TARGETS  = ['ringrtc']
-JAR_FILES      = [
+DEFAULT_ARCHS = ['arm', 'arm64', 'x86', 'x64']
+NINJA_TARGETS = ['ringrtc']
+JAR_FILES = [
     'lib.java/sdk/android/libwebrtc.jar',
 ]
 WEBRTC_SO_LIBS = ['libringrtc_rffi.so']
-SO_LIBS        = WEBRTC_SO_LIBS + ['libringrtc.so']
+SO_LIBS = WEBRTC_SO_LIBS + ['libringrtc.so']
 # Android NDK used in webrtc/src/third_party/android_toolchain/.../ndk-version.h
 NDK_REVISION = '25.2.9519653'
+
 
 class Project(enum.Flag):
     WEBRTC = enum.auto()
@@ -72,7 +74,7 @@ def ParseArgs():
                         required=True,
                         help='WebRTC source root directory')
     parser.add_argument('-o', '--output',
-                        default = 'libringrtc.aar',
+                        default='libringrtc.aar',
                         help='Output AAR file name')
     parser.add_argument('-d', '--debug-build',
                         action='store_true',
@@ -147,13 +149,16 @@ def ParseArgs():
 
     return parser.parse_args()
 
-def RunCmd(dry_run, cmd, cwd=None):
+
+def RunCmd(dry_run, cmd, cwd=None, stdout=None):
     logging.debug('Running: {}'.format(cmd))
     if dry_run is False:
-        subprocess.check_call(cmd, cwd=cwd)
+        subprocess.check_call(cmd, cwd=cwd, stdout=stdout)
+
 
 def GetArchBuildRoot(build_dir, arch):
     return os.path.join(build_dir, 'android-{}'.format(arch))
+
 
 def GetArchBuildDir(build_dir, arch, debug_build):
     if debug_build is True:
@@ -163,6 +168,7 @@ def GetArchBuildDir(build_dir, arch, debug_build):
 
     return os.path.join(GetArchBuildRoot(build_dir, arch), '{}'.format(build_type))
 
+
 def GetOutputDir(build_dir, debug_build):
     if debug_build is True:
         build_type = 'debug'
@@ -171,8 +177,14 @@ def GetOutputDir(build_dir, debug_build):
 
     return os.path.join(build_dir, '{}'.format(build_type))
 
+
 def GetGradleBuildDir(build_dir):
     return os.path.join(build_dir, 'gradle')
+
+
+def GetAarAssetDir(build_dir):
+    return os.path.join(build_dir, 'aar-assets')
+
 
 def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build,
               extra_gn_args, extra_gn_flags, extra_ninja_flags, extra_cargo_flags,
@@ -183,16 +195,16 @@ def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build
     output_dir = GetArchBuildDir(build_dir, arch, debug_build)
     if Project.WEBRTC in build_projects:
         gn_args = {
-            'target_os'           : '"android"',
-            'target_cpu'          : '"{}"'.format(arch),
-            'is_debug'            : 'false',
-            'rtc_include_tests'   : 'false',
-            'rtc_build_examples'  : 'false',
-            'rtc_build_tools'     : 'false',
-            'rtc_enable_protobuf' : 'false',
-            'rtc_enable_sctp'     : 'false',
+            'target_os': '"android"',
+            'target_cpu': '"{}"'.format(arch),
+            'is_debug': 'false',
+            'rtc_include_tests': 'false',
+            'rtc_build_examples': 'false',
+            'rtc_build_tools': 'false',
+            'rtc_enable_protobuf': 'false',
+            'rtc_enable_sctp': 'false',
             'rtc_libvpx_build_vp9': 'false',
-            'rtc_include_ilbc'    : 'false',
+            'rtc_include_ilbc': 'false',
         }
         if debug_build is True:
             gn_args['is_debug'] = 'true'
@@ -201,10 +213,10 @@ def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build
         gn_args_string = '--args=' + ' '.join(
             [k + '=' + v for k, v in gn_args.items()] + extra_gn_args)
 
-        gn_total_args = [ 'gn', 'gen', output_dir, gn_args_string ] + extra_gn_flags
+        gn_total_args = ['gn', 'gen', output_dir, gn_args_string] + extra_gn_flags
         RunCmd(dry_run, gn_total_args, cwd=webrtc_src_dir)
 
-        ninja_args = [ 'ninja', '-C', output_dir ] + NINJA_TARGETS + [ '-j', jobs ] + extra_ninja_flags
+        ninja_args = ['ninja', '-C', output_dir] + NINJA_TARGETS + ['-j', jobs] + extra_ninja_flags
         RunCmd(dry_run, ninja_args, cwd=webrtc_src_dir)
 
     if Project.RINGRTC in build_projects:
@@ -223,13 +235,13 @@ def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build
             'toolchains',
             'llvm',
             'prebuilt',
-            ndk_host_os + '-x86_64' # contains universal binaries on macOS
+            ndk_host_os + '-x86_64'  # contains universal binaries on macOS
         )
 
         cargo_target = GetCargoTarget(arch)
         # Set the linker as an environment variable, so it's available to dependencies as well.
         linker = '{}/bin/{}{}-clang'.format(ndk_toolchain_dir, GetClangTarget(arch), GetAndroidApiLevel(arch))
-        os.environ['CARGO_TARGET_{}_LINKER'.format(cargo_target.replace('-', '_').upper())] =  linker
+        os.environ['CARGO_TARGET_{}_LINKER'.format(cargo_target.replace('-', '_').upper())] = linker
 
         cargo_args = [
             'cargo', 'rustc',
@@ -269,6 +281,7 @@ def BuildArch(dry_run, project_dir, webrtc_src_dir, build_dir, arch, debug_build
         ]
         RunCmd(dry_run, strip_args)
 
+
 def GetABI(arch):
     if arch == 'arm':
         return 'armeabi-v7a'
@@ -280,6 +293,7 @@ def GetABI(arch):
         return 'x86_64'
     else:
         raise Exception('Unknown architecture: ' + arch)
+
 
 def GetCargoTarget(arch):
     if arch == 'arm':
@@ -293,17 +307,20 @@ def GetCargoTarget(arch):
     else:
         raise Exception('Unknown architecture: ' + arch)
 
+
 def GetClangTarget(arch):
     if arch == 'arm':
         return 'armv7a-linux-androideabi'
     else:
         return GetCargoTarget(arch)
 
+
 def GetAndroidApiLevel(arch):
     if arch == 'arm' or arch == 'x86':
         return 19
     else:
         return 21
+
 
 def CollectWebrtcLicenses(dry_run, project_dir, webrtc_src_dir, build_dir, debug_build, archs):
     assert len(NINJA_TARGETS) == 1, 'need to make this a loop'
@@ -315,6 +332,7 @@ def CollectWebrtcLicenses(dry_run, project_dir, webrtc_src_dir, build_dir, debug
         build_dir,
     ] + [GetArchBuildDir(build_dir, arch, debug_build) for arch in archs]
     RunCmd(dry_run, md_gen_args, cwd=webrtc_src_dir)
+
 
 def ArchiveWebrtc(dry_run, build_dir, debug_build, archs, webrtc_version):
     build_mode = 'debug' if debug_build else 'release'
@@ -342,6 +360,7 @@ def ArchiveWebrtc(dry_run, build_dir, debug_build, archs, webrtc_version):
         logging.debug('  Adding acknowledgments file')
         add('LICENSE.md')
 
+
 def CreateLibs(dry_run, project_dir, webrtc_src_dir, build_dir, archs, output,
                debug_build, unstripped,
                extra_gn_args, extra_gn_flags, extra_ninja_flags,
@@ -368,7 +387,6 @@ def CreateLibs(dry_run, project_dir, webrtc_src_dir, build_dir, archs, output,
 
     output_dir = os.path.join(GetOutputDir(build_dir, debug_build),
                               'libs')
-    output_file = os.path.join(output_dir, output)
     if dry_run is True:
         return
 
@@ -396,6 +414,33 @@ def CreateLibs(dry_run, project_dir, webrtc_src_dir, build_dir, archs, output,
                             os.path.join(target_dir,
                                          os.path.basename(lib)))
 
+
+def CollectAarAssets(dry_run, project_dir, build_dir):
+    # Assets in AARs get merged into one directory in the final app,
+    # so we have to think about what files we're going to put in here.
+    aar_asset_dir = GetAarAssetDir(build_dir)
+    if not dry_run:
+        shutil.rmtree(aar_asset_dir, ignore_errors=True)
+
+    acknowledgments_dir = os.path.join(aar_asset_dir, 'acknowledgments')
+    acknowledgments_file = os.path.join(acknowledgments_dir, 'ringrtc.md')
+    logging.debug('Copying RingRTC acknowledgments to {}'.format(aar_asset_dir))
+    if not dry_run:
+        os.makedirs(acknowledgments_dir)
+        shutil.copyfile(os.path.join(project_dir, 'acknowledgments', 'acknowledgments.md'),
+                        acknowledgments_file)
+
+    logging.debug('Appending WebRTC acknowledgments')
+    acknowledgments_file_for_appending = open(acknowledgments_file, mode='ab') if not dry_run else None
+    convert_exec = [
+        sys.executable,
+        os.path.join(project_dir, 'bin', 'convert_webrtc_acknowledgments.py'),
+        '--format', 'md',
+        os.path.join(build_dir, 'LICENSE.md'),
+    ]
+    RunCmd(dry_run, convert_exec, stdout=acknowledgments_file_for_appending)
+
+
 def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
                  gradle_dir, publish_to_maven,
                  build_projects,
@@ -420,6 +465,7 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
         './gradlew',
         '-PringrtcVersion={}'.format(version),
         '-PbuildDir={}'.format(gradle_build_dir),
+        '-PassetDir={}'.format(GetAarAssetDir(build_dir)),
     ]
 
     for build_type in build_types:
@@ -448,13 +494,15 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
     if Project.AAR not in build_projects:
         return
 
+    CollectAarAssets(dry_run, project_dir=project_dir, build_dir=build_dir)
+
     gradle_exec.extend(('assembleDebug' if build_type == 'debug' else 'assembleRelease' for build_type in build_types))
 
     if install_local is True:
         if 'release' not in build_types:
             raise Exception('The `debug` build type is not supported with '
-                    '--install-local. Remove --install-local and build again to '
-                    'have a debug AAR created in the Gradle output directory.')
+                            '--install-local. Remove --install-local and build again to '
+                            'have a debug AAR created in the Gradle output directory.')
 
         gradle_exec.append('installArchives')
 
@@ -482,6 +530,7 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
                 shutil.rmtree(dest_dir, ignore_errors=True)
                 os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
                 shutil.copytree(output_dir, dest_dir)
+
 
 def clean_dir(directory, dry_run):
     logging.info('Removing: {}'.format(directory))

@@ -33,6 +33,7 @@ use crate::core::platform::Platform;
 use crate::core::signaling;
 use crate::core::util::{ptr_as_box, redact_string};
 use crate::error::RingRtcError;
+use crate::lite::sfu::DemuxId;
 use crate::protobuf;
 
 use crate::webrtc;
@@ -475,7 +476,6 @@ where
     T: Platform,
 {
     /// Create a new Connection.
-    #[allow(clippy::mutex_atomic)]
     pub fn new(
         call: Call<T>,
         remote_device: DeviceId,
@@ -1992,7 +1992,6 @@ where
         self.inject_event(event)
     }
 
-    #[allow(clippy::mutex_atomic)]
     /// Inject a synchronizing event into the FSM.
     ///
     /// Blocks the caller while the event flushes through the FSM.
@@ -2133,14 +2132,14 @@ where
 
     fn handle_incoming_video_frame(
         &mut self,
-        track_id: u32,
+        demux_id: DemuxId,
         _video_frame_metadata: VideoFrameMetadata,
         video_frame: Option<VideoFrame>,
     ) -> Result<()> {
         if let (Some(incoming_video_sink), Some(video_frame)) =
             (self.incoming_video_sink.as_ref(), video_frame)
         {
-            incoming_video_sink.on_video_frame(track_id, video_frame)
+            incoming_video_sink.on_video_frame(demux_id, video_frame)
         }
         Ok(())
     }
@@ -2183,7 +2182,7 @@ where
 }
 
 fn generate_local_secret_and_public_key() -> Result<(StaticSecret, PublicKey)> {
-    let secret = StaticSecret::new(OsRng);
+    let secret = StaticSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
     Ok((secret, public))
 }

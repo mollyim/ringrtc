@@ -134,6 +134,8 @@ enum MessageSendResult {
     NotSent,
 }
 
+type MessageClosure<T> = Box<dyn FnOnce(&CallManager<T>) -> Result<MessageSendResult> + Send>;
+
 /// A structure to hold messages in the message_queue, identified by their CallId.
 pub struct SignalingMessageItem<T>
 where
@@ -144,8 +146,7 @@ where
     /// The type of message the item corresponds to.
     message_type: signaling::MessageType,
     /// The closure to be called which will send the message.
-    #[allow(clippy::type_complexity)]
-    message_closure: Box<dyn FnOnce(&CallManager<T>) -> Result<MessageSendResult> + Send>,
+    message_closure: MessageClosure<T>,
 }
 
 /// A structure implementing a message queue used to control the
@@ -328,7 +329,7 @@ pub fn validate_call_message_as_opaque_ring(
         } => {
             // Must match the implementation of handle_received_call_message for RingIntentions.
             use protobuf::signaling::call_message::ring_intention::Type as IntentionType;
-            if IntentionType::from_i32(*ring_type) != Some(IntentionType::Ring) {
+            if IntentionType::try_from(*ring_type) != Ok(IntentionType::Ring) {
                 return Err(OpaqueRingValidationError::NotARing);
             }
             if message_age > MAX_MESSAGE_AGE {
@@ -733,7 +734,6 @@ where
     /// Close down the call manager and all the calls it is currently managing.
     ///
     /// This is a blocking call.
-    #[allow(clippy::mutex_atomic)]
     pub fn close(&mut self) -> Result<()> {
         info!("close():");
 
@@ -897,7 +897,6 @@ where
         Ok(())
     }
 
-    #[allow(clippy::mutex_atomic)]
     #[cfg(feature = "sim")]
     fn sync_worker_thread(&mut self) -> Result<()> {
         // cycle a condvar through the worker thread
@@ -1613,7 +1612,9 @@ where
                 use protobuf::signaling::call_message::ring_intention::Type as IntentionType;
                 match (
                     &mut ring_intention.group_id,
-                    ring_intention.r#type.and_then(IntentionType::from_i32),
+                    ring_intention
+                        .r#type
+                        .and_then(|ty| IntentionType::try_from(ty).ok()),
                     ring_intention.ring_id,
                 ) {
                     (Some(group_id), Some(ring_type), Some(ring_id)) => {
@@ -1679,7 +1680,9 @@ where
                 use protobuf::signaling::call_message::ring_response::Type as ResponseType;
                 match (
                     &mut ring_response.group_id,
-                    ring_response.r#type.and_then(ResponseType::from_i32),
+                    ring_response
+                        .r#type
+                        .and_then(|ty| ResponseType::try_from(ty).ok()),
                     ring_response.ring_id,
                 ) {
                     (Some(_), Some(ResponseType::Ringing), Some(_)) => {

@@ -16,7 +16,7 @@ jobs:
     name: Code Formatting
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component rustfmt
     - name: Check rust format
       run: cargo fmt -- --check
@@ -24,7 +24,7 @@ jobs:
       run: yarn install --frozen-lockfile
       working-directory: src/node
     - name: Check typescript format
-      run: yarn format -c
+      run: yarn check-format
       working-directory: src/node
 
   lints:
@@ -32,30 +32,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Cargo Cache
-      uses: Swatinem/rust-cache@e207df5d269b42b69c8bc5101da26f7d31feddb4 # v2.6.2
+      uses: Swatinem/rust-cache@a95ba195448af2da9b00fb742d14ffaaf3c21f43 # v2.7.0
       with:
         cache-targets: "false"
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-    - uses: actions/checkout@v3
+    - name: Install Python tools
+      run: pip3 install flake8 mypy
+    - uses: actions/checkout@v4
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component clippy --target aarch64-linux-android,aarch64-apple-ios
     - name: Install extra Rust tools
-      run: cargo +stable install --version 0.5.6 --locked cargo-about
+      run: cargo +stable install --version 0.6.0 --locked cargo-about
     - run: shellcheck **/*.sh bin/build-aar bin/build-call_sim-cli bin/build-cli bin/build-electron bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-artifact bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check bin/set-up-for-cocoapods src/rust/scripts/run-tests
+    # Skip the Python scripts not written with flake8 style. (Try not to add more.)
+    - run: cd bin && python3 -m flake8 . --exclude measure-cpu.py
+    - name: Set up mypy types
+      run: mkdir .mypy_cache/ && python3 -m mypy --install-types --non-interactive bin/logs-notebook/call_log_parser.py --cache-dir=.mypy_cache/
+    # Only include typed Python scripts here.
+    - run: python3 -m mypy --python-version 3.8 --strict bin/convert_webrtc_acknowledgments.py bin/fetch-artifact.py bin/logs-notebook/call_log_parser.py
     - name: Check acknowledgments
       run: ./bin/regenerate_acknowledgments.sh && git diff --name-status --exit-code acknowledgments
     - name: Clippy
       run: cargo clippy --package ringrtc --tests --features sim -- -D warnings
-    - name: Clippy (Android)
-      run: cargo clippy --package ringrtc --target aarch64-linux-android -- -D warnings
-    - name: Clippy (iOS)
-      run: cargo clippy --package ringrtc --target aarch64-apple-ios -- -D warnings
+    - name: Clippy (Android & iOS)
+      run: cargo clippy --package ringrtc --target aarch64-linux-android --target aarch64-apple-ios -- -D warnings
     - name: Clippy (Electron)
       run: cargo clippy --package ringrtc --features electron -- -D warnings
     - name: Clippy (group_call)
       run: cargo clippy --package ringrtc --bin group_call --features native,http -- -D warnings
     - name: Clippy (call_link)
-      run: cargo clippy --package ringrtc --bin call_link --features sim,http,rand_chacha -- -D warnings
+      run: cargo clippy --package ringrtc --bin call_link --features uuid,sim,http,rand_chacha -- -D warnings
     - name: Clippy (call_sim-cli)
       run: cargo clippy --package ringrtc --bin call_sim-cli --features call_sim -- -D warnings
     - name: Clippy (call_sim)
@@ -67,7 +73,7 @@ jobs:
       run: yarn install --frozen-lockfile
       working-directory: src/node
     - name: Check typescript
-      run: yarn lint
+      run: yarn eslint
       working-directory: src/node
     - name: Check package.json for prebuildChecksum
       run: >-
@@ -88,7 +94,7 @@ jobs:
     steps:
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
     - name: Run rust tests
       run: cd src/rust && ./scripts/run-tests

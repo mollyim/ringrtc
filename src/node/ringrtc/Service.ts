@@ -24,7 +24,6 @@ export function callIdFromRingId(ringId: bigint): CallId {
 }
 
 class Config {
-  use_new_audio_device_module = false;
   field_trials: Record<string, string> | undefined;
 }
 
@@ -59,11 +58,7 @@ class NativeCallManager {
     Object.defineProperty(this, Native.callEndpointPropertyKey, {
       configurable: true, // allows it to be changed
       get() {
-        const callEndpoint = Native.createCallEndpoint(
-          this,
-          config.use_new_audio_device_module,
-          fieldTrialsString
-        );
+        const callEndpoint = Native.createCallEndpoint(this, fieldTrialsString);
 
         Object.defineProperty(this, Native.callEndpointPropertyKey, {
           configurable: true, // allows it to be changed
@@ -798,12 +793,9 @@ export class RingRTCType {
     broadcast: boolean,
     message: CallingMessage
   ): void {
-    /* eslint-disable no-param-reassign */
-    message.supportsMultiRing = true;
     if (!broadcast) {
       message.destinationDeviceId = remoteDeviceId;
     }
-    /* eslint-enable no-param-reassign */
 
     (async () => {
       if (this.handleOutgoingSignaling) {
@@ -1567,18 +1559,6 @@ export class RingRTCType {
       const callId = message.hangup.callId;
       const hangupType = message.hangup.type || HangupType.Normal;
       const hangupDeviceId = message.hangup.deviceId || null;
-      this.callManager.receivedHangup(
-        remoteUserId,
-        remoteDeviceId,
-        callId,
-        hangupType,
-        hangupDeviceId
-      );
-    }
-    if (message.legacyHangup?.callId) {
-      const callId = message.legacyHangup.callId;
-      const hangupType = message.legacyHangup.type || HangupType.Normal;
-      const hangupDeviceId = message.legacyHangup.deviceId || null;
       this.callManager.receivedHangup(
         remoteUserId,
         remoteDeviceId,
@@ -2624,11 +2604,9 @@ export class CallingMessage {
   offer?: OfferMessage;
   answer?: AnswerMessage;
   iceCandidates?: Array<IceCandidateMessage>;
-  legacyHangup?: HangupMessage;
   busy?: BusyMessage;
   hangup?: HangupMessage;
   opaque?: OpaqueMessage;
-  supportsMultiRing?: boolean;
   destinationDeviceId?: DeviceId;
 }
 
