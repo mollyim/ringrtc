@@ -537,6 +537,7 @@ def clean_dir(directory, dry_run):
     if dry_run is False:
         shutil.rmtree(directory, ignore_errors=True)
 
+
 def main():
 
     args = ParseArgs()
