@@ -19,7 +19,7 @@ jobs:
 
     steps:
     - name: Free up disk space
-      run: sudo rm -rf /usr/share/dotnet /opt/ghc
+      run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/local/share/chromium
 
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
