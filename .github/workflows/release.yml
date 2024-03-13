@@ -31,7 +31,7 @@ jobs:
         git checkout "$DEPOT_TOOLS_GIT_HASH^{commit}"
         echo "/opt/depot_tools" >> "$GITHUB_PATH"
       env:
-        DEPOT_TOOLS_GIT_HASH: 3f3e2f789e27d41d3c20a555fd60a39ebd631e15
+        DEPOT_TOOLS_GIT_HASH: fe6a359a803f55829ede3666215d080f6775f173
 
     - uses: actions/checkout@v4
 
