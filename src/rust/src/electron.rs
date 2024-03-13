@@ -4,6 +4,7 @@
 //
 
 use lazy_static::lazy_static;
+use neon::types::JsBigInt;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -21,7 +22,8 @@ use crate::core::util::minmax;
 use crate::lite::sfu;
 use crate::lite::{
     call_links::{
-        self, CallLinkRestrictions, CallLinkRootKey, CallLinkState, CallLinkUpdateRequest,
+        self, CallLinkDeleteRequest, CallLinkRestrictions, CallLinkRootKey, CallLinkState,
+        CallLinkUpdateRequest, Empty,
     },
     http,
     sfu::{DemuxId, GroupMember, PeekInfo, UserId},
@@ -150,6 +152,11 @@ pub enum Event {
     CallLinkResponse {
         request_id: u32,
         result: std::result::Result<CallLinkState, http::ResponseStatus>,
+    },
+    // An empty response has completed.
+    EmptyResponse {
+        request_id: u32,
+        result: std::result::Result<Empty, http::ResponseStatus>,
     },
     // JavaScript should initiate an HTTP request.
     SendHttpRequest {
@@ -493,7 +500,7 @@ fn u64_to_js_num(val: u64) -> f64 {
     val as u32 as i32 as f64
 }
 
-fn get_id_arg(cx: &mut FunctionContext, i: i32) -> u64 {
+fn get_id_arg(cx: &mut FunctionContext, i: usize) -> u64 {
     let obj = cx.argument::<JsObject>(i).expect("Get id argument");
     let high = js_num_to_u64(
         obj.get::<JsNumber, _, _>(cx, "high")
@@ -540,7 +547,7 @@ fn to_js_peek_info<'a>(
         max_devices,
     } = &peek_info;
 
-    let js_devices = JsArray::new(cx, devices.len() as u32);
+    let js_devices = JsArray::new(cx, devices.len());
     for (i, device) in devices.iter().enumerate() {
         let js_device = cx.empty_object();
         let js_demux_id = cx.number(device.demux_id);
@@ -571,7 +578,7 @@ fn to_js_peek_info<'a>(
         cx.number(peek_info.devices.len() as u32).upcast();
 
     let pending_users = peek_info.unique_pending_users();
-    let js_pending_users = JsArray::new(cx, pending_users.len() as u32);
+    let js_pending_users = JsArray::new(cx, pending_users.len());
     for (i, user_id) in pending_users.iter().enumerate() {
         let js_user_id = to_js_buffer(cx, user_id);
         js_pending_users.set(cx, i as u32, js_user_id)?;
@@ -602,7 +609,8 @@ static CALL_ENDPOINT_PROPERTY_KEY: &str = "__call_endpoint_addr";
 
 fn with_call_endpoint<T>(cx: &mut FunctionContext, body: impl FnOnce(&mut CallEndpoint) -> T) -> T {
     let endpoint = cx
-        .this()
+        .this::<JsObject>()
+        .expect("this is an object")
         .get::<JsBox<RefCell<CallEndpoint>>, _, _>(cx, CALL_ENDPOINT_PROPERTY_KEY)
         .expect("has endpoint");
     let mut endpoint = endpoint.borrow_mut();
@@ -733,33 +741,40 @@ fn cancelGroupRing(mut cx: FunctionContext) -> JsResult<JsValue> {
 #[allow(non_snake_case)]
 fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
     let call_id = CallId::new(get_id_arg(&mut cx, 0));
-    let ice_server_username = cx.argument::<JsString>(1)?.value(&mut cx);
-    let ice_server_password = cx.argument::<JsString>(2)?.value(&mut cx);
-    let ice_server_hostname = cx.argument::<JsString>(3)?.value(&mut cx);
-    let js_ice_server_urls = cx.argument::<JsArray>(4)?;
-    let hide_ip = cx.argument::<JsBoolean>(5)?.value(&mut cx);
-    let data_mode = cx.argument::<JsNumber>(6)?.value(&mut cx) as i32;
-    let audio_levels_interval_millis = cx.argument::<JsNumber>(7)?.value(&mut cx) as u64;
-
-    let mut ice_server_urls = Vec::with_capacity(js_ice_server_urls.len(&mut cx) as usize);
-    for i in 0..js_ice_server_urls.len(&mut cx) {
-        let url: String = js_ice_server_urls
-            .get::<JsString, _, _>(&mut cx, i)?
-            .value(&mut cx);
-        ice_server_urls.push(url);
-    }
+    let js_ice_servers = cx.argument::<JsArray>(1)?;
+    let hide_ip = cx.argument::<JsBoolean>(2)?.value(&mut cx);
+    let data_mode = cx.argument::<JsNumber>(3)?.value(&mut cx) as i32;
+    let audio_levels_interval_millis = cx.argument::<JsNumber>(4)?.value(&mut cx) as u64;
 
     info!("proceed(): callId: {}, hideIp: {}", call_id, hide_ip);
-    for ice_server_url in &ice_server_urls {
-        info!("  server: {}", ice_server_url);
-    }
+    let mut ice_servers = Vec::new();
+    for i in 0..js_ice_servers.len(&mut cx) {
+        let obj = js_ice_servers.get::<JsObject, _, _>(&mut cx, i)?;
+        let username = obj
+            .get_opt::<JsString, _, _>(&mut cx, "username")?
+            .map_or("".to_string(), |handle| handle.value(&mut cx));
+        let password: String = obj
+            .get_opt::<JsString, _, _>(&mut cx, "password")?
+            .map_or("".to_string(), |handle| handle.value(&mut cx));
+        let hostname = obj
+            .get_opt::<JsString, _, _>(&mut cx, "hostname")?
+            .map_or("".to_string(), |handle| handle.value(&mut cx));
+        let js_ice_server_urls = obj
+            .get_opt::<JsArray, _, _>(&mut cx, "urls")?
+            .expect("ice urls");
 
-    let ice_server = IceServer::new(
-        ice_server_username,
-        ice_server_password,
-        ice_server_hostname,
-        ice_server_urls,
-    );
+        let mut ice_server_urls = Vec::with_capacity(js_ice_server_urls.len(&mut cx) as usize);
+        for i in 0..js_ice_server_urls.len(&mut cx) {
+            let url: String = js_ice_server_urls
+                .get::<JsString, _, _>(&mut cx, i)?
+                .value(&mut cx);
+            info!("  server: {}", url);
+            ice_server_urls.push(url);
+        }
+
+        let ice_server = IceServer::new(username, password, hostname, ice_server_urls);
+        ice_servers.push(ice_server);
+    }
 
     let audio_levels_interval = if audio_levels_interval_millis == 0 {
         None
@@ -770,7 +785,7 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
     with_call_endpoint(&mut cx, |endpoint| {
         let call_context = NativeCallContext::new(
             hide_ip,
-            ice_server,
+            ice_servers,
             endpoint.outgoing_audio_track.clone(),
             endpoint.outgoing_video_track.clone(),
             endpoint.incoming_video_sink.clone(),
@@ -1965,6 +1980,39 @@ fn updateCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
+fn deleteCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
+    let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
+    let auth_presentation = cx.argument::<JsBuffer>(2)?;
+    let auth_presentation = auth_presentation.as_slice(&cx).to_vec();
+    let root_key_bytes = cx.argument::<JsBuffer>(3)?;
+    let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
+        .or_else(|e| cx.throw_type_error(e.to_string()))?;
+    let admin_passkey = cx.argument::<JsBuffer>(4)?;
+    let admin_passkey = admin_passkey.as_slice(&cx).to_vec();
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        let event_reporter = endpoint.event_reporter.clone();
+        call_links::delete_call_link(
+            endpoint.call_manager.http_client(),
+            &sfu_url,
+            root_key,
+            &auth_presentation,
+            &CallLinkDeleteRequest {
+                admin_passkey: &admin_passkey,
+            },
+            Box::new(move |result| {
+                // Ignore errors, that can only mean we're shutting down.
+                let _ = event_reporter.send(Event::EmptyResponse { request_id, result });
+            }),
+        );
+        Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
 fn getAudioInputs(mut cx: FunctionContext) -> JsResult<JsValue> {
     let devices = with_call_endpoint(&mut cx, |endpoint| {
         endpoint
@@ -1973,7 +2021,7 @@ fn getAudioInputs(mut cx: FunctionContext) -> JsResult<JsValue> {
     })
     .unwrap_or_else(|_| Vec::<AudioDevice>::new());
 
-    let js_devices = JsArray::new(&mut cx, devices.len() as u32);
+    let js_devices = JsArray::new(&mut cx, devices.len());
     for (i, device) in devices.iter().enumerate() {
         let js_device = JsObject::new(&mut cx);
         let name = cx.string(device.name.clone());
@@ -2013,7 +2061,7 @@ fn getAudioOutputs(mut cx: FunctionContext) -> JsResult<JsValue> {
     })
     .unwrap_or_else(|_| Vec::<AudioDevice>::new());
 
-    let js_devices = JsArray::new(&mut cx, devices.len() as u32);
+    let js_devices = JsArray::new(&mut cx, devices.len());
     for (i, device) in devices.iter().enumerate() {
         let js_device = JsObject::new(&mut cx);
         let name = cx.string(device.name.clone());
@@ -2048,7 +2096,7 @@ fn setAudioOutput(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 #[allow(non_snake_case)]
 fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let this = cx.this();
+    let this = cx.this::<JsObject>()?;
     let observer = this.get::<JsObject, _, _>(&mut cx, "observer")?;
 
     {
@@ -2101,7 +2149,7 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                         )
                     }
                     signaling::Message::Ice(ice) => {
-                        let js_candidates = JsArray::new(&mut cx, ice.candidates.len() as u32);
+                        let js_candidates = JsArray::new(&mut cx, ice.candidates.len());
                         for (i, candidate) in ice.candidates.iter().enumerate() {
                             let opaque: neon::handle::Handle<JsValue> = {
                                 let mut js_opaque = cx.buffer(candidate.opaque.len())?;
@@ -2389,7 +2437,7 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
 
                 let args = [
                     cx.number(client_id).upcast(),
-                    cx.number(connection_state as i32).upcast(),
+                    cx.number(connection_state.ordinal()).upcast(),
                 ];
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
@@ -2462,14 +2510,30 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 )?;
             }
 
+            Event::EmptyResponse { request_id, result } => {
+                let method_name = "handleEmptyResponse";
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+
+                let js_request_id = cx.number(request_id);
+                let (status, state_object) = match result {
+                    Ok(_) => (cx.number(200), cx.empty_object().upcast()),
+                    Err(status_code) => (cx.number(status_code.code), cx.undefined().upcast()),
+                };
+
+                method.call(
+                    &mut cx,
+                    observer,
+                    [js_request_id.upcast(), status.upcast(), state_object],
+                )?;
+            }
+
             Event::GroupUpdate(GroupUpdate::RemoteDeviceStatesChanged(
                 client_id,
                 remote_device_states,
             )) => {
                 let method_name = "handleRemoteDevicesChanged";
 
-                let js_remote_device_states =
-                    JsArray::new(&mut cx, remote_device_states.len() as u32);
+                let js_remote_device_states = JsArray::new(&mut cx, remote_device_states.len());
                 for (i, remote_device_state) in remote_device_states.iter().enumerate() {
                     let demux_id = cx.number(remote_device_state.demux_id);
                     let user_id = to_js_buffer(&mut cx, &remote_device_state.user_id);
@@ -2601,7 +2665,7 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
 
                 let args = [
                     to_js_buffer(&mut cx, &group_id).upcast::<JsValue>(),
-                    cx.string(ring_id.to_string()).upcast(),
+                    JsBigInt::from_i64(&mut cx, ring_id.into()).upcast(),
                     to_js_buffer(&mut cx, &sender).upcast(),
                     cx.number(update as i32).upcast(),
                 ];
@@ -2614,7 +2678,7 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 captured_level,
                 received_levels,
             )) => {
-                let js_received_levels = JsArray::new(&mut cx, received_levels.len() as u32);
+                let js_received_levels = JsArray::new(&mut cx, received_levels.len());
                 for (i, received_level) in received_levels.iter().enumerate() {
                     let js_received_level = JsObject::new(&mut cx);
                     let js_demux_id = cx.number(received_level.demux_id);
@@ -2652,7 +2716,7 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
             Event::GroupUpdate(GroupUpdate::Reactions(client_id, reactions)) => {
                 let method_name = "handleReactions";
 
-                let js_reactions = JsArray::new(&mut cx, reactions.len() as u32);
+                let js_reactions = JsArray::new(&mut cx, reactions.len());
                 for (i, reaction) in reactions.into_iter().enumerate() {
                     let js_reaction = JsObject::new(&mut cx);
                     let js_demux_id = cx.number(reaction.demux_id);
@@ -2669,7 +2733,7 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
             }
 
             Event::GroupUpdate(GroupUpdate::RaisedHands(client_id, raised_hands)) => {
-                let js_raised_hands = JsArray::new(&mut cx, raised_hands.len() as u32);
+                let js_raised_hands = JsArray::new(&mut cx, raised_hands.len());
                 for (i, raised_hand) in raised_hands.into_iter().enumerate() {
                     let js_demux_id = cx.number(raised_hand);
                     js_raised_hands.set(&mut cx, i as u32, js_demux_id)?;
@@ -2836,6 +2900,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_readCallLink", readCallLink)?;
     cx.export_function("cm_createCallLink", createCallLink)?;
     cx.export_function("cm_updateCallLink", updateCallLink)?;
+    cx.export_function("cm_deleteCallLink", deleteCallLink)?;
     cx.export_function("cm_getAudioInputs", getAudioInputs)?;
     cx.export_function("cm_setAudioInput", setAudioInput)?;
     cx.export_function("cm_getAudioOutputs", getAudioOutputs)?;

@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.39.0
+
+- Update to WebRTC m122
+
+- Desktop: Update IceServer fields to be optional
+
+- Add receive support for dependency descriptor to determine unencrypted length
+
+- Group Calls: Handle client_status in sfu.join()
+
+- Call links: Replace update revocation API with an explicit delete API
+
+- Update dependencies
+
+## v2.38.0
+
+- Update to webrtc 6099c
+  - Accept list of IceServers for Turn configuration
+
+- Desktop: Accept list of IceServers for Turn configuration
+
+- Enable "First Ready" Turn pruning policy
+
 ## v2.37.1
 
 - Update to webrtc 6099b

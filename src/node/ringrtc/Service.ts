@@ -45,6 +45,7 @@ class NativeCallManager {
       {
         'RingRTC-AnyAddressPortsKillSwitch': 'Enabled',
         'WebRTC-Audio-OpusSetSignalVoiceWithDtx': 'Enabled',
+        'RingRTC-PruneTurnPorts': 'Enabled',
       },
       config.field_trials
     );
@@ -145,6 +146,7 @@ class NativeCallManager {
 (NativeCallManager.prototype as any).readCallLink = Native.cm_readCallLink;
 (NativeCallManager.prototype as any).createCallLink = Native.cm_createCallLink;
 (NativeCallManager.prototype as any).updateCallLink = Native.cm_updateCallLink;
+(NativeCallManager.prototype as any).deleteCallLink = Native.cm_deleteCallLink;
 (NativeCallManager.prototype as any).peekGroupCall = Native.cm_peekGroupCall;
 (NativeCallManager.prototype as any).peekCallLinkCall =
   Native.cm_peekCallLinkCall;
@@ -272,6 +274,8 @@ class CallInfo {
   }
 }
 
+export type EmptyObj = Record<PropertyKey, never>;
+
 export type HttpResult<T> =
   | { success: true; value: T }
   | { success: false; errorStatusCode: number };
@@ -282,6 +286,7 @@ export class RingRTCType {
   private _groupCallByClientId: Map<GroupCallClientId, GroupCall>;
   private _peekRequests: Requests<HttpResult<PeekInfo>>;
   private _callLinkRequests: Requests<HttpResult<CallLinkState>>;
+  private _emptyRequests: Requests<HttpResult<undefined>>;
 
   // A map to hold call information not maintained in RingRTC.
   private _callInfoByCallId: Map<string, CallInfo>;
@@ -360,6 +365,7 @@ export class RingRTCType {
     this._groupCallByClientId = new Map();
     this._peekRequests = new Requests();
     this._callLinkRequests = new Requests();
+    this._emptyRequests = new Requests();
     this._callInfoByCallId = new Map();
   }
 
@@ -516,10 +522,7 @@ export class RingRTCType {
     sillyDeadlockProtection(() => {
       this.callManager.proceed(
         callId,
-        settings.iceServer.username || '',
-        settings.iceServer.password || '',
-        settings.iceServer.hostname || '',
-        settings.iceServer.urls,
+        settings.iceServers,
         settings.hideIp,
         settings.dataMode,
         settings.audioLevelsIntervalMillis || 0
@@ -981,11 +984,11 @@ export class RingRTCType {
   }
 
   /**
-   * Asynchronous request to revoke or un-revoke a call link.
+   * Asynchronous request to delete a call link.
    *
    * Possible failure codes include:
-   * - 401: the room does not exist (and this is the wrong API to create a new room)
    * - 403: the admin passkey is incorrect
+   * - 409: conflict - there is an ongoing call for this room.
    *
    * This request is idempotent; if it fails due to a network issue, it is safe to retry.
    *
@@ -993,27 +996,22 @@ export class RingRTCType {
    * @param authCredentialPresentation - a serialized CallLinkAuthCredentialPresentation
    * @param linkRootKey - the root key for the call link
    * @param adminPasskey - the passkey specified when the link was created
-   * @param revoked - whether the link should now be revoked
    */
-  updateCallLinkRevocation(
+  deleteCallLink(
     sfuUrl: string,
     authCredentialPresentation: Buffer,
     linkRootKey: CallLinkRootKey,
-    adminPasskey: Buffer,
-    revoked: boolean
-  ): Promise<HttpResult<CallLinkState>> {
-    const [requestId, promise] = this._callLinkRequests.add();
+    adminPasskey: Buffer
+  ): Promise<HttpResult<undefined>> {
+    const [requestId, promise] = this._emptyRequests.add();
     // Response comes back via handleCallLinkResponse
     sillyDeadlockProtection(() => {
-      this.callManager.updateCallLink(
+      this.callManager.deleteCallLink(
         requestId,
         sfuUrl,
         authCredentialPresentation,
         linkRootKey.bytes,
-        adminPasskey,
-        undefined,
-        undefined,
-        revoked
+        adminPasskey
       );
     });
     return promise;
@@ -1384,6 +1382,27 @@ export class RingRTCType {
   }
 
   // Called by Rust
+  handleEmptyResponse(
+    requestId: number,
+    statusCode: number,
+    state: EmptyObj | undefined
+  ): void {
+    sillyDeadlockProtection(() => {
+      let result: HttpResult<undefined>;
+      if (state !== undefined) {
+        result = { success: true, value: undefined };
+      } else {
+        result = { success: false, errorStatusCode: statusCode };
+      }
+      if (!this._emptyRequests.resolve(requestId, result)) {
+        this.logWarn(
+          `Invalid request ID for handleEmptyResponse: ${requestId}`
+        );
+      }
+    });
+  }
+
+  // Called by Rust
   handleEnded(clientId: GroupCallClientId, reason: GroupCallEndReason): void {
     sillyDeadlockProtection(() => {
       const groupCall = this._groupCallByClientId.get(clientId);
@@ -1401,13 +1420,12 @@ export class RingRTCType {
   // Called by Rust
   groupCallRingUpdate(
     groupId: GroupId,
-    ringIdString: string,
+    ringId: bigint,
     sender: GroupCallUserId,
     state: RingUpdate
   ): void {
     sillyDeadlockProtection(() => {
       if (this.handleGroupCallRingUpdate) {
-        const ringId = BigInt(ringIdString);
         this.handleGroupCallRingUpdate(groupId, ringId, sender, state);
       } else {
         this.logError('RingRTC.handleGroupCallRingUpdate is not set!');
@@ -1755,7 +1773,7 @@ export class RingRTCType {
 }
 
 export interface CallSettings {
-  iceServer: IceServer;
+  iceServers: Array<IceServer>;
   hideIp: boolean;
   dataMode: DataMode;
   audioLevelsIntervalMillis?: number;
@@ -1764,6 +1782,7 @@ export interface CallSettings {
 interface IceServer {
   username?: string;
   password?: string;
+  /** Provide hostname when urls contain IP addresses instead of hostname */
   hostname?: string;
   urls: Array<string>;
 }
@@ -2710,10 +2729,7 @@ export interface CallManager {
   ): CallId;
   proceed(
     callId: CallId,
-    iceServerUsername: string,
-    iceServerPassword: string,
-    iceServerHostname: string,
-    iceServerUrls: Array<string>,
+    iceServers: Array<IceServer>,
     hideIp: boolean,
     dataMode: DataMode,
     audioLevelsIntervalMillis: number
@@ -2870,6 +2886,13 @@ export interface CallManager {
     newName: string | undefined,
     newRestrictions: number | undefined,
     newRevoked: boolean | undefined
+  ): void;
+  deleteCallLink(
+    requestId: number,
+    sfuUrl: string,
+    authCredentialPresentation: Buffer,
+    linkRootKey: Buffer,
+    adminPasskey: Buffer
   ): void;
   // Response comes back via handlePeekResponse
   peekGroupCall(

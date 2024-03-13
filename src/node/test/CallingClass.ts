@@ -191,9 +191,23 @@ export class CallingClass {
     }
 
     return {
-      iceServer: {
-        urls: ['stun:turn3.voip.signal.org'],
-      },
+      iceServers: [
+        {
+          hostname: '',
+          username: 'name',
+          password: 'pass',
+          urls: ['stun:turn3.voip.signal.org'],
+        },
+        {
+          hostname: 'example.org',
+          username: 'name',
+          password: 'pass',
+          urls: ['stun:123.123.123.1'],
+        },
+        {
+          urls: ['stun:127.0.0.1'],
+        },
+      ],
       hideIp: false,
       dataMode: DataMode.Normal,
     };
