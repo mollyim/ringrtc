@@ -250,14 +250,9 @@ impl Platform for AndroidPlatform {
         let env = &mut self.java_env()?;
         let jni_call_manager = self.jni_call_manager.as_obj();
 
-        let audio_jitter_buffer_max_packets: i32 = call_config
-            .audio_jitter_buffer_max_packets
-            .try_into()
-            .expect("isize fits in an i32");
-        let audio_jitter_buffer_max_target_delay_ms: i32 = call_config
-            .audio_jitter_buffer_max_target_delay_ms
-            .try_into()
-            .expect("isize fits in an i32");
+        let audio_jitter_buffer_max_packets = call_config.audio_jitter_buffer_config.max_packets;
+        let audio_jitter_buffer_max_target_delay_ms =
+            call_config.audio_jitter_buffer_config.max_target_delay_ms;
 
         let connection = Connection::new(
             call.clone(),
@@ -709,8 +704,6 @@ impl Platform for AndroidPlatform {
         message: Vec<u8>,
         urgency: group_call::SignalingMessageUrgency,
     ) -> Result<()> {
-        info!("send_call_message():");
-
         let env = &mut self.java_env()?;
         let jni_call_manager = self.jni_call_manager.as_obj();
 
@@ -2010,7 +2003,7 @@ impl sfu::Delegate for AndroidPlatform {
 
                 // Set a frame capacity of min (5) + objects (5) + elements (N * 1 object per element).
                 let capacity = (10 + joined_members.len()) as i32;
-                match env.with_local_frame_returning_local(capacity, |env| -> Result<_> {
+                let result = env.with_local_frame_returning_local(capacity, |env| -> Result<_> {
                     let jni_peek_info = match self.make_peek_info_object(
                         env,
                         &peek_info,
@@ -2027,7 +2020,8 @@ impl sfu::Delegate for AndroidPlatform {
                         jni_peek_info => java.lang.Object,
                     ) -> void);
                     Ok(env.new_object(http_result_class, args.sig, &args.args)?)
-                }) {
+                });
+                match result {
                     Ok(v) if !v.is_null() => v,
                     Ok(_) => {
                         // Already logged, so just bail out early.

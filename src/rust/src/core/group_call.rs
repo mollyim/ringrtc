@@ -47,7 +47,7 @@ use crate::{
             AudioEncoderConfig, AudioTrack, VideoFrame, VideoFrameMetadata, VideoSink, VideoTrack,
         },
         peer_connection::{AudioLevel, PeerConnection, ReceivedAudioLevel, SendRates},
-        peer_connection_factory::{self as pcf, PeerConnectionFactory},
+        peer_connection_factory::{self as pcf, AudioJitterBufferConfig, PeerConnectionFactory},
         peer_connection_observer::{
             IceConnectionState, NetworkRoute, PeerConnectionObserver, PeerConnectionObserverTrait,
         },
@@ -1141,16 +1141,13 @@ impl Client {
                 // but we can't uses dashes due to the sfu.
                 let local_ice_ufrag = random_alphanumeric(4);
                 let local_ice_pwd = random_alphanumeric(22);
-                let audio_jitter_buffer_max_packets = 50;
-                let audio_jitter_buffer_max_target_delay_ms = 500;
                 let audio_rtcp_report_interval_ms = 5000;
                 let ice_servers = vec![];
                 let peer_connection = peer_connection_factory
                     .create_peer_connection(
                         peer_connection_observer,
                         pcf::RffiPeerConnectionKind::GroupCall,
-                        audio_jitter_buffer_max_packets,
-                        audio_jitter_buffer_max_target_delay_ms,
+                        &AudioJitterBufferConfig::default(),
                         audio_rtcp_report_interval_ms,
                         &ice_servers,
                         outgoing_audio_track,
@@ -2751,31 +2748,64 @@ impl Client {
                     new_demux_ids
                 );
                 if let Some(sfu_info) = state.sfu_info.as_ref() {
-                    let mut added_demux_ids_iter = added_demux_ids.iter().copied();
+                    let mut removed_demux_id = false;
                     for demux_id in &mut state.remote_transceiver_demux_ids {
-                        // If demux_id is None, that means that there's an empty space (from a
-                        // previously removed demux ID) in remote_transceiver_demux_ids that can be
-                        // used. If demux_id is Some, only replace it with a newly added demux ID
-                        // if it is being removed now (it's not in new_demux_ids).
-                        if demux_id.map_or(true, |id| !new_demux_ids.contains(&id)) {
-                            *demux_id = added_demux_ids_iter.next();
+                        if let Some(id) = demux_id {
+                            if !new_demux_ids.contains(id) {
+                                *demux_id = None;
+                                removed_demux_id = true;
+                            }
                         }
                     }
 
-                    // Add any remaining new demux IDs to remote_transceiver_demux_ids.
-                    state
-                        .remote_transceiver_demux_ids
-                        .extend(added_demux_ids_iter.map(Some));
+                    if removed_demux_id {
+                        // Apply demux ID removals separately from additions. This ensures that
+                        // transceivers are transitioned to the inactive direction before trying to
+                        // reuse them.
+                        //
+                        // Without this, a transceiver could persist the receiving direction across
+                        // a change in the associated demux ID. When that happens,
+                        // PeerConnectionObserver::OnTrack won't be called for the new demux ID
+                        // when the remote description is applied.
+                        let result = Self::set_peer_connection_descriptions(
+                            state,
+                            sfu_info,
+                            local_demux_id,
+                            srtp_keys,
+                        );
+                        if result.is_err() {
+                            Self::end(state, EndReason::FailedToUpdatePeerConnection);
+                            return;
+                        }
+                    }
 
-                    let result = Self::set_peer_connection_descriptions(
-                        state,
-                        sfu_info,
-                        local_demux_id,
-                        srtp_keys,
-                    );
-                    if result.is_err() {
-                        Self::end(state, EndReason::FailedToUpdatePeerConnection);
-                        return;
+                    if !added_demux_ids.is_empty() {
+                        let mut added_demux_ids_iter = added_demux_ids.iter().copied();
+                        for demux_id in &mut state.remote_transceiver_demux_ids {
+                            // If demux_id is None, that means that there's an empty space (from a
+                            // previously removed demux ID) in remote_transceiver_demux_ids that can be
+                            // used. If demux_id is Some, only replace it with a newly added demux ID
+                            // if it is being removed now (it's not in new_demux_ids).
+                            if demux_id.map_or(true, |id| !new_demux_ids.contains(&id)) {
+                                *demux_id = added_demux_ids_iter.next();
+                            }
+                        }
+
+                        // Add any remaining new demux IDs to remote_transceiver_demux_ids.
+                        state
+                            .remote_transceiver_demux_ids
+                            .extend(added_demux_ids_iter.map(Some));
+
+                        let result = Self::set_peer_connection_descriptions(
+                            state,
+                            sfu_info,
+                            local_demux_id,
+                            srtp_keys,
+                        );
+                        if result.is_err() {
+                            Self::end(state, EndReason::FailedToUpdatePeerConnection);
+                            return;
+                        }
                     }
                 }
             }
@@ -3180,12 +3210,14 @@ impl Client {
 
     // The portion of the frame we leave in the clear
     // to allow the SFU to forward media properly.
-    fn unencrypted_media_header_len(is_audio: bool, has_dependency_descriptor: bool) -> usize {
+    fn unencrypted_media_header_len(is_audio: bool, has_encrypted_media_header: bool) -> usize {
+        if has_encrypted_media_header {
+            return 0;
+        }
+
         if is_audio {
             // For Opus TOC
             1
-        } else if has_dependency_descriptor {
-            0
         } else {
             // For VP8 headers when dependency descriptor isn't used
             10
@@ -3276,7 +3308,7 @@ impl Client {
         is_audio: bool,
         ciphertext: &[u8],
         plaintext_buffer: &mut [u8],
-        has_dependency_descriptor: bool,
+        has_encrypted_media_header: bool,
     ) -> Result<usize> {
         let mut frame_crypto_context = self
             .frame_crypto_context
@@ -3284,7 +3316,7 @@ impl Client {
             .expect("Get e2ee context to decrypt media");
 
         let unencrypted_header_len =
-            Self::unencrypted_media_header_len(is_audio, has_dependency_descriptor);
+            Self::unencrypted_media_header_len(is_audio, has_encrypted_media_header);
         Self::decrypt(
             &mut frame_crypto_context,
             remote_demux_id,
@@ -3904,7 +3936,7 @@ impl Client {
 struct PeerConnectionObserverImpl {
     client: Option<Client>,
     incoming_video_sink: Option<Box<dyn VideoSink>>,
-    last_height_by_demux_id: HashMap<DemuxId, u32>,
+    last_height_by_demux_id: CallMutex<HashMap<DemuxId, u32>>,
 }
 
 impl PeerConnectionObserverImpl {
@@ -3915,7 +3947,7 @@ impl PeerConnectionObserverImpl {
         let boxed_observer_impl = Box::new(Self {
             client: None,
             incoming_video_sink,
-            last_height_by_demux_id: HashMap::new(),
+            last_height_by_demux_id: CallMutex::new(HashMap::new(), "last_height_by_demux_id"),
         });
         let observer = PeerConnectionObserver::new(
             webrtc::ptr::Borrowed::from_ptr(&*boxed_observer_impl),
@@ -4065,7 +4097,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
     }
 
     fn handle_incoming_video_frame(
-        &mut self,
+        &self,
         demux_id: DemuxId,
         video_frame_metadata: VideoFrameMetadata,
         video_frame: Option<VideoFrame>,
@@ -4077,12 +4109,16 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
             incoming_video_sink.on_video_frame(demux_id, video_frame)
         }
         if let Some(client) = &self.client {
-            let prev_height = self.last_height_by_demux_id.insert(demux_id, height);
+            let prev_height = self
+                .last_height_by_demux_id
+                .lock()
+                .unwrap()
+                .insert(demux_id, height);
             if prev_height != Some(height) {
                 client.actor.send(move |state| {
                     if let Some(remote_device) = state.remote_devices.find_by_demux_id_mut(demux_id)
                     {
-                        // The height needs to be checked again because last_height_by_track_id
+                        // The height needs to be checked again because last_height_by_demux_id
                         // doesn't account for video mute or forwarding state.
                         if remote_device.client_decoded_height != Some(height)
                             // Workaround for a race where a frame is received after video muting
@@ -4162,7 +4198,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
         is_audio: bool,
         ciphertext: &[u8],
         plaintext_buffer: &mut [u8],
-        has_dependency_descriptor: bool,
+        has_encrypted_media_header: bool,
     ) -> Result<usize> {
         if let Some(client) = &self.client {
             let remote_demux_id = track_id;
@@ -4171,7 +4207,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                 is_audio,
                 ciphertext,
                 plaintext_buffer,
-                has_dependency_descriptor,
+                has_encrypted_media_header,
             )
         } else {
             warn!("Call isn't setup yet!  Can't decrypt");
@@ -4905,7 +4941,7 @@ mod tests {
             remote_demux_id: DemuxId,
             is_audio: bool,
             ciphertext: &[u8],
-            has_dependency_descriptor: bool,
+            has_encrypted_media_header: bool,
         ) -> Result<Vec<u8>> {
             let mut plaintext = vec![
                 0;
@@ -4924,7 +4960,7 @@ mod tests {
                     is_audio,
                     ciphertext,
                     &mut plaintext,
-                    has_dependency_descriptor
+                    has_encrypted_media_header
                 )?
             );
             Ok(plaintext)

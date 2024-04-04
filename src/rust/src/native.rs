@@ -450,10 +450,7 @@ impl Platform for NativePlatform {
         let pc = self.peer_connection_factory.create_peer_connection(
             pc_observer,
             kind,
-            connection.call_config().audio_jitter_buffer_max_packets,
-            connection
-                .call_config()
-                .audio_jitter_buffer_max_target_delay_ms,
+            &connection.call_config().audio_jitter_buffer_config,
             connection.call_config().audio_rtcp_report_interval_ms,
             &context.ice_servers,
             context.outgoing_audio_track.clone(),
@@ -799,7 +796,6 @@ impl Platform for NativePlatform {
         message: Vec<u8>,
         urgency: group_call::SignalingMessageUrgency,
     ) -> Result<()> {
-        info!("NativePlatform::send_call_message():");
         self.signaling_sender
             .send_call_message(recipient_uuid, message, urgency)
     }
@@ -963,14 +959,10 @@ impl Platform for NativePlatform {
 
     fn handle_incoming_video_track(
         &self,
-        client_id: group_call::ClientId,
-        remote_demux_id: DemuxId,
+        _client_id: group_call::ClientId,
+        _remote_demux_id: DemuxId,
         _incoming_video_track: VideoTrack,
     ) {
-        info!(
-            "NativePlatform::handle_incoming_video_track(): id: {}; remote_demux_id: {}",
-            client_id, remote_demux_id
-        );
     }
 
     fn handle_peek_changed(

@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.39.3
+
+- Update to webrtc 6261d
+  - Add receive support for encrypted TOC byte
+  - Add logging when select fails
+
+- Add receive support for encrypted TOC byte
+
+- Update dependencies
+
+## v2.39.2
+
+- Group Calls: Apply removal of demux IDs separately
+
+- Log notebook improvements
+
+- Build improvements
+
+- Update to Rust 1.76.0
+
+## v2.39.1
+
+- Call Sim: Add jitter buffer config
+
+- Don't probe when close to the max probe rate
+
+- Group Calls: Synchronize access to last_height_by_demux_id
+
+- Update dependencies
+
 ## v2.39.0
 
 - Update to WebRTC m122
