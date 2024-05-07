@@ -26,9 +26,11 @@ esac
 }
 
 echo "Downloading WebRTC dependencies to ${WEBRTC_DIR} from version ${WEBRTC_VERSION}"
+echo "Applying patches by rebasing ${WEBRTC_PATCH_REF} onto ${WEBRTC_VERSION}"
 echo "CONFIGURED_WEBRTC_VERSION=${WEBRTC_VERSION}" > "${OUTPUT_DIR}/webrtc-version.env"
 
 (
  cd "$WEBRTC_DIR"
- gclient sync --no-history --jobs 32 --with_tags "--revision=src@${WEBRTC_VERSION}"
+ gclient sync --no-history --jobs 32 --with_tags "--revision=src@${WEBRTC_VERSION}" \
+  "--patch-ref=src@${WEBRTC_PATCH_REF}"
 )

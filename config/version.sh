@@ -15,12 +15,16 @@ else
 fi
 
 property() {
-    grep "${1}" "${SCRIPT_DIR}/version.properties" | cut -d'=' -f2
+    grep "${1}" "${SCRIPT_DIR}/${2:-version.properties}" | cut -d'=' -f2
 }
 
 # Specify WebRTC version.  This corresponds to the
 # branch or tag of the signalapp/webrtc repository.
 WEBRTC_VERSION=$(property 'webrtc.version')
+
+# MOLLY: Range of commits to be rebased on top of the synced "WEBRTC_VERSION".
+# Given that gclient is run with the "no-history" option, use tags references only.
+WEBRTC_PATCH_REF=$(property 'webrtc.patch.ref' 'extra.properties')
 
 RINGRTC_MAJOR_VERSION=$(property 'ringrtc.version.major')
 RINGRTC_MINOR_VERSION=$(property 'ringrtc.version.minor')
