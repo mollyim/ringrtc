@@ -34,6 +34,9 @@ jobs:
         DEPOT_TOOLS_GIT_HASH: fe6a359a803f55829ede3666215d080f6775f173
 
     - uses: actions/checkout@v4
+    - run: |
+        git config --global user.name "build"
+        git config --global user.email "localhost"
 
     - name: Install Rust targets
       run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
