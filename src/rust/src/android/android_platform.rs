@@ -700,7 +700,7 @@ impl Platform for AndroidPlatform {
 
     fn send_call_message(
         &self,
-        recipient_uuid: Vec<u8>,
+        recipient_uuid: UserId,
         message: Vec<u8>,
         urgency: group_call::SignalingMessageUrgency,
     ) -> Result<()> {
@@ -735,19 +735,37 @@ impl Platform for AndroidPlatform {
 
     fn send_call_message_to_group(
         &self,
-        group_id: Vec<u8>,
+        group_id: group_call::GroupId,
         message: Vec<u8>,
         urgency: group_call::SignalingMessageUrgency,
+        recipients_override: HashSet<UserId>,
     ) -> Result<()> {
-        info!("send_call_message_to_group():");
-
         let env = &mut self.java_env()?;
         let jni_call_manager = self.jni_call_manager.as_obj();
 
-        // Set a frame capacity of min (5) + objects (2).
-        let capacity = 7;
+        // Set a frame capacity of min (5) + objects (3) + elements (N * 1 object per element).
+        let capacity = (8 + recipients_override.len()) as i32;
         env.with_local_frame(capacity, |env| -> Result<()> {
             let jni_group_id = JObject::from(env.byte_array_from_slice(&group_id)?);
+
+            let list = jni_new_arraylist(env, recipients_override.len())?;
+            let recipients_override_list = env.get_list(&list)?;
+            for recipient in recipients_override {
+                let jni_opaque_user_id = match env.byte_array_from_slice(&recipient) {
+                    Ok(v) => JObject::from(v),
+                    Err(error) => {
+                        error!("{:?}", error);
+                        continue;
+                    }
+                };
+
+                let result = recipients_override_list.add(env, &jni_opaque_user_id);
+                if result.is_err() {
+                    error!("{:?}", result.err());
+                    continue;
+                }
+            }
+
             let jni_message = JObject::from(env.byte_array_from_slice(&message)?);
 
             let result = jni_call_method(
@@ -758,6 +776,7 @@ impl Platform for AndroidPlatform {
                     jni_group_id => [byte],
                     jni_message => [byte],
                     urgency as i32 => int,
+                    recipients_override_list => java.util.List,
                 ) -> void),
             );
             if result.is_err() {
@@ -1729,56 +1748,23 @@ impl AndroidPlatform {
 
         let result_object = match response {
             Ok(result) => {
-                let call_link_state_class = match self.class_cache.get_class(CALL_LINK_STATE_CLASS)
-                {
-                    Ok(v) => v,
-                    Err(error) => {
-                        error!("call_link_state_class: {:?}", error);
-                        return;
-                    }
-                };
-
-                let name_object = match env.new_string(result.name) {
-                    Ok(v) => v,
-                    Err(error) => {
-                        error!("convert name: {:?}", error);
-                        return;
-                    }
-                };
-                let raw_restrictions: jint = match result.restrictions {
-                    CallLinkRestrictions::None => 0,
-                    CallLinkRestrictions::AdminApproval => 1,
-                    CallLinkRestrictions::Unknown => -1,
-                };
-                let expiration_in_epoch_seconds = result
-                    .expiration
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let args = jni_args!((
-                    name_object => java.lang.String,
-                    raw_restrictions => int,
-                    result.revoked => boolean,
-                    expiration_in_epoch_seconds as jlong => long,
-                ) -> void);
-                let call_link_state_object =
-                    match env.new_object(call_link_state_class, args.sig, &args.args) {
-                        Ok(v) => v,
-                        Err(error) => {
-                            error!("new CallLinkState: {:?}", error);
-                            return;
+                let call_link_state = Some(result);
+                match self.make_call_link_state_object(&mut env, &call_link_state) {
+                    Ok(state) => {
+                        // Unconstrained generics get erased to java.lang.Object.
+                        let args = jni_args!((
+                            state => java.lang.Object,
+                        ) -> void);
+                        match env.new_object(http_result_class, args.sig, &args.args) {
+                            Ok(v) => v,
+                            Err(error) => {
+                                error!("new HttpResult(CallLinkState): {:?}", error);
+                                return;
+                            }
                         }
-                    };
-
-                // Unconstrained generics get erased to java.lang.Object.
-                let args = jni_args!((
-                    call_link_state_object => java.lang.Object,
-                ) -> void);
-                match env.new_object(http_result_class, args.sig, &args.args) {
-                    Ok(v) => v,
+                    }
                     Err(error) => {
-                        error!("new HttpResult(CallLinkState): {:?}", error);
+                        error!("new CallLinkState: {:?}", error);
                         return;
                     }
                 }
@@ -1888,6 +1874,49 @@ impl AndroidPlatform {
         }
     }
 
+    fn make_call_link_state_object<'a>(
+        &self,
+        env: &mut JNIEnv<'a>,
+        call_link_state: &Option<CallLinkState>,
+    ) -> jni::errors::Result<JObject<'a>> {
+        match call_link_state {
+            None => Ok(JObject::null()),
+            Some(state) => {
+                let call_link_state_class = match self.class_cache.get_class(CALL_LINK_STATE_CLASS)
+                {
+                    Ok(v) => v,
+                    Err(error) => {
+                        error!("call_link_state_class: {:?}", error);
+                        return Ok(JObject::null());
+                    }
+                };
+
+                let name_object = JObject::from(env.new_string(state.name.clone())?);
+
+                let raw_restrictions: jint = match state.restrictions {
+                    CallLinkRestrictions::None => 0,
+                    CallLinkRestrictions::AdminApproval => 1,
+                    CallLinkRestrictions::Unknown => -1,
+                };
+                let expiration_in_epoch_seconds = state
+                    .expiration
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let args = jni_args!((
+                    name_object => java.lang.String,
+                    raw_restrictions => int,
+                    state.revoked => boolean,
+                    expiration_in_epoch_seconds as jlong => long,
+                ) -> void);
+
+                let object = env.new_object(call_link_state_class, args.sig, &args.args);
+                object
+            }
+        }
+    }
+
     fn make_peek_info_object<'a>(
         &self,
         env: &mut JNIEnv<'a>,
@@ -1949,6 +1978,15 @@ impl AndroidPlatform {
             }
         }
 
+        let jni_call_link_state =
+            match self.make_call_link_state_object(env, &peek_info.call_link_state) {
+                Ok(value) => value,
+                Err(e) => {
+                    error!("make_call_link_state_object: {:?}", e);
+                    return Ok(JObject::null());
+                }
+            };
+
         let args = jni_args!((
             joined_member_list => java.util.List,
             jni_creator => [byte],
@@ -1957,6 +1995,7 @@ impl AndroidPlatform {
             jni_device_count_including_pending => long,
             jni_device_count_excluding_pending => long,
             pending_user_list => java.util.List,
+            jni_call_link_state => org.signal.ringrtc.CallLinkState,
         ) -> org.signal.ringrtc.PeekInfo);
         let result = env.call_static_method(
             self.class_cache.get_class(PEEK_INFO_CLASS)?,

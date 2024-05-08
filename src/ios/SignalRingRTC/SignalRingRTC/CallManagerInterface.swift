@@ -20,7 +20,7 @@ protocol CallManagerInterfaceDelegate: AnyObject {
     func onSendHangup(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?, hangupType: HangupType, deviceId: UInt32)
     func onSendBusy(callId: UInt64, remote: UnsafeRawPointer, destinationDeviceId: UInt32?)
     func sendCallMessage(recipientUuid: UUID, message: Data, urgency: CallMessageUrgency)
-    func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency)
+    func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency, overrideRecipients: [UUID])
     func onCreateConnection(pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, appCallContext: CallContext, audioJitterBufferMaxPackets: Int32, audioJitterBufferMaxTargetDelayMs: Int32) -> (connection: Connection, pc: UnsafeMutableRawPointer?)
     func onConnectMedia(remote: UnsafeRawPointer, appCallContext: CallContext, stream: RTCMediaStream)
     func onCompareRemotes(remote1: UnsafeRawPointer, remote2: UnsafeRawPointer) -> Bool
@@ -204,12 +204,12 @@ class CallManagerInterface {
         delegate.sendCallMessage(recipientUuid: recipientUuid, message: message, urgency: urgency)
     }
 
-    func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency) {
+    func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency, overrideRecipients: [UUID]) {
         guard let delegate = self.callManagerObserverDelegate else {
             return
         }
 
-        delegate.sendCallMessageToGroup(groupId: groupId, message: message, urgency: urgency)
+        delegate.sendCallMessageToGroup(groupId: groupId, message: message, urgency: urgency, overrideRecipients: overrideRecipients)
     }
 
     func onCreateConnection(pcObserverOwned: UnsafeMutableRawPointer?, deviceId: UInt32, appCallContext: CallContext, audioJitterBufferMaxPackets: Int32, audioJitterBufferMaxTargetDelayMs: Int32) -> (connection: Connection, pc: UnsafeMutableRawPointer?)? {
@@ -543,7 +543,6 @@ func callManagerInterfaceOnSendIceCandidates(object: UnsafeMutableRawPointer?, c
     let count = iceCandidates.pointee.count
 
     var finalCandidates: [Data] = []
-
     for index in 0..<count {
         guard let iceCandidate = iceCandidates.pointee.candidates[index].asData() else {
             continue
@@ -638,7 +637,7 @@ func callManagerInterfaceSendCallMessage(object: UnsafeMutableRawPointer?, recip
 }
 
 @available(iOSApplicationExtension, unavailable)
-func callManagerInterfaceSendCallMessageToGroup(object: UnsafeMutableRawPointer?, groupId: AppByteSlice, message: AppByteSlice, urgency: Int32) {
+func callManagerInterfaceSendCallMessageToGroup(object: UnsafeMutableRawPointer?, groupId: AppByteSlice, message: AppByteSlice, urgency: Int32, overrideRecipients: AppUuidArray) {
     guard let object = object else {
         owsFailDebug("object was unexpectedly nil")
         return
@@ -658,7 +657,17 @@ func callManagerInterfaceSendCallMessageToGroup(object: UnsafeMutableRawPointer?
         return
     }
 
-    obj.sendCallMessageToGroup(groupId: groupId, message: message, urgency: urgency)
+    var finalOverrideRecipients: [UUID] = []
+    for index in 0..<overrideRecipients.count {
+        guard let userId = overrideRecipients.uuids[index].toUUID() else {
+            Logger.error("missing userId")
+            continue
+        }
+
+        finalOverrideRecipients.append(userId)
+    }
+
+    obj.sendCallMessageToGroup(groupId: groupId, message: message, urgency: urgency, overrideRecipients: finalOverrideRecipients)
 }
 
 @available(iOSApplicationExtension, unavailable)
@@ -873,7 +882,6 @@ func callManagerInterfaceHandleAudioLevels(object: UnsafeMutableRawPointer?, cli
     let obj: CallManagerInterface = Unmanaged.fromOpaque(object).takeUnretainedValue()
 
     var finalReceivedLevels: [ReceivedAudioLevel] = []
-
     for index in 0..<receivedLevelArray.count {
         let receivedLevel = receivedLevelArray.levels[index]
 
@@ -903,7 +911,6 @@ func callManagerInterfaceHandleReactions(object: UnsafeMutableRawPointer?, clien
     let obj: CallManagerInterface = Unmanaged.fromOpaque(object).takeUnretainedValue()
 
     var finalReactions: [Reaction] = []
-
     for index in 0..<reactions.count {
         let reaction = reactions.reactions[index]
 
@@ -915,9 +922,7 @@ func callManagerInterfaceHandleReactions(object: UnsafeMutableRawPointer?, clien
         finalReactions.append(Reaction(demuxId: reaction.demuxId, value: value))
     }
 
-    if !finalReactions.isEmpty {
-        obj.handleReactions(clientId: clientId, reactions: finalReactions)
-    }
+    obj.handleReactions(clientId: clientId, reactions: finalReactions)
 }
 
 @available(iOSApplicationExtension, unavailable)
@@ -933,9 +938,7 @@ func callManagerInterfaceHandleRaisedHands(object: UnsafeMutableRawPointer?, cli
         finalRaisedHands.append(raisedHandsArray.raised_hands[index])
     }
 
-    if !finalRaisedHands.isEmpty {
-        obj.handleRaisedHands(clientId: clientId, raisedHands: finalRaisedHands)
-    }
+    obj.handleRaisedHands(clientId: clientId, raisedHands: finalRaisedHands)
 }
 
 @available(iOSApplicationExtension, unavailable)
@@ -971,7 +974,6 @@ func callManagerInterfaceHandleRemoteDevicesChanged(object: UnsafeMutableRawPoin
     let obj: CallManagerInterface = Unmanaged.fromOpaque(object).takeUnretainedValue()
 
     var finalRemoteDeviceStates: [RemoteDeviceState] = []
-
     for index in 0..<remoteDeviceStates.count {
         let remoteDeviceState = remoteDeviceStates.states[index]
 

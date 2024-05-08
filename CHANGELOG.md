@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.41.0
+
+- Call links: Add Call Link state to PeekInfo
+
+- Update to webrtc 6261g
+  - Update video settings
+  - iOS: Match WebRTC acknowledgments filename
+
+- iOS: Update builds and tests
+
+- Update dependencies and documentation
+
+## v2.40.1
+
+- iOS: Raised hands array can be empty
+
+## v2.40.0
+
+- Group Calls: Support multi-recipient message sending
+
+- Group Calls: Update bitrate limits for screen sharing
+
+- Update to webrtc 6261e
+  - Update to use Opus 1.5
+
 ## v2.39.3
 
 - Update to webrtc 6261d

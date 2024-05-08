@@ -260,18 +260,21 @@ public protocol CallManagerDelegate: AnyObject {
     func callManager(_ callManager: CallManager<CallManagerDelegateCallType, Self>, shouldSendBusy callId: UInt64, call: CallManagerDelegateCallType, destinationDeviceId: UInt32?)
 
     /**
-     * A call message should be sent to the given remote recipient.
+     * Send a generic call message to the given remote recipient.
      * Invoked on the main thread, asynchronously.
      * If there is any error, the UI can reset UI state and invoke the reset() API.
      */
     func callManager(_ callManager: CallManager<CallManagerDelegateCallType, Self>, shouldSendCallMessage recipientUuid: UUID, message: Data, urgency: CallMessageUrgency)
 
     /**
-     * A call message should be sent to all other members of the given group.
+     * Send a generic call message to a group. Send to all members of the group
+     * or, if overrideRecipients is not empty, send to the given subset of members
+     * using multi-recipient sealed sender. If the sealed sender request fails,
+     * clients should provide a fallback mechanism.
      * Invoked on the main thread, asynchronously.
      * If there is any error, the UI can reset UI state and invoke the reset() API.
      */
-    func callManager(_ callManager: CallManager<CallManagerDelegateCallType, Self>, shouldSendCallMessageToGroup groupId: Data, message: Data, urgency: CallMessageUrgency)
+    func callManager(_ callManager: CallManager<CallManagerDelegateCallType, Self>, shouldSendCallMessageToGroup groupId: Data, message: Data, urgency: CallMessageUrgency, overrideRecipients: [UUID])
 
     /**
      * Two call 'remote' pointers should be compared to see if they refer to the same
@@ -328,7 +331,7 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
 
     private var videoCaptureController: VideoCaptureController?
 
-    public init(httpClient: HTTPClient, fieldTrials: [String: String] = [:]) {
+    public init(httpClient: HTTPClient, fieldTrials: [String: String] = [:], audioDevice: RTCAudioDevice? = nil) {
         // Initialize the global object (mainly for logging).
         CallManagerGlobal.initialize(fieldTrials: fieldTrials)
 
@@ -338,7 +341,11 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
         // Initialize the WebRTC factory.
         let decoderFactory = RTCDefaultVideoDecoderFactory()
         let encoderFactory = RTCDefaultVideoEncoderFactory()
-        self.factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory, decoderFactory: decoderFactory)
+        if audioDevice != nil {
+          self.factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory, decoderFactory: decoderFactory, audioDevice: audioDevice)
+        } else {
+          self.factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory, decoderFactory: decoderFactory)
+        }
 
         self.groupCallByClientId = GroupCallByClientId()
 
@@ -897,7 +904,7 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
         }
     }
 
-    func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency) {
+    func sendCallMessageToGroup(groupId: Data, message: Data, urgency: CallMessageUrgency, overrideRecipients: [UUID]) {
         Logger.debug("sendCallMessageToGroup")
 
         DispatchQueue.main.async {
@@ -905,7 +912,7 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
 
             guard let delegate = self.delegate else { return }
 
-            delegate.callManager(self, shouldSendCallMessageToGroup: groupId, message: message, urgency: urgency)
+            delegate.callManager(self, shouldSendCallMessageToGroup: groupId, message: message, urgency: urgency, overrideRecipients: overrideRecipients)
         }
     }
 
