@@ -1,4 +1,4 @@
-name: Sync upstream
+name: Sync Upstream
 
 on:
   workflow_dispatch:
@@ -9,10 +9,12 @@ permissions:
   contents: read
 
 jobs:
-  sync:
-    name: Sync
+  sync_ringrtc:
+    name: Sync RingRTC
     if: "github.repository_owner == 'mollyim'"
     runs-on: ubuntu-latest
+    outputs:
+      webrtc-version: ${{ steps.set.outputs.webrtc-version }}
 
     steps:
       - uses: actions/checkout@v3
@@ -21,13 +23,42 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PUBLISH_PAT }}
 
-      - name: Fetch and merge upstream
+      - name: Fetch and merge upstream changes
         run: |
           git remote add upstream https://github.com/signalapp/ringrtc.git
           git fetch upstream
           git merge --ff-only upstream/main
 
-      - name: Push changes
+      - name: Push changes to origin
         run: |
           git push origin upstream
           git tag | grep -xP 'v\d+(?:\.\d+){2,3}' | xargs -r git push origin
+
+      - name: Output WebRTC version
+        id: set
+        run: |
+          ver=$(grep '^webrtc.version=' config/version.properties | cut -d'=' -f2)
+          echo "webrtc-version=$ver" >> $GITHUB_OUTPUT
+
+  update_webrtc_tag:
+    name: Update WebRTC Version
+    runs-on: ubuntu-latest
+    needs: sync_ringrtc
+
+    steps:
+      - name: Checkout WebRTC
+        uses: actions/checkout@v3
+        with:
+          repository: mollyim/webrtc
+          token: ${{ secrets.PUBLISH_PAT }}
+
+      - name: Fetch upstream tags
+        run: |
+          git remote add upstream https://github.com/signalapp/webrtc.git
+          git fetch --tags upstream
+
+      - name: Push RingRTC version tag to origin
+        run: |
+          git push origin "$WEBRTC_VERSION"
+        env:
+          WEBRTC_VERSION: ${{ needs.sync_ringrtc.outputs.webrtc-version }}
