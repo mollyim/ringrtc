@@ -17,7 +17,7 @@ jobs:
       webrtc-version: ${{ steps.set.outputs.webrtc-version }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           ref: upstream
           fetch-depth: 0
@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout WebRTC
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: mollyim/webrtc
           token: ${{ secrets.PUBLISH_PAT }}
