@@ -36,7 +36,7 @@ help:
 	$(Q) echo "  gctc         -- build the test cli (group calls)"
 	$(Q) echo "  call_sim-cli -- build the call simulator cli for testing"
 	$(Q) echo
-	$(Q) echo "For the electon/cli/gctc builds, you can specify an optional platform"
+	$(Q) echo "For the electron/cli/gctc builds, you can specify an optional platform"
 	$(Q) echo "which will download WebRTC. For example:"
 	$(Q) echo "  $ make electron PLATFORM=unix"
 	$(Q) echo
@@ -80,10 +80,10 @@ electron:
 	fi
 	$(Q) if [ "$(TYPE)" = "debug" ] ; then \
 		echo "Electron: Debug build" ; \
-		TARGET_ARCH=$(NODEJS_ARCH) BUILD_WHAT=$(BUILD_WHAT) ./bin/build-electron -d ; \
+		TARGET_ARCH=$(NODEJS_ARCH) BUILD_WHAT=$(BUILD_WHAT) BUILD_WEBRTC_TESTS=$(BUILD_WEBRTC_TESTS) ./bin/build-electron -d ; \
 	else \
 		echo "Electron: Release build" ; \
-		TARGET_ARCH=$(NODEJS_ARCH) BUILD_WHAT=$(BUILD_WHAT) ./bin/build-electron -r ; \
+		TARGET_ARCH=$(NODEJS_ARCH) BUILD_WHAT=$(BUILD_WHAT) BUILD_WEBRTC_TESTS=$(BUILD_WEBRTC_TESTS) ./bin/build-electron -r ; \
 	fi
 	$(Q) (cd src/node && yarn install && yarn build)
 

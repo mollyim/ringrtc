@@ -7,8 +7,13 @@
 resolver = "2"
 members = [
     "call_sim",
+    "mrp",
     "src/rust",
 ]
+
+[workspace.package]
+version = "2.44.0"
+authors = ["Calling Team <callingteam@signal.org>"]
 
 [patch.crates-io]
 # Use our fork of curve25519-dalek for zkgroup compatibility.
