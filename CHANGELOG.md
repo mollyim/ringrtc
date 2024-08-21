@@ -1,5 +1,60 @@
 # Changelog
 
+## v2.44.4
+
+- Group Calls: Reduce log noise
+
+- Run dump_syms on CI
+
+- Support overlapping memory copy for decrypt
+
+- Enable sending dependency descriptor in group calls
+
+- Send encrypted TOC byte in group calls
+
+- Update dependencies
+
+- Update to webrtc 6478f
+  - Improve network type detection on macOS
+  - Enable sending dependency descriptor in group calls
+  - Mark audio packets as having an encrypted TOC byte
+  - Fix ios device orientation left/right assignment
+
+## v2.44.3
+
+- Android: Add audio device module based on Oboe
+
+- Update to webrtc 6478e
+  - Add audio device module for android based on Oboe
+  - Remove support for setting mobile aec
+  - Simplify handling of audio callbacks
+
+- Desktop ADM: Resolve dependency cycle and other improvements 
+
+## v2.44.2
+
+- Desktop ADM: Add support for switching to RingRTC ADM
+
+- Fix Python deprecation warning
+
+- Update to webrtc 6478b
+  - ringrtc: Add stub ADM
+  - Revert "Enable sending dependency descriptor in group calls"
+
+## v2.44.1
+
+- Update to webrtc 6478a
+  - Update to WebRTC 6478 (m126)
+  - Enable sending dependency descriptor in group calls
+
+- Group Calls: Enable sending dependency descriptor
+
+- Refactored protobuf to own crate
+
+- Call Sim: Refactoring
+
+- Update dependencies
+
 ## v2.44.0
 
 - Remove reliable payload type, reuse existing data payload type

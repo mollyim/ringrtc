@@ -95,7 +95,7 @@ case "$TARGET_ARCH" in
         ;;
 esac
 
-export MACOSX_DEPLOYMENT_TARGET="10.13"
+export MACOSX_DEPLOYMENT_TARGET="10.15"
 
 # Build WebRTC.
 if [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "webrtc" ]
@@ -219,14 +219,14 @@ then
             exit 1 # unreachable
         fi
 
-        RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo rustc --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} --crate-type cdylib
+        RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo rustc --package ringrtc --target ${CARGO_TARGET} --features electron${RINGRTC_ADM:+",ringrtc_adm"} ${INCLUDE_RELEASE_FLAG:+"--release"} --crate-type cdylib
 
         mkdir -p src/node/build/${DEFAULT_PLATFORM}
         copy_to_node target/${CARGO_TARGET}/${BUILD_TYPE}/${OUTPUT_LIBRARY} src/node/build/${DEFAULT_PLATFORM}/libringrtc-"${TARGET_ARCH}".node
 
-        if [ "${BUILD_TYPE}" = "release" ]
+        if [ "${BUILD_TYPE}" = "release" ] && [ "$(command -v dump_syms)" ];
         then
-            tar -c --auto-compress --dereference -f "${OUTPUT_DIR}"/${BUILD_TYPE}/libringrtc-"${PROJECT_VERSION}"-${DEFAULT_PLATFORM}-"${TARGET_ARCH}"-debuginfo.tar.bz2 -C "$(dirname target/${CARGO_TARGET}/${BUILD_TYPE}/${DEBUG_PACKAGE})" "$(basename ${DEBUG_PACKAGE})"
+          dump_syms "target/${CARGO_TARGET}/${BUILD_TYPE}/${DEBUG_PACKAGE}" -o "${OUTPUT_DIR}"/${BUILD_TYPE}/libringrtc-"${PROJECT_VERSION}"-${DEFAULT_PLATFORM}-"${TARGET_ARCH}"-debuginfo.sym
         fi
     )
 fi

@@ -89,6 +89,8 @@ pub mod native;
 pub mod webrtc {
     pub mod arc;
     pub use arc::Arc;
+    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    pub mod audio_device_module;
     pub mod field_trial;
     pub mod ice_gatherer;
     #[cfg(feature = "injectable_network")]
@@ -107,6 +109,8 @@ pub mod webrtc {
     pub mod stats_observer;
     #[cfg(not(feature = "sim"))]
     mod ffi {
+        #[cfg(feature = "native")]
+        pub mod audio_device_module;
         pub mod field_trial;
         pub mod ice_gatherer;
         pub mod logging;

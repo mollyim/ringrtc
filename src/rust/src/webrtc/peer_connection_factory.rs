@@ -6,6 +6,8 @@
 //! WebRTC Peer Connection
 
 use anyhow::anyhow;
+#[cfg(all(not(feature = "sim"), feature = "native"))]
+use std::ffi::c_void;
 #[cfg(feature = "native")]
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -14,6 +16,10 @@ use std::os::raw::c_char;
 use crate::common::Result;
 use crate::error::RingRtcError;
 use crate::webrtc;
+#[cfg(all(not(feature = "sim"), feature = "native"))]
+use crate::webrtc::audio_device_module::AudioDeviceModule;
+#[cfg(all(not(feature = "sim"), feature = "native"))]
+use crate::webrtc::ffi::audio_device_module::AUDIO_DEVICE_CBS_PTR;
 #[cfg(feature = "injectable_network")]
 use crate::webrtc::injectable_network::InjectableNetwork;
 use crate::webrtc::media::{AudioTrack, VideoSource, VideoTrack};
@@ -131,6 +137,8 @@ pub enum RffiAudioDeviceModuleType {
     Default,
     /// Use a file-based ADM for testing and simulation.
     File,
+    /// Use RingRTC's ADM implementation.
+    RingRtc,
 }
 
 /// Stays in sync with RffiAudioConfig in peer_connection_factory.h.
@@ -143,6 +151,10 @@ pub struct RffiAudioConfig {
     pub aec_enabled: bool,
     pub ns_enabled: bool,
     pub agc_enabled: bool,
+    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    pub adm_borrowed: webrtc::ptr::Borrowed<c_void>,
+    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    pub rust_audio_device_callbacks: webrtc::ptr::Borrowed<c_void>,
 }
 
 #[derive(Clone, Debug)]
@@ -164,7 +176,10 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
+            #[cfg(not(feature = "ringrtc_adm"))]
             audio_device_module_type: Default::default(),
+            #[cfg(feature = "ringrtc_adm")]
+            audio_device_module_type: RffiAudioDeviceModuleType::RingRtc,
             file_based_adm_config: None,
             high_pass_filter_enabled: true,
             aec_enabled: true,
@@ -198,6 +213,14 @@ impl AudioConfig {
             aec_enabled: self.aec_enabled,
             ns_enabled: self.ns_enabled,
             agc_enabled: self.agc_enabled,
+            #[cfg(all(not(feature = "sim"), feature = "native"))]
+            adm_borrowed: webrtc::ptr::Borrowed::from_ptr(Box::into_raw(Box::new(
+                AudioDeviceModule::new(),
+            )))
+            .to_void(),
+            #[cfg(all(not(feature = "sim"), feature = "native"))]
+            rust_audio_device_callbacks: webrtc::ptr::Borrowed::from_ptr(AUDIO_DEVICE_CBS_PTR)
+                .to_void(),
         })
     }
 }

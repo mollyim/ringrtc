@@ -1474,7 +1474,7 @@ impl Client {
         }
 
         if let Err(err) = state.sfu_reliable_stream.try_resend(now, |payload| {
-            info!("Attempting resend over mrp stream ");
+            info!("Attempting resend over mrp stream");
             *rtp_data_to_sfu_next_seqnum = Self::reliable_send_to_sfu_inner(
                 *join_state,
                 *client_id,
@@ -3358,7 +3358,7 @@ impl Client {
             .lock()
             .expect("Get e2ee context to encrypt media");
 
-        let unencrypted_header_len = Self::unencrypted_media_header_len(is_audio, false);
+        let unencrypted_header_len = Self::unencrypted_media_header_len(is_audio, true);
         Self::encrypt(
             &mut frame_crypto_context,
             unencrypted_header_len,
@@ -3473,8 +3473,10 @@ impl Client {
         let frame_counter = ciphertext.read_u32_from_end()?;
         let ratchet_counter = ciphertext.read_u8_from_end()?;
 
-        plaintext.write_slice(unencrypted_header)?;
-        let encrypted_payload = plaintext.write_slice(ciphertext.remaining())?;
+        // Allow for in-place decryption from ciphertext to plaintext_buffer by using
+        // the write_slice that supports overlapping copies.
+        plaintext.write_slice_overlapping(unencrypted_header)?;
+        let encrypted_payload = plaintext.write_slice_overlapping(ciphertext.remaining())?;
 
         frame_crypto_context.decrypt(
             remote_demux_id,
@@ -4501,6 +4503,24 @@ impl<'buf> Writer<'buf> {
         self.offset = end;
         Ok(output)
     }
+
+    fn write_slice_overlapping(&mut self, input: &[u8]) -> Result<&mut [u8]> {
+        if self.remaining_len() < input.len() {
+            return Err(RingRtcError::BufferTooSmall.into());
+        }
+        let start = self.offset;
+        let end = start + input.len();
+        let output = &mut self.buf[start..end];
+
+        // Use memmove to handle potentially overlapping memory. This is safe
+        // because we've already checked the buffer lengths.
+        unsafe {
+            std::ptr::copy(input.as_ptr(), output.as_mut_ptr(), input.len());
+        }
+
+        self.offset = end;
+        Ok(output)
+    }
 }
 
 struct Reader<'data> {
@@ -4933,7 +4953,7 @@ mod tests {
                 .reactions
                 .lock()
                 .expect("Lock reactions to handle update");
-            *owned = reactions.clone();
+            owned.clone_from(&reactions);
 
             self.handle_reactions_invocation_count
                 .fetch_add(1, Ordering::Relaxed);
@@ -4957,8 +4977,8 @@ mod tests {
                 .lock()
                 .expect("Lock peek state to handle update");
             owned_state.joined_members = joined_members.iter().cloned().collect();
-            owned_state.creator = peek_info.creator.clone();
-            owned_state.era_id = peek_info.era_id.clone();
+            owned_state.creator.clone_from(&peek_info.creator);
+            owned_state.era_id.clone_from(&peek_info.era_id);
             owned_state.max_devices = peek_info.max_devices;
             owned_state.device_count = peek_info.device_count_including_pending_devices();
             self.peek_changed.set();
@@ -5340,16 +5360,13 @@ mod tests {
         let ciphertext1 = client1.encrypt_media(is_audio, plaintext).unwrap();
         let ciphertext2 = client2.encrypt_media(is_audio, plaintext).unwrap();
 
-        // Check that the first byte for audio is left unencrypted
-        // and the rest has changed
-        assert_eq!(plaintext[0], ciphertext1[0]);
         assert_ne!(plaintext, &ciphertext1[..plaintext.len()]);
 
         assert!(client1
-            .decrypt_media(client2.demux_id, is_audio, &ciphertext2, false)
+            .decrypt_media(client2.demux_id, is_audio, &ciphertext2, true)
             .is_err());
         assert!(client2
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext1, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext1, true)
             .is_err());
 
         client1.set_remotes_and_wait_until_applied(&[&client2]);
@@ -5366,25 +5383,25 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext1, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext1, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client1
-                .decrypt_media(client2.demux_id, is_audio, &ciphertext2, false)
+                .decrypt_media(client2.demux_id, is_audio, &ciphertext2, true)
                 .unwrap()
         );
 
         // But if the footer is too small, decryption should fail
         assert!(client1
-            .decrypt_media(client2.demux_id, is_audio, b"small", false)
+            .decrypt_media(client2.demux_id, is_audio, b"small", true)
             .is_err());
 
         // And if the unencrypted media header has been modified, it should fail (bad mac)
         ciphertext1[0] = ciphertext1[0].wrapping_add(1);
         assert!(client2
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext1, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext1, true)
             .is_err());
 
         // Finally, let's make sure video works as well
@@ -5393,15 +5410,12 @@ mod tests {
         let plaintext = &b"Fake Video Needs To Be Bigger"[..];
         let ciphertext1 = client1.encrypt_media(is_audio, plaintext).unwrap();
 
-        // Check that the first 10 bytes of video is left unencrypted
-        // and the rest has changed
-        assert_eq!(plaintext[..10], ciphertext1[..10]);
         assert_ne!(plaintext, &ciphertext1[..plaintext.len()]);
 
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext1, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext1, true)
                 .unwrap()
         );
 
@@ -5437,17 +5451,17 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client3
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert!(client4
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
             .is_err());
 
         // Add client4 and remove client3
@@ -5459,19 +5473,19 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client3
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client4
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
 
@@ -5488,25 +5502,25 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client3
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client4
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client5
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
 
@@ -5518,22 +5532,22 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert!(client3
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
             .is_err());
         assert_eq!(
             plaintext,
             client4
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client5
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
 
@@ -5543,21 +5557,21 @@ mod tests {
         // but client4 and client5 can.
         let ciphertext = client1.encrypt_media(is_audio, plaintext).unwrap();
         assert!(client2
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
             .is_err());
         assert!(client3
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
             .is_err());
         assert_eq!(
             plaintext,
             client4
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
         assert_eq!(
             plaintext,
             client5
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
 
@@ -5589,7 +5603,7 @@ mod tests {
         let ciphertext = client1.encrypt_media(is_audio, plaintext).unwrap();
         // We can't decrypt because the keys got dropped
         assert!(client2
-            .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+            .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
             .is_err());
 
         client1.observer.set_outgoing_signaling_blocked(false);
@@ -5604,7 +5618,7 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext, true)
                 .unwrap()
         );
     }
@@ -5625,7 +5639,7 @@ mod tests {
         assert_eq!(
             plaintext,
             client2a
-                .decrypt_media(client1a.demux_id, is_audio, &ciphertext1a, false)
+                .decrypt_media(client1a.demux_id, is_audio, &ciphertext1a, true)
                 .unwrap()
         );
 
@@ -5636,7 +5650,7 @@ mod tests {
         assert_eq!(
             plaintext,
             client2b
-                .decrypt_media(client1a.demux_id, is_audio, &ciphertext1a, false)
+                .decrypt_media(client1a.demux_id, is_audio, &ciphertext1a, true)
                 .unwrap()
         );
     }
@@ -5664,12 +5678,12 @@ mod tests {
         assert_eq!(
             plaintext,
             client2
-                .decrypt_media(client1.demux_id, is_audio, &ciphertext1, false)
+                .decrypt_media(client1.demux_id, is_audio, &ciphertext1, true)
                 .unwrap()
         );
         // And you can't decrypt from the forger.
         assert!(client2
-            .decrypt_media(client3.demux_id, is_audio, &ciphertext3, false)
+            .decrypt_media(client3.demux_id, is_audio, &ciphertext3, true)
             .is_err());
 
         client1.disconnect_and_wait_until_ended();
@@ -6500,6 +6514,8 @@ mod tests {
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
+
+        client1.disconnect_and_wait_until_ended();
     }
 
     #[test]
@@ -6534,6 +6550,8 @@ mod tests {
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
+
+        client1.disconnect_and_wait_until_ended();
     }
 
     #[test]
@@ -6572,6 +6590,8 @@ mod tests {
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
+
+        client1.disconnect_and_wait_until_ended();
     }
 
     #[test]
@@ -6629,6 +6649,8 @@ mod tests {
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
+
+        client1.disconnect_and_wait_until_ended();
     }
 
     #[test]

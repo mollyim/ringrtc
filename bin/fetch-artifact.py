@@ -18,14 +18,14 @@ from typing import BinaryIO
 UNVERIFIED_DOWNLOAD_NAME = "unverified.tmp"
 
 PREBUILD_CHECKSUMS = {
-    'android': 'fb04dce57a3a50ec9aa26508bc068b93fed133984112f83a1a92f0c489a858d4',
-    'ios': 'fbc2a22ed4f2e37b452c9fd95d535746cd49b5c40f5f2814b7a7884fe761abb2',
-    'linux-arm64': 'b8488d3e92ca992f68df37b49c7a3bf4c2108d7ba9108bf32e8b6415b20cb592',
-    'linux-x64': '2fbcb67c45d7aaa9d69c1c8f35877f0e3bb120d3474bb0c5e67b992c988050ea',
-    'mac-arm64': 'e8a08302e64d5fa396a3dfca4d9fe00cbf090b8e08a55cd7e521ac5a3bd780c0',
-    'mac-x64': '08ca3f4d1a84ce9877842250572da0a11a36ad43b9e4600ea66ce1cbbdeff054',
-    'windows-arm64': 'c908bbcdf633140b27b3f1a13ac3c26947782a43b3c6a9d3a5d0a4d028b26392',
-    'windows-x64': '89cd453eb0ccf8e20c387397605276c945ec854e75f0fa28c78b26942e9466da',
+    'android': '424a774364a86e1e0346114f383f11b0e3aa5e357818bcb4f817e8d4cc138921',
+    'ios': '8708820e9568ca3987e357e307227c5c84c50741739c7f72102875783a2bc240',
+    'linux-arm64': '58f14bf2e5e53b6f7ca30fff30232428d74fd851d2072d2d4073f970a66fb62c',
+    'linux-x64': 'da7b2e92d0835d30737a54ef2b6b797b0ded7b868d3917bede25c35b44d7045d',
+    'mac-arm64': 'fa658d2474872bcafb6f4512f44c1072d0d892ca2ddb5afb49c9ec025200eb78',
+    'mac-x64': '3309b5aa960cadb69728c652973f7b5fa519fe0e70efa5bd0a4e4b2af23f8204',
+    'windows-arm64': '8f88ef2a764b6bb80d199602147d8c82916503f7a62b370d452b1aad9105ba21',
+    'windows-x64': '1cbd2162f44b16a853f9ca1d43f2162393946ba13e3fb4394fa5b8709a32d640',
 }
 
 
@@ -161,7 +161,11 @@ def main() -> None:
 
     print("extracting {} to {}".format(archive_file, args.output_dir), file=sys.stderr)
     open_archive.seek(0)
-    tarfile.open(fileobj=open_archive).extractall(path=args.output_dir)
+    tar = tarfile.open(fileobj=open_archive)
+    # Trust the contents because we checked the hash
+    tar.extraction_filter = (lambda member, path: member)
+    tar.extractall(path=args.output_dir)
+    tar.close()
 
 
 main()

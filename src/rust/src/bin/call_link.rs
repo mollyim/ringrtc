@@ -3,10 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-mod support {
-    pub mod http_client;
-}
-use support::http_client;
+use ringrtc::lite::http::sim as sim_http;
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -64,7 +61,7 @@ fn start_of_today_in_epoch_seconds() -> zkgroup::Timestamp {
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("time moves forwards");
     let remainder = now.as_secs() % (24 * 60 * 60);
-    now.as_secs() - remainder
+    zkgroup::Timestamp::from_epoch_seconds(now.as_secs() - remainder)
 }
 
 fn issue_and_present_auth_credential(
@@ -96,7 +93,7 @@ fn make_testing_request(
     id: &str,
     server_zkparams: &zkgroup::generic_server_params::GenericServerSecretParams,
     public_zkparams: &zkgroup::generic_server_params::GenericServerPublicParams,
-    http_client: &http_client::HttpClient,
+    http_client: &sim_http::HttpClient,
     url: &'static str,
     method: http::Method,
     path: &str,
@@ -176,7 +173,7 @@ fn main() {
     log::set_logger(&LOG).expect("set logger");
     log::set_max_level(log::LevelFilter::Info);
 
-    let http_client = http_client::HttpClient::start();
+    let http_client = sim_http::HttpClient::start();
 
     prompt("> ");
     for line in std::io::stdin().lines() {
