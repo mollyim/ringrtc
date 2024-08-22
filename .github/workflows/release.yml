@@ -12,8 +12,8 @@ env:
   NDK_VERSION: '25.2.9519653'
 
 jobs:
-  publish:
-    name: Publish
+  release:
+    name: Build and Release
     runs-on: ubuntu-22.04
 
     steps:

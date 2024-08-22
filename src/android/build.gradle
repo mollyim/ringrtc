@@ -1,5 +1,5 @@
 plugins {
-    id 'com.android.library' version '8.4.0'
+    id 'com.android.library' version '8.4.2'
     id 'maven-publish'
 }
 
@@ -64,11 +64,11 @@ dependencies {
     androidTestImplementation "org.mockito:mockito-android:5.1.1"
 }
 
-task javadoc(type: Javadoc) {
+tasks.register('javadoc', Javadoc) {
     source = android.sourceSets.release.java.sourceFiles
     classpath += files(android.bootClasspath)
     // There doesn't seem to be a convenient way to do this with just one variant.
-    android.libraryVariants.all { v ->
+    android.libraryVariants.configureEach { v ->
         classpath += v.getCompileClasspath(null)
     }
     // Normally this is set by the 'java' plugin, but that's not compatible with 'android-library'
@@ -122,20 +122,20 @@ afterEvaluate {
         }
     }
 
-    tasks.withType(AbstractPublishToMaven) {
+    tasks.withType(AbstractPublishToMaven).configureEach {
         dependsOn assembleRelease
     }
 
-    task installArchives {
+    tasks.register('installArchives') {
         dependsOn publishMavenJavaPublicationToMavenLocal
     }
 
-    task uploadArchives {
+    tasks.register('uploadArchives') {
         dependsOn publishMavenJavaPublicationToGitHubPackagesRepository
     }
 }
 
-task version {
+tasks.register('version') {
     group 'Info'
     description = 'Prints the versions as read from the version config file.'
     doLast {
