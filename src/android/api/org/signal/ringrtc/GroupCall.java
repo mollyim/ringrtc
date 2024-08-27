@@ -15,6 +15,7 @@ import org.webrtc.DefaultVideoDecoderFactory;
 import org.webrtc.DefaultVideoEncoderFactory;
 import org.webrtc.EglBase;
 import org.webrtc.MediaConstraints;
+import org.webrtc.PeerConnection.ProxyInfo;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.VideoDecoderFactory;
 import org.webrtc.VideoEncoderFactory;
@@ -126,6 +127,7 @@ public final class GroupCall {
     static GroupCall create(          long                  nativeCallManager,
                             @NonNull  byte[]                groupId,
                             @NonNull  String                sfuUrl,
+                            @Nullable ProxyInfo             proxyInfo,
                             @NonNull  byte[]                hkdfExtraInfo,
                             @Nullable Integer               audioLevelsIntervalMs,
                             @NonNull  PeerConnectionFactory factory,
@@ -140,6 +142,7 @@ public final class GroupCall {
                 nativeCallManager,
                 groupId,
                 sfuUrl,
+                proxyInfo,
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
                 // Returns a borrowed RC.
@@ -168,6 +171,7 @@ public final class GroupCall {
      */
     static GroupCall create(          long                  nativeCallManager,
                             @NonNull  String                sfuUrl,
+                            @Nullable ProxyInfo             proxyInfo,
                             @NonNull  byte[]                authCredentialPresentation,
                             @NonNull  CallLinkRootKey       rootKey,
                             @Nullable byte[]                adminPasskey,
@@ -184,6 +188,7 @@ public final class GroupCall {
             call.clientId = ringrtcCreateCallLinkCallClient(
                 nativeCallManager,
                 sfuUrl,
+                proxyInfo,
                 authCredentialPresentation,
                 rootKey.getKeyBytes(),
                 adminPasskey,
@@ -1257,6 +1262,7 @@ public final class GroupCall {
         long ringrtcCreateGroupCallClient(long nativeCallManager,
                                           byte[] groupId,
                                           String sfuUrl,
+                                          ProxyInfo proxyInfo,
                                           byte[] hkdfExtraInfo,
                                           int audioLevelsIntervalMillis,
                                           long nativePeerConnectionFactory,
@@ -1267,6 +1273,7 @@ public final class GroupCall {
     private static native
         long ringrtcCreateCallLinkCallClient(long nativeCallManager,
                                              String sfuUrl,
+                                             ProxyInfo proxyInfo,
                                              byte[] authCredentialPresentation,
                                              byte[] rootKeyBytes,
                                              byte[] adminPasskey,

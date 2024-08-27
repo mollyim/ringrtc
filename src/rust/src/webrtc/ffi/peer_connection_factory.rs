@@ -11,6 +11,7 @@ use crate::webrtc::ffi::peer_connection_observer::RffiPeerConnectionObserver;
 use crate::webrtc::injectable_network::RffiInjectableNetwork;
 use crate::webrtc::peer_connection_factory::{
     RffiAudioConfig, RffiAudioJitterBufferConfig, RffiIceServers, RffiPeerConnectionKind,
+    RffiProxyInfo,
 };
 #[cfg(feature = "native")]
 use std::os::raw::c_char;
@@ -54,6 +55,7 @@ extern "C" {
         audio_jitter_buffer_config: webrtc::ptr::Borrowed<RffiAudioJitterBufferConfig>,
         audio_rtcp_report_interval_ms: i32,
         ice_servers: webrtc::ptr::Borrowed<RffiIceServers>,
+        proxy_info: webrtc::ptr::Borrowed<RffiProxyInfo>,
         outgoing_audio_track: webrtc::ptr::BorrowedRc<RffiAudioTrack>,
         outgoing_video_track: webrtc::ptr::BorrowedRc<RffiVideoTrack>,
     ) -> webrtc::ptr::OwnedRc<RffiPeerConnection>;

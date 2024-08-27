@@ -37,7 +37,9 @@ use crate::lite::{http, sfu::GroupMember};
 use crate::webrtc;
 use crate::webrtc::media;
 use crate::webrtc::peer_connection::PeerConnection;
-use crate::webrtc::peer_connection_factory::{self as pcf, PeerConnectionFactory};
+use crate::webrtc::peer_connection_factory::{
+    self as pcf, PeerConnectionFactory, ProxyInfo, RffiProxyType,
+};
 use crate::webrtc::peer_connection_observer::PeerConnectionObserver;
 
 /// Public type for Android CallManager
@@ -774,12 +776,40 @@ pub fn peek_call_link_call(
     Ok(())
 }
 
+fn jni_get_proxy_info(env: &mut JNIEnv, jni_proxy_info: &JObject) -> Result<ProxyInfo> {
+    const STRING_TYPE: &str = jni_signature!(java.lang.String);
+    const INT_TYPE: &str = jni_signature!(int);
+    const PROXYTYPE_TYPE: &str = jni_signature!(org.webrtc.PeerConnection::ProxyType);
+    const HOSTNAME_FIELD: &str = "hostname";
+    const USERNAME_FIELD: &str = "username";
+    const PASSWORD_FIELD: &str = "password";
+    const PORT_FIELD: &str = "port";
+    const TYPE_FIELD: &str = "type";
+    let hostname = jni_get_field(env, jni_proxy_info, HOSTNAME_FIELD, STRING_TYPE)?.l()?;
+    let username = jni_get_field(env, jni_proxy_info, USERNAME_FIELD, STRING_TYPE)?.l()?;
+    let password = jni_get_field(env, jni_proxy_info, PASSWORD_FIELD, STRING_TYPE)?.l()?;
+    let port = jni_get_field(env, jni_proxy_info, PORT_FIELD, INT_TYPE)?.i()? as u16;
+    let proxy_type_enum = jni_get_field(env, jni_proxy_info, TYPE_FIELD, PROXYTYPE_TYPE)?.l()?;
+    let proxy_type = RffiProxyType::from_u8(
+        env.call_method(proxy_type_enum, "ordinal", jni_signature!(() -> int), &[])?
+            .i()? as u8,
+    );
+    Ok(ProxyInfo::new(
+        proxy_type,
+        env.get_string(&JString::from(hostname))?.to_str()?,
+        env.get_string(&JString::from(username))?.to_str()?,
+        env.get_string(&JString::from(password))?.to_str()?,
+        port,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn create_group_call_client(
     env: &mut JNIEnv,
     call_manager: *mut AndroidCallManager,
     group_id: JByteArray,
     sfu_url: JString,
+    jni_proxy_info: JObject,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
     native_pcf_borrowed_rc: jlong,
@@ -824,10 +854,17 @@ pub fn create_group_call_client(
         Some(Duration::from_millis(audio_levels_interval_millis as u64))
     };
 
+    let proxy_info = if jni_proxy_info.is_null() {
+        None
+    } else {
+        Some(jni_get_proxy_info(env, &jni_proxy_info)?)
+    };
+
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.create_group_call_client(
         group_id,
         sfu_url,
+        proxy_info,
         hkdf_extra_info,
         audio_levels_interval,
         Some(peer_connection_factory),
@@ -842,6 +879,7 @@ pub fn create_call_link_call_client(
     env: &mut JNIEnv,
     call_manager: *mut AndroidCallManager,
     sfu_url: JString,
+    jni_proxy_info: JObject,
     auth_presentation: JByteArray,
     root_key: JByteArray,
     admin_passkey: JByteArray,
@@ -896,9 +934,16 @@ pub fn create_call_link_call_client(
         Some(Duration::from_millis(audio_levels_interval_millis as u64))
     };
 
+    let proxy_info = if jni_proxy_info.is_null() {
+        None
+    } else {
+        Some(jni_get_proxy_info(env, &jni_proxy_info)?)
+    };
+
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.create_call_link_call_client(
         sfu_url,
+        proxy_info,
         &auth_presentation,
         root_key,
         admin_passkey,

@@ -117,6 +117,84 @@ pub struct RffiIceServers {
     servers_size: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RffiProxyType {
+    #[default]
+    None,
+    Https,
+    Socks5,
+    Unknown,
+}
+
+impl RffiProxyType {
+    pub fn from_u8(u: u8) -> Self {
+        match u {
+            0 => RffiProxyType::None,
+            1 => RffiProxyType::Https,
+            2 => RffiProxyType::Socks5,
+            _ => RffiProxyType::Unknown,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct RffiProxyInfo {
+    pub proxy_type: RffiProxyType,
+    pub hostname: webrtc::ptr::Borrowed<c_char>,
+    pub username: webrtc::ptr::Borrowed<c_char>,
+    pub password: webrtc::ptr::Borrowed<c_char>,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProxyInfo {
+    proxy_type: RffiProxyType,
+    hostname: CString,
+    password: CString,
+    username: CString,
+    port: u16,
+}
+
+impl ProxyInfo {
+    pub fn new(
+        proxy_type: RffiProxyType,
+        hostname: &str,
+        password: &str,
+        username: &str,
+        port: u16,
+    ) -> Self {
+        Self {
+            proxy_type,
+            hostname: CString::new(hostname).unwrap(),
+            password: CString::new(password).unwrap(),
+            username: CString::new(username).unwrap(),
+            port,
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            proxy_type: RffiProxyType::None,
+            hostname: CString::new("").unwrap(),
+            username: CString::new("").unwrap(),
+            password: CString::new("").unwrap(),
+            port: 0,
+        }
+    }
+
+    pub fn rffi(&self) -> RffiProxyInfo {
+        RffiProxyInfo {
+            proxy_type: self.proxy_type,
+            hostname: webrtc::ptr::Borrowed::from_ptr(self.hostname.as_ptr()),
+            username: webrtc::ptr::Borrowed::from_ptr(self.username.as_ptr()),
+            password: webrtc::ptr::Borrowed::from_ptr(self.password.as_ptr()),
+            port: self.port,
+        }
+    }
+}
+
 /// Describes an audio input or output device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioDevice {
@@ -340,6 +418,7 @@ impl PeerConnectionFactory {
         audio_jitter_buffer_config: &AudioJitterBufferConfig,
         audio_rtcp_report_interval_ms: i32,
         ice_servers: &[IceServer],
+        proxy_info: &ProxyInfo,
         outgoing_audio_track: AudioTrack,
         outgoing_video_track: Option<VideoTrack>,
     ) -> Result<PeerConnection> {
@@ -360,6 +439,7 @@ impl PeerConnectionFactory {
             servers: webrtc::ptr::Borrowed::from_ptr(servers.as_ptr()),
             servers_size: servers.len(),
         };
+        let rffi_proxy_info = proxy_info.rffi();
 
         let rffi = webrtc::Arc::from_owned(unsafe {
             pcf::Rust_createPeerConnection(
@@ -369,6 +449,7 @@ impl PeerConnectionFactory {
                 webrtc::ptr::Borrowed::from_ptr(&audio_jitter_buffer_config.rffi()),
                 audio_rtcp_report_interval_ms,
                 webrtc::ptr::Borrowed::from_ptr(&rffi_ice_servers),
+                webrtc::ptr::Borrowed::from_ptr(&rffi_proxy_info),
                 outgoing_audio_track.rffi().as_borrowed(),
                 outgoing_video_track
                     .map_or_else(webrtc::ptr::BorrowedRc::null, |outgoing_video_track| {

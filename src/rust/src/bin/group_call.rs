@@ -224,6 +224,7 @@ fn main() {
         1,
         group_call::GroupCallKind::SignalGroup,
         sfu_client,
+        None,
         Box::new(observer.clone()),
         busy,
         self_uuid,

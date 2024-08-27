@@ -258,6 +258,7 @@ impl TestContext {
         self.cm().create_group_call_client(
             group_id,
             "".to_owned(),
+            None, // proxy_info
             vec![],
             None,
             None,

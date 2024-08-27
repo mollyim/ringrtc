@@ -42,7 +42,7 @@ use crate::lite::{
 use crate::protobuf;
 use crate::webrtc::media::{AudioTrack, MediaStream, VideoSink, VideoTrack};
 use crate::webrtc::peer_connection::{AudioLevel, ReceivedAudioLevel};
-use crate::webrtc::peer_connection_factory::PeerConnectionFactory;
+use crate::webrtc::peer_connection_factory::{PeerConnectionFactory, ProxyInfo};
 use crate::webrtc::peer_connection_observer::NetworkRoute;
 
 pub const MAX_MESSAGE_AGE: Duration = Duration::from_secs(60);
@@ -2729,6 +2729,7 @@ where
         &mut self,
         group_id: group_call::GroupId,
         sfu_url: String,
+        proxy_info: Option<ProxyInfo>,
         hkdf_extra_info: Vec<u8>,
         audio_levels_interval: Option<Duration>,
         peer_connection_factory: Option<PeerConnectionFactory>,
@@ -2774,6 +2775,7 @@ where
             client_id,
             group_call::GroupCallKind::SignalGroup,
             Box::new(sfu_client),
+            proxy_info,
             Box::new(self.clone()),
             self.busy.clone(),
             self.self_uuid.clone(),
@@ -2797,6 +2799,7 @@ where
     pub fn create_call_link_call_client(
         &mut self,
         sfu_url: String,
+        proxy_info: Option<ProxyInfo>,
         auth_presentation: &[u8],
         root_key: CallLinkRootKey,
         admin_passkey: Option<Vec<u8>>,
@@ -2844,6 +2847,7 @@ where
             client_id,
             group_call::GroupCallKind::CallLink,
             Box::new(sfu_client),
+            proxy_info,
             Box::new(self.clone()),
             self.busy.clone(),
             self.self_uuid.clone(),

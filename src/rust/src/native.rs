@@ -22,7 +22,7 @@ use crate::webrtc::media::MediaStream;
 use crate::webrtc::media::{AudioTrack, VideoSink, VideoTrack};
 use crate::webrtc::peer_connection::{AudioLevel, ReceivedAudioLevel};
 use crate::webrtc::peer_connection_factory::{
-    IceServer, PeerConnectionFactory, RffiPeerConnectionKind,
+    IceServer, PeerConnectionFactory, ProxyInfo, RffiPeerConnectionKind,
 };
 use crate::webrtc::peer_connection_observer::{NetworkRoute, PeerConnectionObserver};
 
@@ -461,6 +461,7 @@ impl Platform for NativePlatform {
             &connection.call_config().audio_jitter_buffer_config,
             connection.call_config().audio_rtcp_report_interval_ms,
             &context.ice_servers,
+            &ProxyInfo::none(),
             context.outgoing_audio_track.clone(),
             Some(context.outgoing_video_track.clone()),
         )?;

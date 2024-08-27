@@ -27,6 +27,7 @@ import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
 import org.webrtc.NativeLibraryLoader;
 import org.webrtc.PeerConnection;
+import org.webrtc.PeerConnection.ProxyInfo;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.VideoDecoderFactory;
 import org.webrtc.VideoEncoderFactory;
@@ -1236,6 +1237,7 @@ public class CallManager {
   @Nullable
   public GroupCall createGroupCall(@NonNull  byte[]                groupId,
                                    @NonNull  String                sfuUrl,
+                                   @Nullable ProxyInfo             proxyInfo,
                                    @NonNull  byte[]                hkdfExtraInfo,
                                    @Nullable Integer               audioLevelsIntervalMs,
                                              AudioProcessingMethod audioProcessingMethod,
@@ -1253,7 +1255,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, proxyInfo, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.
@@ -1285,6 +1287,7 @@ public class CallManager {
    */
   @Nullable
   public GroupCall createCallLinkCall(@NonNull  String                sfuUrl,
+                                      @Nullable ProxyInfo             proxyInfo,
                                       @NonNull  byte[]                authCredentialPresentation,
                                       @NonNull  CallLinkRootKey       linkRootKey,
                                       @Nullable byte[]                adminPasskey,
@@ -1305,7 +1308,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.

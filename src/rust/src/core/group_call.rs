@@ -50,7 +50,9 @@ use crate::{
             AudioEncoderConfig, AudioTrack, VideoFrame, VideoFrameMetadata, VideoSink, VideoTrack,
         },
         peer_connection::{AudioLevel, PeerConnection, ReceivedAudioLevel, SendRates},
-        peer_connection_factory::{self as pcf, AudioJitterBufferConfig, PeerConnectionFactory},
+        peer_connection_factory::{
+            self as pcf, AudioJitterBufferConfig, PeerConnectionFactory, ProxyInfo,
+        },
         peer_connection_observer::{
             IceConnectionState, NetworkRoute, PeerConnectionObserver, PeerConnectionObserverTrait,
         },
@@ -1131,6 +1133,7 @@ impl Client {
         client_id: ClientId,
         kind: GroupCallKind,
         sfu_client: Box<dyn SfuClient + Send>,
+        proxy_info: Option<ProxyInfo>,
         observer: Box<dyn Observer + Send>,
         busy: Arc<CallMutex<bool>>,
         self_uuid: Arc<CallMutex<Option<UserId>>>,
@@ -1179,6 +1182,10 @@ impl Client {
                 let local_ice_pwd = random_alphanumeric(22);
                 let audio_rtcp_report_interval_ms = 5000;
                 let ice_servers = vec![];
+                let proxy_info = match proxy_info {
+                    None => ProxyInfo::none(),
+                    Some(i) => i,
+                };
                 let peer_connection = peer_connection_factory
                     .create_peer_connection(
                         peer_connection_observer,
@@ -1186,6 +1193,7 @@ impl Client {
                         &AudioJitterBufferConfig::default(),
                         audio_rtcp_report_interval_ms,
                         &ice_servers,
+                        &proxy_info,
                         outgoing_audio_track,
                         outgoing_video_track,
                     )
@@ -5138,6 +5146,7 @@ mod tests {
                 demux_id,
                 GroupCallKind::SignalGroup,
                 Box::new(sfu_client.clone()),
+                None, // proxy_info
                 Box::new(observer.clone()),
                 fake_busy,
                 fake_self_uuid,
