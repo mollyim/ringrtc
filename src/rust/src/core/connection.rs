@@ -1409,10 +1409,13 @@ where
                 previous.and_then(|sender_status| sender_status.video_enabled);
             let previous_sharing_screen =
                 previous.and_then(|sender_status| sender_status.sharing_screen);
+            let previous_audio_enabled =
+                previous.and_then(|sender_status| sender_status.audio_enabled);
             data.sender_status = Some(protobuf::rtp_data::SenderStatus {
                 id: Some(u64::from(self.call_id)),
                 video_enabled: updated.video_enabled.or(previous_video_enabled),
                 sharing_screen: updated.sharing_screen.or(previous_sharing_screen),
+                audio_enabled: updated.audio_enabled.or(previous_audio_enabled),
             });
         })
     }
@@ -1431,7 +1434,7 @@ where
             let mut state = self.accumulated_rtp_data_message.lock()?;
             populate(&mut state);
             state.seqnum = Some(state.seqnum.unwrap_or(0) + 1);
-            state.clone()
+            state
         };
         info!("Sending RTP data message: {:?}", message);
         self.send_via_rtp_data(webrtc_data, &message)
@@ -1824,7 +1827,6 @@ where
         debug!("Received RTP data message: {:?}", message);
 
         let mut message_handled = false;
-        let original_message = message.clone();
         if let Some(accepted) = message.accepted {
             if let CallDirection::Outgoing = self.direction() {
                 self.inject_received_accepted_via_rtp_data(CallId::new(accepted.id()))
@@ -1859,6 +1861,7 @@ where
                 signaling::SenderStatus {
                     video_enabled: sender_status.video_enabled,
                     sharing_screen: sender_status.sharing_screen,
+                    audio_enabled: sender_status.audio_enabled,
                 },
                 seqnum,
             )
@@ -1875,7 +1878,7 @@ where
             message_handled = true;
         };
         if !message_handled {
-            info!("Unhandled RTP data message: {:?}", original_message);
+            info!("Unhandled RTP data message: {:?}", message);
         }
     }
 
@@ -2067,7 +2070,6 @@ where
             .lock()
             .unwrap()
             .sender_status
-            .clone()
     }
 }
 

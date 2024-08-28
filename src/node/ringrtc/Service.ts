@@ -473,8 +473,6 @@ export class RingRTCType {
       CallState.Prering
     );
     this._call = call;
-    // We won't actually send anything until the remote side accepts.
-    call.outgoingAudioEnabled = true;
     call.outgoingVideoEnabled = isVideoCall;
     return call;
   }
@@ -685,6 +683,18 @@ export class RingRTCType {
     // call.handleStateChanged, which may look at call.endedReason.
     call.endedReason = reason;
     call.state = CallState.Ended;
+  }
+
+  onRemoteAudioEnabled(remoteUserId: UserId, enabled: boolean): void {
+    const call = this._call;
+    if (!call || call.remoteUserId !== remoteUserId) {
+      return;
+    }
+
+    call.remoteAudioEnabled = enabled;
+    if (call.handleRemoteAudioEnabled) {
+      call.handleRemoteAudioEnabled();
+    }
   }
 
   onRemoteVideoEnabled(remoteUserId: UserId, enabled: boolean): void {
@@ -936,7 +946,8 @@ export class RingRTCType {
    * const secretParams = CallLinkSecretParams.deriveFromRootKey(linkKey.bytes);
    * const credentialPresentation = credential.present(roomId, secretParams).serialize();
    * const serializedPublicParams = secretParams.getPublicParams().serialize();
-   * const result = await RingRTC.createCallLink(sfuUrl, credentialPresentation, linkKey, adminPasskey, serializedPublicParams);
+   * const restrictions = CallLinkState.Restrictions.None;
+   * const result = await RingRTC.createCallLink(sfuUrl, credentialPresentation, linkKey, adminPasskey, serializedPublicParams, restrictions);
    * if (result.success) {
    *   const state = result.value;
    *   // In actuality you may not want to do this until the user clicks Done.
@@ -963,7 +974,8 @@ export class RingRTCType {
     createCredentialPresentation: Buffer,
     linkRootKey: CallLinkRootKey,
     adminPasskey: Buffer,
-    callLinkPublicParams: Buffer
+    callLinkPublicParams: Buffer,
+    restrictions: Exclude<CallLinkRestrictions, CallLinkRestrictions.Unknown>
   ): Promise<HttpResult<CallLinkState>> {
     const [requestId, promise] = this._callLinkRequests.add();
     // Response comes back via handleCallLinkResponse
@@ -974,7 +986,8 @@ export class RingRTCType {
         createCredentialPresentation,
         linkRootKey.bytes,
         adminPasskey,
-        callLinkPublicParams
+        callLinkPublicParams,
+        restrictions
       );
     });
     return promise;
@@ -1900,6 +1913,7 @@ export class Call {
   private _outgoingAudioEnabled = false;
   private _outgoingVideoEnabled = false;
   private _outgoingVideoIsScreenShare = false;
+  private _remoteAudioEnabled = false;
   private _remoteVideoEnabled = false;
   outgoingAudioLevel: NormalizedAudioLevel = 0;
   remoteAudioLevel: NormalizedAudioLevel = 0;
@@ -1911,6 +1925,7 @@ export class Call {
 
   // These callbacks should be set by the UX code.
   handleStateChanged?: () => void;
+  handleRemoteAudioEnabled?: () => void;
   handleRemoteVideoEnabled?: () => void;
   handleRemoteSharingScreen?: () => void;
   handleNetworkRouteChanged?: () => void;
@@ -1968,6 +1983,10 @@ export class Call {
       return;
     }
     this._state = state;
+    if (state === CallState.Accepted) {
+      // Make sure the status gets sent.
+      this.outgoingAudioEnabled = this._outgoingAudioEnabled;
+    }
     this.enableOrDisableCapturer();
     this.enableOrDisableRenderer();
     if (this.handleStateChanged) {
@@ -2043,6 +2062,14 @@ export class Call {
     sillyDeadlockProtection(() => {
       this._callManager.setOutgoingVideoIsScreenShare(isScreenShare);
     });
+  }
+
+  get remoteAudioEnabled(): boolean {
+    return this._remoteAudioEnabled;
+  }
+
+  set remoteAudioEnabled(enabled: boolean) {
+    this._remoteAudioEnabled = enabled;
   }
 
   get remoteVideoEnabled(): boolean {
@@ -2959,7 +2986,8 @@ export interface CallManager {
     createCredentialPresentation: Buffer,
     linkRootKey: Buffer,
     adminPasskey: Buffer,
-    callLinkPublicParams: Buffer
+    callLinkPublicParams: Buffer,
+    restrictions: number | undefined
   ): void;
   updateCallLink(
     requestId: number,
@@ -3013,6 +3041,7 @@ export interface CallManagerCallbacks {
     endedReason: CallEndedReason,
     ageSec: number
   ): void;
+  onRemoteAudioEnabled(remoteUserId: UserId, enabled: boolean): void;
   onRemoteVideoEnabled(remoteUserId: UserId, enabled: boolean): void;
   onRemoteSharingScreen(remoteUserId: UserId, enabled: boolean): void;
   onSendOffer(

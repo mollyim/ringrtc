@@ -21,29 +21,29 @@ jobs:
     - name: Check rust format
       run: cargo fmt -- --check
     - name: Install for node
-      run: yarn install --frozen-lockfile
+      run: npm ci
       working-directory: src/node
     - name: Check typescript format
-      run: yarn check-format
+      run: npm run check-format
       working-directory: src/node
 
   lints:
     name: Lints
     runs-on: ubuntu-latest
     steps:
-    - name: Cargo Cache
-      uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
-      with:
-        cache-targets: "false"
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Install Python tools
       run: pip3 install flake8 mypy
     - uses: actions/checkout@v4
+    - name: Cargo Cache
+      uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
+      with:
+        cache-targets: "false"
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component clippy --target aarch64-linux-android,aarch64-apple-ios
     - name: Install extra Rust tools
       run: cargo +stable install --version 0.6.2 --locked cargo-about
-    - run: shellcheck **/*.sh bin/build-aar bin/build-call_sim-cli bin/build-cli bin/build-electron bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-artifact bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check bin/set-up-for-cocoapods src/rust/scripts/run-tests
+    - run: shellcheck **/*.sh bin/build-aar bin/build-call_sim-cli bin/build-direct bin/build-electron bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-artifact bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check bin/set-up-for-cocoapods src/rust/scripts/run-tests
     # Skip the Python scripts not written with flake8 style. (Try not to add more.)
     - run: cd bin && python3 -m flake8 . --exclude measure-cpu.py
     - name: Set up mypy types
@@ -74,10 +74,10 @@ jobs:
       run: cargo clippy -- -D warnings
       working-directory: call_sim/docker/signaling_server
     - name: Install for node
-      run: yarn install --frozen-lockfile
+      run: npm ci
       working-directory: src/node
     - name: Check typescript
-      run: yarn eslint
+      run: npm run eslint
       working-directory: src/node
     - name: Check package.json for prebuildChecksum
       run: >-

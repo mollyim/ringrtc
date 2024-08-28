@@ -794,6 +794,8 @@ public class CallManager {
 
     Connection connection = ringrtcGetActiveConnection(nativeCallManager);
     connection.setAudioEnabled(enable);
+
+    ringrtcSetAudioEnable(nativeCallManager, enable);
   }
 
   /**
@@ -984,7 +986,8 @@ public class CallManager {
    * CallLinkSecretParams secretParams = CallLinkSecretParams.deriveFromRootKey(linkKey.getKeyBytes());
    * byte[] credentialPresentation = credential.present(roomId, secretParams).serialize();
    * byte[] serializedPublicParams = secretParams.getPublicParams().serialize();
-   * callManager.createCallLink(sfuUrl, credentialPresentation, linkKey, adminPasskey, serializedPublicParams, result -> {
+   * CallLinkState.Restrictions restrictions = CallLinkState.Restrictions.NONE;
+   * callManager.createCallLink(sfuUrl, credentialPresentation, linkKey, adminPasskey, serializedPublicParams, restrictions, result -> {
    *   if (result.isSuccess()) {
    *     CallLinkState state = result.getValue();
    *     // In actuality you may not want to do this until the user clicks Done.
@@ -1018,6 +1021,7 @@ public class CallManager {
     @NonNull CallLinkRootKey                            linkRootKey,
     @NonNull byte[]                                     adminPasskey,
     @NonNull byte[]                                     callLinkPublicParams,
+    @NonNull CallLinkState.Restrictions                 restrictions,
     @NonNull ResponseHandler<HttpResult<CallLinkState>> handler)
     throws CallException
   {
@@ -1025,7 +1029,7 @@ public class CallManager {
     Log.i(TAG, "createCallLink():");
 
     long requestId = this.callLinkRequests.add(handler);
-    ringrtcCreateCallLink(nativeCallManager, sfuUrl, createCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, callLinkPublicParams, requestId);
+    ringrtcCreateCallLink(nativeCallManager, sfuUrl, createCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, callLinkPublicParams, restrictions.ordinal(), requestId);
   }
 
   /**
@@ -1943,6 +1947,12 @@ public class CallManager {
     /** The call ended because the application wanted to drop the call. */
     ENDED_APP_DROPPED_CALL,
 
+    /** The remote peer indicates its audio stream is enabled. */
+    REMOTE_AUDIO_ENABLE,
+
+    /** The remote peer indicates its audio stream is disabled. */
+    REMOTE_AUDIO_DISABLE,
+
     /** The remote peer indicates its video stream is enabled. */
     REMOTE_VIDEO_ENABLE,
 
@@ -2423,6 +2433,10 @@ public class CallManager {
     throws CallException;
 
   private native
+    void ringrtcSetAudioEnable(long nativeCallManager, boolean enable)
+    throws CallException;
+
+  private native
     void ringrtcSetVideoEnable(long nativeCallManager, boolean enable)
     throws CallException;
 
@@ -2465,6 +2479,7 @@ public class CallManager {
                                byte[] rootKeyBytes,
                                byte[] adminPasskey,
                                byte[] callLinkPublicParams,
+                               int    restrictions,
                                long   requestId)
     throws CallException;
 

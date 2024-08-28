@@ -142,6 +142,9 @@ pub enum Event {
     // The call with the given remote PeerId has changed state.
     // We assume only one call per remote PeerId at a time.
     CallState(PeerId, CallId, CallState),
+    // The state of the remote audio (whether enabled or not) changed.
+    // Like call state, we ID the call by PeerId and assume there is only one.
+    RemoteAudioStateChange(PeerId, bool),
     // The state of the remote video (whether enabled or not) changed.
     // Like call state, we ID the call by PeerId and assume there is only one.
     RemoteVideoStateChange(PeerId, bool),
@@ -271,6 +274,13 @@ impl CallStateHandler for EventReporter {
         self.send(Event::NetworkRouteChange(
             remote_peer_id.to_string(),
             network_route,
+        ))
+    }
+
+    fn handle_remote_audio_state(&self, remote_peer_id: &str, enabled: bool) -> Result<()> {
+        self.send(Event::RemoteAudioStateChange(
+            remote_peer_id.to_string(),
+            enabled,
         ))
     }
 
@@ -1164,6 +1174,13 @@ fn setOutgoingAudioEnabled(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     with_call_endpoint(&mut cx, |endpoint| {
         endpoint.outgoing_audio_track.set_enabled(enabled);
+        // The client may call this before the call has connected.
+        if let Ok(mut active_connection) = endpoint.call_manager.active_connection() {
+            active_connection.update_sender_status(signaling::SenderStatus {
+                audio_enabled: Some(enabled),
+                ..Default::default()
+            })?;
+        }
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -1903,6 +1920,24 @@ fn readCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(cx.undefined().upcast())
 }
 
+fn jsvalue_to_restrictions(
+    raw_restrictions: Handle<'_, JsValue>,
+    cx: &mut FunctionContext,
+) -> std::result::Result<Option<CallLinkRestrictions>, neon::result::Throw> {
+    if raw_restrictions.is_a::<JsUndefined, _>(cx) {
+        Ok(None)
+    } else {
+        let raw_restrictions = raw_restrictions
+            .downcast_or_throw::<JsNumber, _>(cx)?
+            .value(cx);
+        Ok(match raw_restrictions as i8 {
+            0 => Some(CallLinkRestrictions::None),
+            1 => Some(CallLinkRestrictions::AdminApproval),
+            _ => None,
+        })
+    }
+}
+
 #[allow(non_snake_case)]
 fn createCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
     let request_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
@@ -1916,6 +1951,8 @@ fn createCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
     let admin_passkey = admin_passkey.as_slice(&cx).to_vec();
     let public_zkparams = cx.argument::<JsBuffer>(5)?;
     let public_zkparams = public_zkparams.as_slice(&cx).to_vec();
+    let restrictions = cx.argument::<JsValue>(6)?;
+    let restrictions = jsvalue_to_restrictions(restrictions, &mut cx)?;
 
     with_call_endpoint(&mut cx, |endpoint| {
         let event_reporter = endpoint.event_reporter.clone();
@@ -1926,6 +1963,7 @@ fn createCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
             &create_presentation,
             &admin_passkey,
             &public_zkparams,
+            restrictions,
             Box::new(move |result| {
                 // Ignore errors, that can only mean we're shutting down.
                 let _ = event_reporter.send(Event::CallLinkResponse { request_id, result });
@@ -1964,18 +2002,7 @@ fn updateCallLink(mut cx: FunctionContext) -> JsResult<JsValue> {
     };
 
     let new_restrictions = cx.argument::<JsValue>(6)?;
-    let new_restrictions = if new_restrictions.is_a::<JsUndefined, _>(&mut cx) {
-        None
-    } else {
-        let raw_restrictions = new_restrictions
-            .downcast_or_throw::<JsNumber, _>(&mut cx)?
-            .value(&mut cx);
-        match raw_restrictions as i8 {
-            0 => Some(CallLinkRestrictions::None),
-            1 => Some(CallLinkRestrictions::AdminApproval),
-            _ => None,
-        }
-    };
+    let new_restrictions = jsvalue_to_restrictions(new_restrictions, &mut cx)?;
 
     let new_revoked = cx.argument::<JsValue>(7)?;
     let new_revoked = if new_revoked.is_a::<JsUndefined, _>(&mut cx) {
@@ -2343,6 +2370,13 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                     cx.string(peer_id).upcast::<JsValue>(),
                     cx.number(network_route.local_adapter_type as i32).upcast(),
                 ];
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+
+            Event::RemoteAudioStateChange(peer_id, enabled) => {
+                let method_name = "onRemoteAudioEnabled";
+                let args = [cx.string(peer_id).upcast(), cx.boolean(enabled).upcast()];
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
             }

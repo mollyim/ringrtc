@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use chrono;
 use log::{debug, info};
 
 use ringrtc::{
@@ -634,6 +635,14 @@ impl CallStateHandler for CallEndpoint {
         Ok(())
     }
 
+    fn handle_remote_audio_state(&self, remote_peer_id: &str, enabled: bool) -> Result<()> {
+        info!(
+            "Audio State for {} => {}: {}",
+            self.peer_id, remote_peer_id, enabled
+        );
+        Ok(())
+    }
+
     fn handle_remote_video_state(&self, remote_peer_id: &str, enabled: bool) -> Result<()> {
         info!(
             "Video State for {} => {}: {}",
@@ -757,7 +766,14 @@ impl log::Log for Log {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            println!("{} - {}", record.level(), record.args());
+            println!(
+                "[{} {} {:?}:{:?}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.file(),
+                record.line(),
+                record.args()
+            );
         }
     }
 

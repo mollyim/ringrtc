@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.46.1
+
+- CI: Upload desktop symbols to GCS
+
+- Update to webrtc 6478j
+  - Reduce kDefaultMinPixelsPerFrame
+  - Revert "Add Rust_setIncomingAudioMuted"
+  - Revert "Log more info when select fails"
+
+- Update dependencies
+
+- Build improvements
+
+## v2.46.0
+
+- Send audio enabled status to remote device in 1:1 calls
+
+- Update to webrtc 6478i
+  - Add ice switch reason to logging
+  - Android: Oboe ADM uninitialize on stop
+  - Don't get stats from unused transceivers
+
+- Build improvements
+
+## v2.45.0
+
+- Call links: Add restrictions to create call link API
+
+- Update to webrtc 6478h
+  - Android: Add new OboeStream class for reliability
+
+## v2.44.5
+
+- Update to webrtc 6478g
+  - Android: Oboe refinements and latency improvements
+
 ## v2.44.4
 
 - Group Calls: Reduce log noise
