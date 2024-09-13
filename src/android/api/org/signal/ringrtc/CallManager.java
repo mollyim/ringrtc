@@ -54,6 +54,7 @@ import java.util.UUID;
  *
  */
 public class CallManager {
+  public static final  int     INVALID_AUDIO_SESSION_ID = -1;
 
   @NonNull
   private static final String  TAG = CallManager.class.getSimpleName();
@@ -244,15 +245,11 @@ public class CallManager {
 
     if (useOboe) {
       // Use the Oboe Audio Device Module.
-
-      AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-      int audioSessionId = audioManager.generateAudioSessionId();
-
       OboeAudioDeviceModule adm = OboeAudioDeviceModule.builder()
         .setUseSoftwareAcousticEchoCanceler(!useHardware)
         .setUseSoftwareNoiseSuppressor(!useHardware)
         .setExclusiveSharingMode(true)
-        .setAudioSessionId(audioSessionId)
+        .setAudioSessionId(INVALID_AUDIO_SESSION_ID)
         .createAudioDeviceModule();
 
       PeerConnectionFactory factory = PeerConnectionFactory.builder()
