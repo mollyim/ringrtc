@@ -106,6 +106,7 @@ impl CallEndpoint {
                 .create_group_call_client(
                     group_id.clone(),
                     sfu_url,
+                    None, // proxy_info
                     hkdf_extra_info,
                     Some(Duration::from_millis(200)),
                     Some(state.peer_connection_factory.clone()),
