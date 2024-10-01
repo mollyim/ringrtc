@@ -39,6 +39,8 @@ public final class GroupCall {
         CALL_LINK;
     }
 
+             public  static final int    INVALID_CLIENT_ID = 0;
+
     @NonNull private static final String TAG = GroupCall.class.getSimpleName();
 
     @NonNull  private Kind                               kind;
@@ -77,7 +79,7 @@ public final class GroupCall {
         this.nativeCallManager = nativeCallManager;
         this.factory = factory;
         this.observer = observer;
-        this.clientId = 0;
+        this.clientId = INVALID_CLIENT_ID;
 
         this.handleEndedCalled = false;
         this.disconnectCalled = false;
@@ -151,8 +153,7 @@ public final class GroupCall {
                 call.outgoingAudioTrack.getNativeAudioTrack(),
                 // Returns a borrowed RC.
                 call.outgoingVideoTrack.getNativeVideoTrack());
-
-            if (call.clientId == 0) {
+            if (call.clientId == INVALID_CLIENT_ID) {
                 call.dispose();
                 return null;
             }
@@ -200,8 +201,7 @@ public final class GroupCall {
                 call.outgoingAudioTrack.getNativeAudioTrack(),
                 // Returns a borrowed RC.
                 call.outgoingVideoTrack.getNativeVideoTrack());
-
-            if (call.clientId == 0) {
+            if (call.clientId == INVALID_CLIENT_ID) {
                 call.dispose();
                 return null;
             }
@@ -221,9 +221,9 @@ public final class GroupCall {
     {
         Log.i(TAG, "dispose():");
 
-        if (this.clientId != 0) {
+        if (this.clientId != INVALID_CLIENT_ID) {
             ringrtcDeleteGroupCallClient(nativeCallManager, this.clientId);
-            this.clientId = 0;
+            this.clientId = INVALID_CLIENT_ID;
         }
 
         if (this.outgoingAudioTrack != null) {
