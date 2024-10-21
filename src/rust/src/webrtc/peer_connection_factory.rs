@@ -16,9 +16,17 @@ use std::os::raw::c_char;
 use crate::common::Result;
 use crate::error::RingRtcError;
 use crate::webrtc;
-#[cfg(all(not(feature = "sim"), feature = "native"))]
+#[cfg(all(
+    not(feature = "sim"),
+    feature = "native",
+    not(all(target_os = "linux", target_arch = "aarch64"))
+))]
 use crate::webrtc::audio_device_module::AudioDeviceModule;
-#[cfg(all(not(feature = "sim"), feature = "native"))]
+#[cfg(all(
+    not(feature = "sim"),
+    feature = "native",
+    not(all(target_os = "linux", target_arch = "aarch64"))
+))]
 use crate::webrtc::ffi::audio_device_module::AUDIO_DEVICE_CBS_PTR;
 #[cfg(feature = "injectable_network")]
 use crate::webrtc::injectable_network::InjectableNetwork;
@@ -254,10 +262,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            #[cfg(not(feature = "ringrtc_adm"))]
             audio_device_module_type: Default::default(),
-            #[cfg(feature = "ringrtc_adm")]
-            audio_device_module_type: RffiAudioDeviceModuleType::RingRtc,
             file_based_adm_config: None,
             high_pass_filter_enabled: true,
             aec_enabled: true,
@@ -283,8 +288,39 @@ impl AudioConfig {
                 (std::ptr::null(), std::ptr::null())
             };
 
+        #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+        let audio_device_module_type = self.audio_device_module_type;
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let audio_device_module_type =
+            if self.audio_device_module_type == RffiAudioDeviceModuleType::RingRtc {
+                RffiAudioDeviceModuleType::Default
+            } else {
+                self.audio_device_module_type
+            };
+
+        #[cfg(all(
+            not(feature = "sim"),
+            feature = "native",
+            not(all(target_os = "linux", target_arch = "aarch64"))
+        ))]
+        let adm_borrowed =
+            webrtc::ptr::Borrowed::from_ptr(Box::into_raw(Box::new(AudioDeviceModule::new())))
+                .to_void();
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let adm_borrowed = webrtc::ptr::Borrowed::null();
+
+        #[cfg(all(
+            not(feature = "sim"),
+            feature = "native",
+            not(all(target_os = "linux", target_arch = "aarch64"))
+        ))]
+        let rust_audio_device_callbacks =
+            webrtc::ptr::Borrowed::from_ptr(AUDIO_DEVICE_CBS_PTR).to_void();
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let rust_audio_device_callbacks = webrtc::ptr::Borrowed::null();
+
         Ok(RffiAudioConfig {
-            audio_device_module_type: self.audio_device_module_type,
+            audio_device_module_type,
             input_file: webrtc::ptr::Borrowed::from_ptr(input_file),
             output_file: webrtc::ptr::Borrowed::from_ptr(output_file),
             high_pass_filter_enabled: self.high_pass_filter_enabled,
@@ -292,13 +328,9 @@ impl AudioConfig {
             ns_enabled: self.ns_enabled,
             agc_enabled: self.agc_enabled,
             #[cfg(all(not(feature = "sim"), feature = "native"))]
-            adm_borrowed: webrtc::ptr::Borrowed::from_ptr(Box::into_raw(Box::new(
-                AudioDeviceModule::new(),
-            )))
-            .to_void(),
+            adm_borrowed,
             #[cfg(all(not(feature = "sim"), feature = "native"))]
-            rust_audio_device_callbacks: webrtc::ptr::Borrowed::from_ptr(AUDIO_DEVICE_CBS_PTR)
-                .to_void(),
+            rust_audio_device_callbacks,
         })
     }
 }
