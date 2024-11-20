@@ -8,6 +8,7 @@ use crate::webrtc::audio_device_module_utils::{copy_and_truncate_string, DeviceC
 use crate::webrtc::ffi::audio_device_module::RffiAudioTransport;
 use anyhow::anyhow;
 use cubeb::{Context, DeviceId, DeviceType, MonoFrame, Stream, StreamPrefs};
+use cubeb_core::InputProcessingParams;
 use std::collections::VecDeque;
 use std::ffi::{c_uchar, c_void, CString};
 use std::sync::{Arc, Mutex};
@@ -176,6 +177,10 @@ impl AudioDeviceModule {
         let ctx_name = CString::new(ADM_CONTEXT).unwrap();
         match Context::init(Some(ctx_name.as_c_str()), None) {
             Ok(ctx) => {
+                info!(
+                    "Successfully initialized cubeb backend {}",
+                    ctx.backend_id()
+                );
                 self.cubeb_ctx = Some(ctx);
                 self.initialized = true;
                 0
@@ -225,21 +230,35 @@ impl AudioDeviceModule {
         }
     }
 
+    fn redact_for_logging(opt: Option<&str>) -> Option<String> {
+        if cfg!(debug_assertions) {
+            // For debug testing/local builds only, allow the full string.
+            opt.map(|s| s.to_string())
+        } else {
+            // Take a small number of characters, but fewer if they are non-ascii unicode, as
+            // unicode provides a substantially higher amount of information per char.
+            // (e.g. four mandarin characters could be a full name)
+            opt.map(|s| {
+                if s.is_ascii() {
+                    s.chars().take(4).collect()
+                } else {
+                    s.chars().take(1).collect()
+                }
+            })
+        }
+    }
+
     fn device_str(device: &cubeb::DeviceInfo) -> String {
-        // Only print friendly name in debug builds.
-        #[cfg(debug_assertions)]
-        let friendly_name = device.friendly_name();
-        #[cfg(not(debug_assertions))]
-        let friendly_name: Option<&str> = None;
         format!(
             concat!("dev id: {:?}, device_id: {:?}, friendly_name: {:?}, group_id: {:?}, ",
             "vendor_name: {:?}, device_type: {:?}, state: {:?}, preferred: {:?}, format: {:?}, ",
             "default_format: {:?}, max channels: {:?}, default_rate: {:?}, max_rate: {:?}, ",
             "min_rate: {:?}, latency_lo: {:?}, latency_hi: {:?})"),
             device.devid(),
-            device.device_id(),
-            friendly_name,
-            device.group_id(),
+            // Truncate these fields, as they can contain e.g. mac addresses or user-specified names.
+            Self::redact_for_logging(device.device_id()),
+            Self::redact_for_logging(device.friendly_name()),
+            Self::redact_for_logging(device.group_id()),
             device.vendor_name(),
             device.device_type(),
             device.state(),
@@ -673,7 +692,20 @@ impl AudioDeviceModule {
             Ok(stream) => {
                 match ctx.supported_input_processing_params() {
                     Ok(params) => {
+                        // With cubeb-coreaudio-rs, the VPIO input is inaudible without these settings.
+                        // See https://github.com/mozilla/cubeb-coreaudio-rs/issues/239#issuecomment-2430361990
                         info!("Available input processing params: {:?}", params);
+                        let mut desired_params = InputProcessingParams::empty();
+                        if params.contains(InputProcessingParams::AUTOMATIC_GAIN_CONTROL) {
+                            desired_params |= InputProcessingParams::AUTOMATIC_GAIN_CONTROL;
+                        }
+                        // With the coreaudio-rust backend, these settings must be set together.
+                        if params.contains(InputProcessingParams::ECHO_CANCELLATION | InputProcessingParams::NOISE_SUPPRESSION) {
+                           desired_params |= InputProcessingParams::ECHO_CANCELLATION | InputProcessingParams::NOISE_SUPPRESSION;
+                        }
+                        if let Err(e) = stream.set_input_processing_params(desired_params) {
+                            error!("couldn't set input params: {:?}", e);
+                        }
                     }
                     Err(e) => warn!("Failed to get supported input processing parameters; proceeding without: {}", e)
                 }

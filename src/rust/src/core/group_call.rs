@@ -1203,9 +1203,8 @@ impl Client {
                         outgoing_audio_track,
                         outgoing_video_track,
                     )
-                    .map_err(|e| {
+                    .inspect_err(|_| {
                         observer.handle_ended(client_id, EndReason::FailedToCreatePeerConnection);
-                        e
                     })?;
                 let call_id_for_stats = CallId::from(client_id as u64);
                 info!(
@@ -4619,6 +4618,7 @@ impl<'data> Reader<'data> {
 }
 
 #[cfg(test)]
+#[cfg(feature = "sim")]
 mod tests {
     use std::sync::{
         atomic::{self, AtomicU64},
