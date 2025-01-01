@@ -439,6 +439,12 @@ impl CallEndpoint {
             *event_reporter_for_logging = Some(event_reporter.clone());
         }
 
+        if use_ringrtc_adm {
+            // After initializing logs, log the backend in use.
+            let backend = peer_connection_factory.audio_backend();
+            info!("audio_device_module using cubeb backend {:?}", backend);
+        }
+
         // Only relevant for 1:1 calls
         let signaling_sender = Box::new(event_reporter.clone());
         let should_assume_messages_sent = false; // Use async notification from app to send next message.
@@ -2844,6 +2850,15 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
             Event::GroupUpdate(GroupUpdate::RtcStatsReportComplete { report_json }) => {
                 let method_name = "handleRtcStatsReportComplete";
                 let args = [cx.string(report_json).upcast()];
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+            Event::GroupUpdate(GroupUpdate::SpeechEvent(client_id, event)) => {
+                let method_name = "handleSpeechEvent";
+                let args = [
+                    cx.number(client_id).upcast(),
+                    cx.number(event as i32).upcast(),
+                ];
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
             }

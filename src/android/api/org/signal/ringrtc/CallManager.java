@@ -112,6 +112,7 @@ public class CallManager {
       Map<String, String> fieldTrialsWithDefaults = new HashMap<>();
       fieldTrialsWithDefaults.put("RingRTC-PruneTurnPorts", "Enabled");
       fieldTrialsWithDefaults.put("WebRTC-Bwe-ProbingConfiguration", "skip_if_est_larger_than_fraction_of_max:0.99");
+      fieldTrialsWithDefaults.put("WebRTC-IncreaseIceCandidatePriorityHostSrflx", "Enabled");
       fieldTrialsWithDefaults.putAll(fieldTrials);
 
       String fieldTrialsString = buildFieldTrialsString(fieldTrialsWithDefaults);
@@ -1792,6 +1793,20 @@ public class CallManager {
 
     groupCall.handleEnded(reason);
   }
+
+  @CalledByNative
+  private void handleSpeakingNotification(long clientId, GroupCall.SpeechEvent event) {
+    Log.i(TAG, "handleSpeakingNotification():");
+
+    GroupCall groupCall = this.groupCallByClientId.get(clientId);
+    if (groupCall == null) {
+      Log.w(TAG, "groupCall not found by clientId: " + clientId);
+      return;
+    }
+
+    groupCall.handleSpeakingNotification(event);
+  }
+
 
   /**
    *

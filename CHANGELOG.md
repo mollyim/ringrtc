@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.49.1
+
+Desktop: Fix crash caused by new Audio Device Module
+
+## v2.49.0
+
+- Remove support for unencrypted audio header
+
+- Desktop: New Audio Device Module improvements
+  - Fix broken windows build
+  - Remove redundant ADM creation
+  - Disable voice processing on inputs for macos
+  - Cache output of enumerate_devices
+
+- Update to webrtc 6723b
+  - Enable video layers allocation header extension in group calls
+  - Remove checks for dependency descriptors
+  - Fix some tests and disable others
+
+- Increase priority of non-relay candidates
+
+- Add prebuilt_webrtc_sim feature
+
+- Build improvements
+
+## v2.48.7
+
+- Desktop: New Audio Device Module improvements
+  - Logging improvements for ringrtc ADM
+  - Use a dedicated runner to build for linux ARM, fixing crash
+
+- Notify clients for important speech events
+
+## v2.48.6
+
+- Desktop: New Audio Device Module improvements
+  - Don't show `Monitor of` devices as inputs to match existing ADM behavior
+  - Uprev cubeb to 0.17.0 to fix cross-compilation
+
+## v2.48.5
+
+- Desktop: Improve new Audio Device Module support on mac and linux
+  - Update cubeb
+  - Reenable build on aarch64 linux
+  - Debug logging
+
+- Additional debug logging
+
+- Build improvements
+
 ## v2.48.4
 
 - Update to webrtc 6723a (m130)
