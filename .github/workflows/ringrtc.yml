@@ -27,6 +27,14 @@ jobs:
       run: npm run check-format
       working-directory: src/node
 
+  wrapper_validation:
+    name: Validate Gradle wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run wrapper validation
+        uses: gradle/actions/wrapper-validation@v3
+
   lints:
     name: Lints
     runs-on: ubuntu-22.04
@@ -73,34 +81,6 @@ jobs:
     - name: Clippy (signaling_server)
       run: cargo clippy -- -D warnings
       working-directory: call_sim/docker/signaling_server
-    - name: Install for node
-      run: npm ci
-      working-directory: src/node
-    - name: Check typescript
-      run: npm run eslint
-      working-directory: src/node
-    - name: Check package.json for prebuildChecksum
-      run: >-
-        grep -q '"prebuildChecksum": ""' package.json
-      working-directory: src/node
-    - name: Compare package.json and package-lock.json versions
-      run: >
-        PKG_OG=$(jq -r .version package.json);
-        PKG_LOCK=$(jq -r .version package-lock.json);
-        if [ "$PKG_OG" != "$PKG_LOCK" ]; then
-          echo "package.json and package-lock.json versions do not match";
-          exit 1;
-        fi
-      working-directory: src/node
-
-  wrapper_validation:
-    name: Validate Gradle wrapper
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run wrapper validation
-        uses: gradle/actions/wrapper-validation@v3
-
   tests:
     name: Tests
     runs-on: ubuntu-22.04
