@@ -18,20 +18,20 @@ from typing import BinaryIO
 UNVERIFIED_DOWNLOAD_NAME = "unverified.tmp"
 
 PREBUILD_CHECKSUMS = {
-    'android': '5cf54b0cb371f423dc80da402cebdc18f719221b3296a02105b3733ae74e0877',
-    'ios': 'da183ca1636b3d463d803cf27efa739441e278b0127e77b39898ee5f4e725a45',
-    'linux-x64-sim': 'c15064f7be8cdbc6b16ade624596325fd0e39f3aa5f1adf983d197e7bbf8ebdf',
-    'linux-x64': 'b5670fe9aaa93e66e09e1f93eb9db33f771132563b73d73ad9851275540eea59',
-    'linux-arm64-sim': '36751abcb7861c5b36eea806b92527c9834f7bcaa21c8a794e87fe755e89ef3f',
-    'linux-arm64': '6d002a86a488e2a0402e7dd936552cd257d34239b58c67932d3445c9ef76d55f',
-    'mac-x64-sim': 'bc3759aab9391f406adb6ae8ca0376b8c2027968d7f7acc19d0c257e143b1c7e',
-    'mac-x64': 'f9a81767291d38863ef7fba1d64d4511b717f544672675ca6c21a74101d01bb6',
-    'mac-arm64-sim': '8b19debc282bc0317261464966493eca3fcf4557b30f378324896a2b31ba6dad',
-    'mac-arm64': '7563aa53c8cd5a3b7b0bb2c219e334cdf1f735bf212f628b7294c277423e2408',
-    'windows-x64-sim': '39421ff596a127c23b3e4736a2c13bec1004201904a8d8fa49541fb9a7ce37be',
-    'windows-x64': 'd0130dc8c384535189bbd01993060e222843d79a02e68eafc29aebf4ca3f7fd5',
-    'windows-arm64-sim': 'e1677b9f172607d485bcc1227f2afd37b093601fe19b30d378663e39fe0a1c6d',
-    'windows-arm64': '715126e8dcd5c0290361b5599bd4200fe4587b852d93da684c5dbcfddf4a6b0f',
+    'android': 'f7596066cce45502e6e6a27c4258aacb77b410f4455203ef54e76204ad900510',
+    'ios': '8ed3b1bda419448876e49bd2229274e666625bc39f81f0af749fca93a8a95691',
+    'linux-x64-sim': '1c23eeb7ed23d64c98c1657265f1f152fa6eca43637a082e777eab760a94fbde',
+    'linux-x64': '5ce039d14ff0cad7fa6f2e8c1c8c5fafd2ec0bba4cd516482669f3024101e3ca',
+    'linux-arm64-sim': '21c039faf3d44c8d5a36e4c0392249ed98890c8e9eb224d7ef94f894e16cb407',
+    'linux-arm64': 'a21c9579b8c5db31dc6144edb5aff7689e2fb5861f41b4eccf60a333b9c97ef5',
+    'mac-x64-sim': '67d37184fb095e3902d7fe7c601552508696e1263e0897ed0d08ae05b4f15888',
+    'mac-x64': '70eb9266db2b0ae339750b81091566df0698e822d6c18e2e9f39ffc2d3491b02',
+    'mac-arm64-sim': '11e305abb83c60c46a2f79394269c25eff9c5772e66945e120c84f8a3f18015d',
+    'mac-arm64': '6f0ada952d28ce778cab89f557b3abd7450a0ec3452bd964f2f121410a78ca01',
+    'windows-x64-sim': '05df9a69485df06f6e8ef69b2eb285b53e78c5562c6fc4a31f621543f35f3651',
+    'windows-x64': '569353e6b5115bfa03a9964fc1410b76a7ac0d38297c51404e456c1b9e4410ff',
+    'windows-arm64-sim': '9f207cc32b2a8436a4a9a3e4513b5b7752ebae2c88184dd06781598105fbaf56',
+    'windows-arm64': 'c1c4b5df24e778859b5cae7c8f8b1fa56c7927fef9b3db1cfe7b18e62cb02cc7',
 }
 
 
@@ -108,14 +108,14 @@ def download_if_needed(archive_file: str, url: str, checksum: str, archive_dir: 
     archive_path = os.path.join(archive_dir, archive_file)
 
     try:
-        f = open(archive_path, 'rb')
+        f_check = open(archive_path, 'rb')
         digest = hashlib.sha256()
-        chunk = f.read1()
+        chunk = f_check.read1()
         while chunk:
             digest.update(chunk)
-            chunk = f.read1()
+            chunk = f_check.read1()
         if digest.hexdigest() == checksum.lower():
-            return f
+            return f_check
         print("existing file '{}' has non-matching checksum {}; re-downloading...".format(archive_file, digest.hexdigest()), file=sys.stderr)
     except FileNotFoundError:
         pass
@@ -125,17 +125,16 @@ def download_if_needed(archive_file: str, url: str, checksum: str, archive_dir: 
         with urllib.request.urlopen(url) as response:
             digest = hashlib.sha256()
             download_path = os.path.join(archive_dir, UNVERIFIED_DOWNLOAD_NAME)
-            f = open(download_path, 'w+b')
+            f_download = open(download_path, 'w+b')
             chunk = response.read1()
             while chunk:
                 digest.update(chunk)
-                f.write(chunk)
+                f_download.write(chunk)
                 chunk = response.read1()
             assert digest.hexdigest() == checksum.lower(), "expected {}, actual {}".format(checksum.lower(), digest.hexdigest())
-            f.close()
+            f_download.close()
             os.replace(download_path, archive_path)
-            f = open(archive_path, 'rb')
-            return f
+            return open(archive_path, 'rb')
     except urllib.error.HTTPError as e:
         print(e, e.filename, file=sys.stderr)
         sys.exit(1)
