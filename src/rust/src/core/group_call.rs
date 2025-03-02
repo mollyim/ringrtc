@@ -203,7 +203,7 @@ const SPEAKING_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const STOPPED_SPEAKING_DURATION: Duration = Duration::from_secs(3);
 // Amount of "continuous" speech (i.e., with gaps no longer than `STOPPED_SPEAKING_DURATION`)
 // after which we suggest lowering a raised hand.
-const MIN_SPEAKING_HAND_LOWER: Duration = Duration::from_secs(10);
+const MIN_SPEAKING_HAND_LOWER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SpeechEvent {
@@ -530,7 +530,7 @@ pub struct Reaction {
 // The callbacks from the Client to the "SFU client" for the group call.
 pub trait SfuClient {
     // This should call Client.on_sfu_client_joined when the SfuClient has joined.
-    fn join(&mut self, ice_ufrag: &str, dhe_pub_key: [u8; 32], client: Client);
+    fn join(&mut self, ice_ufrag: &str, ice_pwd: &str, dhe_pub_key: [u8; 32], client: Client);
     fn peek(&mut self, result_callback: PeekResultCallback);
 
     // Notifies the client of the new membership proof.
@@ -558,7 +558,7 @@ pub struct HttpSfuClient {
     http_client: Box<dyn http::Client + Send>,
     auth_header: Option<String>,
     member_resolver: Arc<dyn sfu::MemberResolver + Send + Sync>,
-    deferred_join: Option<(String, [u8; 32], Client)>,
+    deferred_join: Option<(String, String, [u8; 32], Client)>,
 }
 
 impl HttpSfuClient {
@@ -596,6 +596,7 @@ impl HttpSfuClient {
         &self,
         auth_header: String,
         ice_ufrag: &str,
+        ice_pwd: &str,
         dhe_pub_key: &[u8],
         client: Client,
     ) {
@@ -607,6 +608,7 @@ impl HttpSfuClient {
             auth_header,
             self.admin_passkey.as_deref(),
             ice_ufrag,
+            ice_pwd,
             dhe_pub_key,
             &self.hkdf_extra_info,
             self.member_resolver.clone(),
@@ -657,20 +659,23 @@ impl SfuClient for HttpSfuClient {
         if let Some(auth_header) = sfu::auth_header_from_membership_proof(&proof) {
             self.auth_header = Some(auth_header.clone());
             // Release any tasks that were blocked on getting the token.
-            if let Some((ice_ufrag, dhe_pub_key, client)) = self.deferred_join.take() {
+            if let Some((ice_ufrag, ice_pwd, dhe_pub_key, client)) = self.deferred_join.take() {
                 info!("membership token received, proceeding with deferred join");
-                self.join_with_header(auth_header, &ice_ufrag, &dhe_pub_key[..], client);
+                self.join_with_header(auth_header, &ice_ufrag, &ice_pwd, &dhe_pub_key[..], client);
             }
         }
     }
 
-    fn join(&mut self, ice_ufrag: &str, dhe_pub_key: [u8; 32], client: Client) {
+    fn join(&mut self, ice_ufrag: &str, ice_pwd: &str, dhe_pub_key: [u8; 32], client: Client) {
         match self.auth_header.as_ref() {
-            Some(h) => self.join_with_header(h.clone(), ice_ufrag, &dhe_pub_key[..], client),
+            Some(h) => {
+                self.join_with_header(h.clone(), ice_ufrag, ice_pwd, &dhe_pub_key[..], client)
+            }
             None => {
                 info!("join requested without membership token - deferring");
                 let ice_ufrag = ice_ufrag.to_string();
-                self.deferred_join = Some((ice_ufrag, dhe_pub_key, client));
+                let ice_pwd = ice_pwd.to_string();
+                self.deferred_join = Some((ice_ufrag, ice_pwd, dhe_pub_key, client));
             }
         }
     }
@@ -1113,6 +1118,7 @@ impl From<&protobuf::group_call::MrpHeader> for mrp::MrpHeader {
         Self {
             seqnum: value.seqnum,
             ack_num: value.ack_num,
+            num_packets: value.num_packets,
         }
     }
 }
@@ -1122,6 +1128,7 @@ impl From<mrp::MrpHeader> for protobuf::group_call::MrpHeader {
         Self {
             seqnum: value.seqnum,
             ack_num: value.ack_num,
+            num_packets: value.num_packets,
         }
     }
 }
@@ -1363,7 +1370,7 @@ impl Client {
                     raised_hands: Vec::new(),
                     raise_hand_state: RaiseHandState::default(),
 
-                    sfu_reliable_stream: MrpStream::new(RELIABLE_RTP_BUFFER_SIZE),
+                    sfu_reliable_stream: MrpStream::with_capacity_limit(RELIABLE_RTP_BUFFER_SIZE),
 
                     actor,
                 })
@@ -1474,7 +1481,7 @@ impl Client {
                     .duration_since(state.started_speaking.unwrap_or(now))
                     .saturating_sub(time_silent);
 
-                let event = if time_speaking > MIN_SPEAKING_HAND_LOWER {
+                let event = if time_speaking >= MIN_SPEAKING_HAND_LOWER {
                     Some(SpeechEvent::LowerHandSuggestion)
                 } else if time_speaking.is_zero() && state.last_speaking_notification.is_some() {
                     Some(SpeechEvent::StoppedSpeaking)
@@ -1817,6 +1824,7 @@ impl Client {
                         state.dhe_state = DheState::start(client_secret);
                         state.sfu_client.join(
                             &state.local_ice_ufrag,
+                            &state.local_ice_pwd,
                             *client_pub_key.as_bytes(),
                             callback,
                         );
@@ -3971,7 +3979,14 @@ impl Client {
                     }
                     err @ Err(MrpReceiveError::ReceiveWindowFull(_)) => {
                         warn!(
-                            "Error when receiving reliable SfuToDevice message, discarding. {:?}",
+                            "Buffer full when receiving reliable SfuToDevice message, discarding. {:?}",
+                            err
+                        );
+                    }
+
+                    Err(err) => {
+                        error!(
+                            "Error when receiving reliable SfuToDevice message, discarded all drained packets {:?}",
                             err
                         );
                     }
@@ -3996,7 +4011,19 @@ impl Client {
             removed,
             raised_hands,
             mrp_header: _,
+            content,
         } = msg;
+
+        if let Some(content) = content {
+            match SfuToDevice::decode(content.as_slice()) {
+                Ok(msg) => Self::handle_sfu_to_device_inner(actor, header, msg),
+                Err(err) => {
+                    error!("Failed to decode content buffer in SfuToDevice: {:?}", err);
+                }
+            }
+            // ignore all other fields to prevent ordering issues
+            return;
+        }
 
         if let Some(Speaker {
             demux_id: speaker_demux_id,
@@ -4763,7 +4790,13 @@ mod tests {
     }
 
     impl SfuClient for FakeSfuClient {
-        fn join(&mut self, _ice_ufrag: &str, _dhe_pub_key: [u8; 32], client: Client) {
+        fn join(
+            &mut self,
+            _ice_ufrag: &str,
+            _ice_pwd: &str,
+            _dhe_pub_key: [u8; 32],
+            client: Client,
+        ) {
             if let Some(counter) = &self.joins_remaining {
                 if counter.fetch_sub(1, Ordering::SeqCst) <= 0 {
                     // No more joins allowed. Simulate a "group full" condition.
