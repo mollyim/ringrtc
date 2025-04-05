@@ -3,23 +3,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use ringrtc::lite::http::sim as sim_http;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use log::info;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-
-use ringrtc::core::group_call::{Reaction, SpeechEvent};
 use ringrtc::{
     common::units::DataRate,
     core::{
         call_mutex::CallMutex,
         group_call::{
-            self, ClientId, ConnectionState, EndReason, HttpSfuClient, JoinState,
-            RemoteDeviceState, RemoteDevicesChangedReason,
+            self, ClientId, ConnectionState, EndReason, HttpSfuClient, JoinState, Reaction,
+            RemoteDeviceState, RemoteDevicesChangedReason, SpeechEvent,
         },
     },
-    lite::sfu::{DemuxId, PeekInfo, UserId},
+    lite::{
+        http::sim as sim_http,
+        sfu::{DemuxId, MemberMap, ObfuscatedResolver, PeekInfo, UserId},
+    },
     protobuf,
     webrtc::{
         media::{VideoFrame, VideoFrameMetadata, VideoPixelFormat, VideoSink, VideoTrack},
@@ -222,6 +224,7 @@ fn main() {
         .unwrap();
     let busy = Arc::new(CallMutex::new(false, "busy"));
     let self_uuid = Arc::new(CallMutex::new(None, "self_uuid"));
+    let obfuscated_resolver = ObfuscatedResolver::new(Arc::new(MemberMap::new(&[])), None);
 
     let client = group_call::Client::start(group_call::ClientStartParams {
         group_id,
@@ -229,6 +232,7 @@ fn main() {
         kind: group_call::GroupCallKind::SignalGroup,
         sfu_client,
         proxy_info: None,
+        obfuscated_resolver,
         observer: Box::new(observer.clone()),
         busy,
         self_uuid,

@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use anyhow;
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
@@ -16,7 +15,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use anyhow;
 use hkdf::Hkdf;
+use mrp::{MrpReceiveError, MrpSendError, MrpStream};
 use num_enum::TryFromPrimitive;
 use prost::Message;
 use rand::{rngs::OsRng, Rng};
@@ -24,26 +25,22 @@ use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 use crate::{
-    common::CallId,
-    core::util::uuid_to_string,
-    protobuf::group_call::{DeviceToSfu, SfuToDevice},
-};
-use crate::{
     common::{
         actor::{Actor, Stopper},
         units::DataRate,
-        DataMode, Result,
+        CallId, DataMode, Result,
     },
-    core::{call_mutex::CallMutex, crypto as frame_crypto, signaling},
+    core::{call_mutex::CallMutex, crypto as frame_crypto, signaling, util::uuid_to_string},
     error::RingRtcError,
     lite::{
         http, sfu,
         sfu::{
-            ClientStatus, DemuxId, GroupMember, MembershipProof, PeekInfo, PeekResult,
-            PeekResultCallback, UserId,
+            ClientStatus, DemuxId, GroupMember, MemberMap, MembershipProof, ObfuscatedResolver,
+            PeekInfo, PeekResult, PeekResultCallback, UserId,
         },
     },
     protobuf,
+    protobuf::group_call::{DeviceToSfu, SfuToDevice},
     webrtc::{
         self,
         media::{
@@ -63,8 +60,6 @@ use crate::{
         stats_observer::{create_stats_observer, StatsObserver},
     },
 };
-
-use mrp::{MrpReceiveError, MrpSendError, MrpStream};
 
 // Each instance of a group_call::Client has an ID for logging and passing events
 // around (such as callbacks to the Observer).  It's just very convenient to have.
@@ -1009,6 +1004,7 @@ struct State {
     remote_devices_request_state: RemoteDevicesRequestState,
     last_peek_info: Option<PeekInfo>,
     known_members: HashSet<UserId>,
+    obfuscated_resolver: ObfuscatedResolver,
 
     // Derived from remote_devices but stored so we can fire
     // Observer::handle_peek_changed only when it changes
@@ -1199,6 +1195,7 @@ pub struct ClientStartParams {
     pub incoming_video_sink: Option<Box<dyn VideoSink>>,
     pub ring_id: Option<RingId>,
     pub audio_levels_interval: Option<Duration>,
+    pub obfuscated_resolver: ObfuscatedResolver,
 }
 
 impl Client {
@@ -1218,6 +1215,7 @@ impl Client {
             incoming_video_sink,
             ring_id,
             audio_levels_interval,
+            obfuscated_resolver,
         } = params;
 
         debug!("group_call::Client(outer)::new(client_id: {})", client_id);
@@ -1312,6 +1310,7 @@ impl Client {
                     last_peek_info: None,
 
                     known_members: HashSet::new(),
+                    obfuscated_resolver,
 
                     joined_members: HashSet::new(),
                     pending_users_signature: 0,
@@ -2216,10 +2215,11 @@ impl Client {
     }
 
     fn send_video_requests_to_sfu(state: &mut State) {
+        use std::cmp::min;
+
         use protobuf::group_call::device_to_sfu::{
             video_request_message::VideoRequest as VideoRequestProto, VideoRequestMessage,
         };
-        use std::cmp::min;
 
         if let Some(video_requests) = &state.video_requests {
             let requests: Vec<_> = video_requests
@@ -2426,6 +2426,9 @@ impl Client {
             if new_members != state.known_members {
                 info!("known group members changed");
                 state.known_members = new_members;
+                state
+                    .obfuscated_resolver
+                    .set_member_resolver(Arc::new(MemberMap::new(&group_members)));
                 state.sfu_client.set_group_members(group_members);
                 Self::request_remote_devices_as_soon_as_possible(state);
             }
@@ -3966,7 +3969,7 @@ impl Client {
             actor.send(move |state| {
                 match state
                     .sfu_reliable_stream
-                    .receive(&mrp_header, (header, msg))
+                    .receive_and_merge(&mrp_header, (header, msg))
                 {
                     Ok(ready_packets) => {
                         for (buffered_header, sfu_to_device) in ready_packets {
@@ -4035,8 +4038,23 @@ impl Client {
                 warn!("Ignoring speaker demux ID of None from SFU");
             }
         };
-        if let Some(DeviceJoinedOrLeft {}) = device_joined_or_left {
-            Self::handle_remote_device_joined_or_left(actor);
+        if let Some(DeviceJoinedOrLeft { peek_info }) = device_joined_or_left {
+            if let Some(peek_info_proto) = peek_info {
+                actor.send(move |state| {
+                    match PeekInfo::deobfuscate_proto(peek_info_proto, &state.obfuscated_resolver) {
+                        Ok(peek_info) => Self::set_peek_result_inner(state, Ok(peek_info)),
+                        Err(err) => {
+                            warn!(
+                                "Failed to deobfuscate peek info, falling back to http: {:?}",
+                                err
+                            );
+                            Self::request_remote_devices_as_soon_as_possible(state);
+                        }
+                    }
+                });
+            } else {
+                Self::handle_remote_device_joined_or_left(actor);
+            }
         }
         // TODO: Use all_demux_ids to avoid polling
         if let Some(CurrentDevices {
@@ -4711,17 +4729,15 @@ impl<'data> Reader<'data> {
 #[cfg(feature = "sim")]
 mod tests {
     use std::sync::{
-        atomic::{self, AtomicI64, AtomicU64},
+        atomic::{self, AtomicI64, AtomicU64, Ordering},
         mpsc, Arc, Condvar, Mutex,
     };
 
+    use super::*;
     use crate::{
         lite::sfu::PeekDeviceInfo, protobuf::group_call::MrpHeader,
         webrtc::sim::media::FAKE_AUDIO_TRACK,
     };
-
-    use super::*;
-    use std::sync::atomic::Ordering;
 
     #[derive(Clone)]
     struct FakeSfuClient {
@@ -5332,12 +5348,14 @@ mod tests {
                 }),
                 None,
             );
+            let obfuscated_resolver = ObfuscatedResolver::new(Arc::new(MemberMap::new(&[])), None);
             let client = Client::start(ClientStartParams {
                 group_id: b"fake group ID".to_vec(),
                 client_id: demux_id,
                 kind: GroupCallKind::SignalGroup,
                 sfu_client: Box::new(sfu_client.clone()),
                 proxy_info: None,
+                obfuscated_resolver,
                 observer: Box::new(observer.clone()),
                 busy: fake_busy,
                 self_uuid: fake_self_uuid,

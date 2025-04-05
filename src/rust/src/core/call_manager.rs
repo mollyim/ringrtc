@@ -5,47 +5,55 @@
 
 //! The main Call Manager object definitions.
 
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
-use std::stringify;
-use std::sync::{Arc, MutexGuard};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
-
 #[cfg(feature = "sim")]
 use std::sync::{Condvar, Mutex};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet, VecDeque},
+    fmt, stringify,
+    sync::{Arc, MutexGuard},
+    thread,
+    time::{Duration, Instant, SystemTime},
+};
 
 use bytes::{Bytes, BytesMut};
 use lazy_static::lazy_static;
 use prost::Message;
 
-use crate::common::actor::{Actor, Stopper};
-use crate::common::{
-    ApplicationEvent, CallConfig, CallDirection, CallId, CallMediaType, CallState, DataMode,
-    DeviceId, Result, RingBench,
+use crate::{
+    common::{
+        actor::{Actor, Stopper},
+        ApplicationEvent, CallConfig, CallDirection, CallId, CallMediaType, CallState, DataMode,
+        DeviceId, Result, RingBench,
+    },
+    core::{
+        call::Call,
+        call_mutex::CallMutex,
+        connection::{Connection, ConnectionType},
+        group_call,
+        group_call::{Client, ClientStartParams, GroupCallKind, HttpSfuClient, Observer, Reaction},
+        platform::Platform,
+        signaling,
+        signaling::ReceivedOffer,
+        util::{try_scoped, uuid_to_string},
+    },
+    error::RingRtcError,
+    lite::{
+        call_links::{self, CallLinkMemberResolver, CallLinkRootKey},
+        http,
+        sfu::{
+            self, DemuxId, GroupMember, MemberMap, MembershipProof, ObfuscatedResolver, PeekInfo,
+            UserId,
+        },
+    },
+    protobuf,
+    webrtc::{
+        media::{AudioTrack, MediaStream, VideoSink, VideoTrack},
+        peer_connection::{AudioLevel, ReceivedAudioLevel},
+        peer_connection_factory::{PeerConnectionFactory, ProxyInfo},
+        peer_connection_observer::NetworkRoute,
+    },
 };
-use crate::core::call::Call;
-use crate::core::call_mutex::CallMutex;
-use crate::core::connection::{Connection, ConnectionType};
-use crate::core::group_call::{
-    Client, ClientStartParams, GroupCallKind, HttpSfuClient, Observer, Reaction,
-};
-use crate::core::platform::Platform;
-use crate::core::signaling::ReceivedOffer;
-use crate::core::util::{try_scoped, uuid_to_string};
-use crate::core::{group_call, signaling};
-use crate::error::RingRtcError;
-use crate::lite::call_links::{self, CallLinkRootKey};
-use crate::lite::{
-    http, sfu,
-    sfu::{DemuxId, GroupMember, MembershipProof, PeekInfo, UserId},
-};
-use crate::protobuf;
-use crate::webrtc::media::{AudioTrack, MediaStream, VideoSink, VideoTrack};
-use crate::webrtc::peer_connection::{AudioLevel, ReceivedAudioLevel};
-use crate::webrtc::peer_connection_factory::{PeerConnectionFactory, ProxyInfo};
-use crate::webrtc::peer_connection_observer::NetworkRoute;
 
 pub const MAX_MESSAGE_AGE: Duration = Duration::from_secs(60);
 const TIME_OUT_PERIOD: Duration = Duration::from_secs(60);
@@ -2808,6 +2816,8 @@ where
             hkdf_extra_info,
         );
 
+        let obfuscated_resolver = ObfuscatedResolver::new(Arc::new(MemberMap::new(&[])), None);
+
         let client = Client::start(ClientStartParams {
             group_id,
             client_id,
@@ -2815,6 +2825,7 @@ where
             sfu_client: Box::new(sfu_client),
             proxy_info,
             observer: Box::new(self.clone()),
+            obfuscated_resolver,
             busy: self.busy.clone(),
             self_uuid: self.self_uuid.clone(),
             peer_connection_factory,
@@ -2884,6 +2895,8 @@ where
             client_id
         };
 
+        let member_resolver = Arc::new(CallLinkMemberResolver::from(&root_key));
+
         let mut sfu_client = HttpSfuClient::new(
             Box::new(self.http_client.clone()),
             sfu_url,
@@ -2894,9 +2907,9 @@ where
         sfu_client.set_auth_header(call_links::auth_header_from_auth_credential(
             auth_presentation,
         ));
-        sfu_client.set_member_resolver(Arc::new(call_links::CallLinkMemberResolver::from(
-            &root_key,
-        )));
+        sfu_client.set_member_resolver(member_resolver.clone());
+
+        let obfuscated_resolver = ObfuscatedResolver::new(member_resolver, Some(root_key));
 
         let client = Client::start(ClientStartParams {
             group_id: room_id,
@@ -2905,6 +2918,7 @@ where
             sfu_client: Box::new(sfu_client),
             proxy_info,
             observer: Box::new(self.clone()),
+            obfuscated_resolver,
             busy: self.busy.clone(),
             self_uuid: self.self_uuid.clone(),
             peer_connection_factory,
@@ -3054,8 +3068,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use protobuf::signaling::call_message::ring_intention::Type as IntentionType;
-    use protobuf::signaling::{call_message::RingIntention, CallMessage};
+    use protobuf::signaling::{
+        call_message::{ring_intention::Type as IntentionType, RingIntention},
+        CallMessage,
+    };
 
     use super::*;
 
