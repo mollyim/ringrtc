@@ -5,7 +5,6 @@
 
 /* eslint-disable max-classes-per-file */
 
-import { GumVideoCaptureOptions, VideoPixelFormatEnum } from './VideoSupport';
 import {
   CallLinkState,
   CallLinkRestrictions,
@@ -137,6 +136,10 @@ class NativeCallManager {
 (NativeCallManager.prototype as any).groupRaiseHand = Native.cm_groupRaiseHand;
 (NativeCallManager.prototype as any).setOutgoingAudioMuted =
   Native.cm_setOutgoingAudioMuted;
+(NativeCallManager.prototype as any).setOutgoingAudioMutedRemotely =
+  Native.cm_setOutgoingAudioMutedRemotely;
+(NativeCallManager.prototype as any).sendRemoteMuteRequest =
+  Native.cm_sendRemoteMuteRequest;
 (NativeCallManager.prototype as any).setOutgoingVideoMuted =
   Native.cm_setOutgoingVideoMuted;
 (NativeCallManager.prototype as any).setOutgoingGroupCallVideoIsScreenShare =
@@ -483,7 +486,6 @@ export class RingRTCType {
       CallState.Prering
     );
     this._call = call;
-    call.outgoingVideoEnabled = isVideoCall;
     return call;
   }
 
@@ -1539,6 +1541,30 @@ export class RingRTCType {
   }
 
   // Called by Rust
+  onRemoteMute(clientId: GroupCallClientId, demuxId: number): void {
+    sillyDeadlockProtection(() => {
+      const groupCall = this._groupCallByClientId.get(clientId);
+      if (groupCall) {
+        groupCall.onRemoteMute(demuxId);
+      }
+    });
+  }
+
+  // Called by Rust.
+  onObservedRemoteMute(
+    clientId: GroupCallClientId,
+    sourceDemuxId: number,
+    targetDemuxId: number
+  ): void {
+    sillyDeadlockProtection(() => {
+      const groupCall = this._groupCallByClientId.get(clientId);
+      if (groupCall) {
+        groupCall.onObservedRemoteMute(sourceDemuxId, targetDemuxId);
+      }
+    });
+  }
+
+  // Called by Rust
   onLogMessage(
     level: number,
     fileName: string,
@@ -1791,15 +1817,13 @@ export class RingRTCType {
     return null;
   }
 
-  accept(callId: CallId, asVideoCall: boolean): void {
+  accept(callId: CallId): void {
     const call = this.getCall(callId);
     if (!call) {
       return;
     }
 
     call.accept();
-    call.outgoingAudioEnabled = true;
-    call.outgoingVideoEnabled = asVideoCall;
   }
 
   decline(callId: CallId): void {
@@ -1827,51 +1851,6 @@ export class RingRTCType {
     }
 
     call.hangup();
-  }
-
-  setOutgoingAudio(callId: CallId, enabled: boolean): void {
-    const call = this.getCall(callId);
-    if (!call) {
-      return;
-    }
-
-    call.outgoingAudioEnabled = enabled;
-  }
-
-  setOutgoingVideo(callId: CallId, enabled: boolean): void {
-    const call = this.getCall(callId);
-    if (!call) {
-      return;
-    }
-
-    call.outgoingVideoEnabled = enabled;
-  }
-
-  setOutgoingVideoIsScreenShare(callId: CallId, isScreenShare: boolean): void {
-    const call = this.getCall(callId);
-    if (!call) {
-      return;
-    }
-
-    call.outgoingVideoIsScreenShare = isScreenShare;
-  }
-
-  setVideoCapturer(callId: CallId, capturer: VideoCapturer | null): void {
-    const call = this.getCall(callId);
-    if (!call) {
-      return;
-    }
-
-    call.videoCapturer = capturer;
-  }
-
-  setVideoRenderer(callId: CallId, renderer: VideoRenderer | null): void {
-    const call = this.getCall(callId);
-    if (!call) {
-      return;
-    }
-
-    call.videoRenderer = renderer;
   }
 
   getAudioInputs(): Array<AudioDevice> {
@@ -1918,19 +1897,79 @@ export interface AudioDevice {
   i18nKey?: string;
 }
 
-export interface VideoCapturer {
-  enableCapture(): void;
-  enableCaptureAndSend(
-    call: Call,
-    captureOptions?: GumVideoCaptureOptions
-  ): void;
-  disable(): void;
+// Given a weird name to not conflict with WebCodec's VideoPixelFormat
+export enum VideoPixelFormatEnum {
+  I420 = 0,
+  Nv12 = 1,
+  Rgba = 2,
 }
 
-export interface VideoRenderer {
-  enable(call: Call): void;
-  disable(): void;
+export function videoPixelFormatToEnum(
+  format: VideoPixelFormat
+): VideoPixelFormatEnum | undefined {
+  switch (format) {
+    case 'I420': {
+      return VideoPixelFormatEnum.I420;
+    }
+    case 'NV12': {
+      return VideoPixelFormatEnum.Nv12;
+    }
+    case 'RGBA': {
+      return VideoPixelFormatEnum.Rgba;
+    }
+  }
 }
+
+/**
+ * Interface for sending video frames to the RingRTC library.
+ *
+ * VideoFrameSender is used to transmit video frames (from a camera or screen share) over
+ * RTP via the RingRTC library.
+ */
+export interface VideoFrameSender {
+  /**
+   * Sends a video frame to be transmitted via RingRTC.
+   *
+   * @param width - The width of the video frame in pixels
+   * @param height - The height of the video frame in pixels
+   * @param format - The pixel format of the video data
+   * @param buffer - Buffer containing the raw video frame data
+   */
+  sendVideoFrame(
+    width: number,
+    height: number,
+    format: VideoPixelFormatEnum,
+    buffer: Buffer
+  ): void;
+}
+
+/**
+ * Interface for retrieving received video frames from the RingRTC library.
+ */
+export interface VideoFrameSource {
+  /**
+   * Copies the latest frame into `buffer`.
+   *
+   * Note that `maxWidth` and `maxHeight` specify maximum dimensions, but allow for rotation,
+   * i.e. a maximum of 1920x1080 will also allow portrait-mode 1080x1920.
+   *
+   * @param buffer - The destination buffer where the frame will be copied
+   * @param maxWidth - Maximum width of the frame to receive
+   * @param maxHeight - Maximum height of the frame to receive
+   * @returns
+   *   A tuple of [width, height] of the received frame, containing:
+   *   - The width in pixels of the received frame
+   *   - The height in pixels of the received frame
+   *
+   *   Returns undefined if no new frame is available
+   */
+  receiveVideoFrame(
+    buffer: Buffer,
+    maxWidth: number,
+    maxHeight: number
+  ): [number, number] | undefined;
+}
+
 export class Call {
   // The calls' info and state.
   private readonly _callManager: CallManager;
@@ -1940,17 +1979,19 @@ export class Call {
   private readonly _isIncoming: boolean;
   private readonly _isVideoCall: boolean;
   private _state: CallState;
+
+  // Media state flags.
+  private _mediaSessionStarted = false;
   private _outgoingAudioEnabled = false;
   private _outgoingVideoEnabled = false;
   private _outgoingVideoIsScreenShare = false;
+
   private _remoteAudioEnabled = false;
   private _remoteVideoEnabled = false;
   outgoingAudioLevel: NormalizedAudioLevel = 0;
   remoteAudioLevel: NormalizedAudioLevel = 0;
   remoteSharingScreen = false;
   networkRoute: NetworkRoute = new NetworkRoute();
-  private _videoCapturer: VideoCapturer | null = null;
-  private _videoRenderer: VideoRenderer | null = null;
   endedReason?: CallEndedReason;
 
   // These callbacks should be set by the UX code.
@@ -2013,12 +2054,40 @@ export class Call {
       return;
     }
     this._state = state;
+
     if (state === CallState.Accepted) {
-      // Make sure the status gets sent.
-      this.outgoingAudioEnabled = this._outgoingAudioEnabled;
+      // We might have been in the reconnecting state and already started media.
+      if (!this._mediaSessionStarted) {
+        sillyDeadlockProtection(() => {
+          if (this._outgoingAudioEnabled) {
+            this._callManager.setOutgoingAudioEnabled(true);
+          }
+          if (this._outgoingVideoIsScreenShare) {
+            this._callManager.setOutgoingVideoIsScreenShare(true);
+            this._callManager.setOutgoingVideoEnabled(true);
+          } else if (this._outgoingVideoEnabled) {
+            this._callManager.setOutgoingVideoEnabled(true);
+          }
+        });
+        this._mediaSessionStarted = true;
+      }
+    } else if (state === CallState.Ended) {
+      if (this._mediaSessionStarted) {
+        sillyDeadlockProtection(() => {
+          if (this._outgoingAudioEnabled) {
+            this._callManager.setOutgoingAudioEnabled(false);
+          }
+          if (this._outgoingVideoEnabled) {
+            this._callManager.setOutgoingVideoEnabled(false);
+          }
+        });
+        this._outgoingAudioEnabled = false;
+        this._outgoingVideoEnabled = false;
+        this._outgoingVideoIsScreenShare = false;
+        this._mediaSessionStarted = false;
+      }
     }
-    this.enableOrDisableCapturer();
-    this.enableOrDisableRenderer();
+
     if (this.handleStateChanged) {
       this.handleStateChanged();
     }
@@ -2026,16 +2095,6 @@ export class Call {
 
   setCallEnded(): void {
     this._state = CallState.Ended;
-  }
-
-  set videoCapturer(capturer: VideoCapturer | null) {
-    this._videoCapturer = capturer;
-    this.enableOrDisableCapturer();
-  }
-
-  set videoRenderer(renderer: VideoRenderer | null) {
-    this._videoRenderer = renderer;
-    this.enableOrDisableRenderer();
   }
 
   accept(): void {
@@ -2051,46 +2110,8 @@ export class Call {
   }
 
   hangup(): void {
-    // This is a little faster than waiting for the
-    // change in call state to come back.
-    if (this._videoCapturer) {
-      this._videoCapturer.disable();
-    }
-    if (this._videoRenderer) {
-      this._videoRenderer.disable();
-    }
-    // This assumes we only have one active call.
     sillyDeadlockProtection(() => {
       this._callManager.hangup();
-    });
-  }
-
-  get outgoingAudioEnabled(): boolean {
-    return this._outgoingAudioEnabled;
-  }
-
-  set outgoingAudioEnabled(enabled: boolean) {
-    this._outgoingAudioEnabled = enabled;
-    // This assumes we only have one active call.
-    sillyDeadlockProtection(() => {
-      this._callManager.setOutgoingAudioEnabled(enabled);
-    });
-  }
-
-  get outgoingVideoEnabled(): boolean {
-    return this._outgoingVideoEnabled;
-  }
-
-  set outgoingVideoEnabled(enabled: boolean) {
-    this._outgoingVideoEnabled = enabled;
-    this.enableOrDisableCapturer();
-  }
-
-  set outgoingVideoIsScreenShare(isScreenShare: boolean) {
-    // This assumes we only have one active call.
-    this._outgoingVideoIsScreenShare = isScreenShare;
-    sillyDeadlockProtection(() => {
-      this._callManager.setOutgoingVideoIsScreenShare(isScreenShare);
     });
   }
 
@@ -2108,7 +2129,46 @@ export class Call {
 
   set remoteVideoEnabled(enabled: boolean) {
     this._remoteVideoEnabled = enabled;
-    this.enableOrDisableRenderer();
+  }
+
+  setOutgoingAudioMuted(muted: boolean): void {
+    const enabled = !muted;
+
+    if (this._mediaSessionStarted && this._outgoingAudioEnabled !== enabled) {
+      this._outgoingAudioEnabled = enabled;
+      sillyDeadlockProtection(() => {
+        this._callManager.setOutgoingAudioEnabled(enabled);
+      });
+    } else {
+      this._outgoingAudioEnabled = enabled;
+    }
+  }
+
+  setOutgoingVideoMuted(muted: boolean): void {
+    const enabled = !muted;
+
+    if (this._mediaSessionStarted && this._outgoingVideoEnabled !== enabled) {
+      this._outgoingVideoEnabled = enabled;
+      sillyDeadlockProtection(() => {
+        this._callManager.setOutgoingVideoEnabled(enabled);
+      });
+    } else {
+      this._outgoingVideoEnabled = enabled;
+    }
+  }
+
+  setOutgoingVideoIsScreenShare(isScreenShare: boolean): void {
+    if (
+      this._mediaSessionStarted &&
+      this._outgoingVideoIsScreenShare !== isScreenShare
+    ) {
+      this._outgoingVideoIsScreenShare = isScreenShare;
+      sillyDeadlockProtection(() => {
+        this._callManager.setOutgoingVideoIsScreenShare(isScreenShare);
+      });
+    } else {
+      this._outgoingVideoIsScreenShare = isScreenShare;
+    }
   }
 
   // With this method, a Call is a VideoFrameSender
@@ -2118,7 +2178,6 @@ export class Call {
     format: VideoPixelFormatEnum,
     buffer: Buffer
   ): void {
-    // This assumes we only have one active call.
     this._callManager.sendVideoFrame(width, height, format, buffer);
   }
 
@@ -2128,54 +2187,7 @@ export class Call {
     maxWidth: number,
     maxHeight: number
   ): [number, number] | undefined {
-    // This assumes we only have one active call.
     return this._callManager.receiveVideoFrame(buffer, maxWidth, maxHeight);
-  }
-
-  private enableOrDisableCapturer(): void {
-    if (!this._videoCapturer) {
-      return;
-    }
-    if (!this.outgoingVideoEnabled) {
-      this._videoCapturer.disable();
-      if (this.state === CallState.Accepted) {
-        this.setOutgoingVideoEnabled(false);
-      }
-      return;
-    }
-    switch (this.state) {
-      case CallState.Prering:
-      case CallState.Ringing:
-        this._videoCapturer.enableCapture();
-        break;
-      case CallState.Accepted:
-        this._videoCapturer.enableCaptureAndSend(this);
-        this.setOutgoingVideoEnabled(true);
-        if (this._outgoingVideoIsScreenShare) {
-          // Make sure the status gets sent.
-          this.outgoingVideoIsScreenShare = true;
-        }
-        break;
-      case CallState.Reconnecting:
-        this._videoCapturer.enableCaptureAndSend(this);
-        // Don't send status until we're reconnected.
-        break;
-      case CallState.Ended:
-        this._videoCapturer.disable();
-        break;
-      default:
-    }
-  }
-
-  private setOutgoingVideoEnabled(enabled: boolean) {
-    sillyDeadlockProtection(() => {
-      try {
-        this._callManager.setOutgoingVideoEnabled(enabled);
-      } catch {
-        // We may not have an active connection any more.
-        // In which case it doesn't matter
-      }
-    });
   }
 
   updateDataMode(dataMode: DataMode): void {
@@ -2187,30 +2199,6 @@ export class Call {
         // In which case it doesn't matter
       }
     });
-  }
-
-  private enableOrDisableRenderer(): void {
-    if (!this._videoRenderer) {
-      return;
-    }
-    if (!this.remoteVideoEnabled) {
-      this._videoRenderer.disable();
-      return;
-    }
-    switch (this.state) {
-      case CallState.Prering:
-      case CallState.Ringing:
-        this._videoRenderer.disable();
-        break;
-      case CallState.Accepted:
-      case CallState.Reconnecting:
-        this._videoRenderer.enable(this);
-        break;
-      case CallState.Ended:
-        this._videoRenderer.disable();
-        break;
-      default:
-    }
   }
 }
 
@@ -2403,6 +2391,12 @@ export interface GroupCallObserver {
   onPeekChanged(groupCall: GroupCall): void;
   onEnded(groupCall: GroupCall, reason: GroupCallEndReason): void;
   onSpeechEvent(groupCall: GroupCall, event: SpeechEvent): void;
+  onRemoteMute(groupCall: GroupCall, demuxId: number): void;
+  onObservedRemoteMute(
+    groupCall: GroupCall,
+    sourceDemuxId: number,
+    targetDemuxId: number
+  ): void;
 }
 
 export class GroupCall {
@@ -2490,6 +2484,18 @@ export class GroupCall {
     this._localDeviceState.audioMuted = muted;
     this._callManager.setOutgoingAudioMuted(this._clientId, muted);
     this._observer.onLocalDeviceStateChanged(this);
+  }
+
+  // Called by UI
+  setOutgoingAudioMutedRemotely(source: number): void {
+    this._localDeviceState.audioMuted = true;
+    this._callManager.setOutgoingAudioMutedRemotely(this._clientId, source);
+    this._observer.onLocalDeviceStateChanged(this);
+  }
+
+  // Called by UI
+  sendRemoteMuteRequest(target: number): void {
+    this._callManager.sendRemoteMuteRequest(this._clientId, target);
   }
 
   // Called by UI
@@ -2691,7 +2697,6 @@ export class GroupCall {
     format: VideoPixelFormatEnum,
     buffer: Buffer
   ): void {
-    // This assumes we only have one active call.
     this._callManager.sendVideoFrame(width, height, format, buffer);
   }
 
@@ -2722,9 +2727,16 @@ export class GroupCall {
   handleSpeechEvent(event: SpeechEvent): void {
     this._observer.onSpeechEvent(this, event);
   }
+
+  onRemoteMute(demuxId: number): void {
+    this._observer.onRemoteMute(this, demuxId);
+  }
+
+  onObservedRemoteMute(sourceDemuxId: number, targetDemuxId: number): void {
+    this._observer.onObservedRemoteMute(this, sourceDemuxId, targetDemuxId);
+  }
 }
 
-// Implements VideoSource for use in CanvasVideoRenderer
 class GroupCallVideoFrameSource {
   private readonly _callManager: CallManager;
   private readonly _groupCall: GroupCall;
@@ -2745,7 +2757,6 @@ class GroupCallVideoFrameSource {
     maxWidth: number,
     maxHeight: number
   ): [number, number] | undefined {
-    // This assumes we only have one active call.
     const frame = this._callManager.receiveGroupCallVideoFrame(
       this._groupCall.clientId,
       this._remoteDemuxId,
@@ -2990,6 +3001,11 @@ export interface CallManager {
   leave(clientId: GroupCallClientId): void;
   disconnect(clientId: GroupCallClientId): void;
   setOutgoingAudioMuted(clientId: GroupCallClientId, muted: boolean): void;
+  setOutgoingAudioMutedRemotely(
+    clientId: GroupCallClientId,
+    source: number
+  ): void;
+  sendRemoteMuteRequest(clientId: GroupCallClientId, target: number): void;
   setOutgoingVideoMuted(clientId: GroupCallClientId, muted: boolean): void;
   setPresenting(clientId: GroupCallClientId, presenting: boolean): void;
   setOutgoingGroupCallVideoIsScreenShare(

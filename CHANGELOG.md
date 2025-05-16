@@ -1,5 +1,45 @@
 # Changelog
 
+## v2.52.1
+
+- Android: Add AudioConfig class and configure ADMs properly
+
+- Update to webrtc 6998d
+  - Add new configuration options for the Oboe ADM
+
+- CI: Use prebuilt for profiling run
+
+## v2.52.0
+
+- Add support for remote mute
+
+- Update to webrtc 6998c
+  - Revert video delay changes
+
+## v2.51.0
+
+- Desktop: Move VideoSupport.ts to Client
+
+## v2.50.6
+
+- Update to webrtc 6998b
+  - Android: Enable 16KB page size for any 64-bit platform
+
+- Build improvements
+
+## v2.50.5
+
+- Update to webrtc 6998a (m134)
+
+- Android: Support 16KB pages for Arm64
+
+## v2.50.4
+
+- Desktop: New Audio Device Module improvements
+  - Bump cubeb version
+
+- Node: Allow options override in enableCapture()
+
 ## v2.50.3
 
 - Android: Add SpeechEvent to the ClassCache
