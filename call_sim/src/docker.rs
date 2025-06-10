@@ -28,11 +28,12 @@ use crate::{
 };
 
 /// This function builds all docker images that we need.
-pub async fn build_images() -> Result<()> {
+pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
     println!("\nBuilding images:");
 
     println!("cli:");
     stdout().flush().await?;
+    let mut now = std::time::Instant::now();
     let _ = Command::new("docker")
         .args([
             "build",
@@ -47,8 +48,11 @@ pub async fn build_images() -> Result<()> {
         .wait()
         .await?;
 
+    println!("... took {:.2?}", now.elapsed());
+
     println!("signaling-server:");
     stdout().flush().await?;
+    now = std::time::Instant::now();
     let _ = Command::new("docker")
         .args([
             "build",
@@ -63,32 +67,44 @@ pub async fn build_images() -> Result<()> {
         .wait()
         .await?;
 
-    println!("visqol_mos:");
-    stdout().flush().await?;
-    let _ = Command::new("docker")
-        .current_dir("call_sim/docker/visqol_mos")
-        .args(["build", "-t", "visqol_mos", "-q", "."])
-        .spawn()?
-        .wait()
-        .await?;
+    println!("... took {:.2?}", now.elapsed());
+
+    if build_visqol_mos {
+        println!("visqol_mos:");
+        stdout().flush().await?;
+        now = std::time::Instant::now();
+        let _ = Command::new("docker")
+            .current_dir("call_sim/docker/visqol_mos")
+            .args(["build", "-t", "visqol_mos", "-q", "."])
+            .spawn()?
+            .wait()
+            .await?;
+        println!("... took {:.2?}", now.elapsed());
+    } else {
+        println!("skip visqol_mos");
+    }
 
     println!("pesq_mos:");
     stdout().flush().await?;
+    now = std::time::Instant::now();
     let _ = Command::new("docker")
         .current_dir("call_sim/docker/pesq_mos")
         .args(["build", "-t", "pesq_mos", "-q", "."])
         .spawn()?
         .wait()
         .await?;
+    println!("... took {:.2?}", now.elapsed());
 
     println!("plc_mos:");
     stdout().flush().await?;
+    now = std::time::Instant::now();
     let _ = Command::new("docker")
         .current_dir("call_sim/docker/plc_mos")
         .args(["build", "-t", "plc_mos", "-q", "."])
         .spawn()?
         .wait()
         .await?;
+    println!("... took {:.2?}", now.elapsed());
 
     Ok(())
 }
@@ -898,6 +914,27 @@ pub async fn finish_perf(client: &str) -> Result<()> {
         if !status.success() {
             // if we couldn't find it, it exited; otherwise keep waiting.
             exited = true;
+
+            let collapse_cmd = format!(
+                "PATH=/root/.cargo/bin:$PATH perf script -i /report/{}.perf | /root/.cargo/bin/inferno-collapse-perf > /report/{}.stacks.folded",
+                client, client
+            );
+            let _ = Command::new("docker")
+                .args(["exec", client, "sh", "-c", &collapse_cmd])
+                .spawn()?
+                .wait()
+                .await?;
+
+            let svg_command = format!(
+                "cat /report/{}.stacks.folded | /root/.cargo/bin/inferno-flamegraph > /report/{}.profile.svg",
+                client, client
+            );
+            let _ = Command::new("docker")
+                .args(["exec", client, "sh", "-c", &svg_command])
+                .spawn()?
+                .wait()
+                .await?;
+
             let perf_command = format!(
                 "perf report -s symbol --percent-limit=5 --call-graph=2 -i /report/{}.perf \
                 --addr2line=/root/.cargo/bin/addr2line > /report/{}.perf.txt 2>&1",
@@ -910,13 +947,7 @@ pub async fn finish_perf(client: &str) -> Result<()> {
                 .await?;
 
             let _ = Command::new("docker")
-                .args([
-                    "exec",
-                    client,
-                    "chmod",
-                    "o+r",
-                    &format!("/report/{}.perf", client),
-                ])
+                .args(["exec", client, "chmod", "-R", "o+r", "/report/"])
                 .spawn()?
                 .wait()
                 .await?;
