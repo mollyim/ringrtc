@@ -81,6 +81,7 @@ jobs:
     - name: Clippy (signaling_server)
       run: cargo clippy -- -D warnings
       working-directory: call_sim/docker/signaling_server
+
   tests:
     name: Tests
     runs-on: ubuntu-22.04
