@@ -33,6 +33,7 @@ use crate::{
     core::{call_mutex::CallMutex, crypto as frame_crypto, signaling, util::uuid_to_string},
     error::RingRtcError,
     lite::{
+        call_links::CallLinkEpoch,
         http, sfu,
         sfu::{
             ClientStatus, DemuxId, GroupMember, MemberMap, MembershipProof, ObfuscatedResolver,
@@ -556,6 +557,7 @@ pub struct Joined {
 pub struct HttpSfuClient {
     sfu_url: String,
     room_id_header: Option<String>,
+    epoch_header: Option<String>,
     admin_passkey: Option<Vec<u8>>,
     // For use post-DHE
     hkdf_extra_info: Vec<u8>,
@@ -570,12 +572,14 @@ impl HttpSfuClient {
         http_client: Box<dyn http::Client + Send>,
         url: String,
         room_id_for_header: Option<&[u8]>,
+        epoch_for_header: Option<CallLinkEpoch>,
         admin_passkey: Option<Vec<u8>>,
         hkdf_extra_info: Vec<u8>,
     ) -> Self {
         Self {
             sfu_url: url,
             room_id_header: room_id_for_header.map(hex::encode),
+            epoch_header: epoch_for_header.map(|epoch| epoch.to_string()),
             admin_passkey,
             hkdf_extra_info,
             http_client,
@@ -609,6 +613,7 @@ impl HttpSfuClient {
             self.http_client.as_ref(),
             &self.sfu_url,
             self.room_id_header.clone(),
+            self.epoch_header.clone(),
             auth_header,
             self.admin_passkey.as_deref(),
             ice_ufrag,
@@ -690,6 +695,7 @@ impl SfuClient for HttpSfuClient {
                 self.http_client.as_ref(),
                 &self.sfu_url,
                 self.room_id_header.clone(),
+                self.epoch_header.clone(),
                 auth_header,
                 self.member_resolver.clone(),
                 None,
@@ -1191,6 +1197,9 @@ const BWE_INTERVAL: Duration = Duration::from_secs(1);
 const DELAYED_BWE_CHECK: Duration = Duration::from_secs(10);
 
 const REACTION_STRING_MAX_SIZE: usize = 256;
+
+/// How long to wait before ending the client and cleaning up.
+const CLIENT_END_DELAY: Duration = Duration::from_millis(20);
 
 pub struct ClientStartParams {
     pub group_id: GroupId,
@@ -2610,13 +2619,19 @@ impl Client {
             ConnectionState::Connecting
             | ConnectionState::Connected
             | ConnectionState::Reconnecting => {
-                state.peer_connection.close();
-                Self::set_connection_state_and_notify_observer(
-                    state,
-                    ConnectionState::NotConnected,
-                );
-                let _join_handles = state.actor.stopper().stop_all_without_joining();
-                state.observer.handle_ended(state.client_id, reason);
+                // We need to finish the disconnection, but we might have sent out RTP
+                // packets for the leave signal. Wait for a short delay before closing
+                // the peer connection and cleaning up.
+                let actor = state.actor.clone();
+                actor.send_delayed(CLIENT_END_DELAY, move |state| {
+                    state.peer_connection.close();
+                    Self::set_connection_state_and_notify_observer(
+                        state,
+                        ConnectionState::NotConnected,
+                    );
+                    let _join_handles = state.actor.stopper().stop_all_without_joining();
+                    state.observer.handle_ended(state.client_id, reason);
+                });
             }
         }
     }

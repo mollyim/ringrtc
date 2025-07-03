@@ -175,6 +175,7 @@ public final class GroupCall {
                             @Nullable ProxyInfo             proxyInfo,
                             @NonNull  byte[]                authCredentialPresentation,
                             @NonNull  CallLinkRootKey       rootKey,
+                            @Nullable CallLinkEpoch         epoch,
                             @Nullable byte[]                adminPasskey,
                             @NonNull  byte[]                hkdfExtraInfo,
                             @Nullable Integer               audioLevelsIntervalMs,
@@ -192,6 +193,7 @@ public final class GroupCall {
                 proxyInfo,
                 authCredentialPresentation,
                 rootKey.getKeyBytes(),
+                epoch,
                 adminPasskey,
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
@@ -444,18 +446,18 @@ public final class GroupCall {
         ringrtcSetOutgoingVideoMuted(nativeCallManager, this.clientId, muted);
     }
 
-    /**	
+    /**
      *
      * Links the camera to the outgoing video track.
      *
      * @param localSink      the sink to associate with the video track
      * @param cameraControl  the camera that will be used to capture video
      *
-     */	
+     */
     public void setOutgoingVideoSource(@NonNull VideoSink     localSink,
                                        @NonNull CameraControl cameraControl)
-    {	
-        Log.i(TAG, "setOutgoingVideoSource():");	
+    {
+        Log.i(TAG, "setOutgoingVideoSource():");
 
         if (cameraControl.hasCapturer()) {
             // Connect camera as the local video source.
@@ -1378,6 +1380,7 @@ public final class GroupCall {
                                              ProxyInfo proxyInfo,
                                              byte[] authCredentialPresentation,
                                              byte[] rootKeyBytes,
+                                             CallLinkEpoch epoch,
                                              byte[] adminPasskey,
                                              byte[] hkdfExtraInfo,
                                              int audioLevelsIntervalMillis,

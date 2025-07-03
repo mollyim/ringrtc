@@ -39,7 +39,7 @@ use crate::{
     },
     error::RingRtcError,
     lite::{
-        call_links::{self, CallLinkMemberResolver, CallLinkRootKey},
+        call_links::{self, CallLinkEpoch, CallLinkMemberResolver, CallLinkRootKey},
         http,
         sfu::{
             self, DemuxId, GroupMember, MemberMap, MembershipProof, ObfuscatedResolver, PeekInfo,
@@ -2768,6 +2768,7 @@ where
                 &self.http_client,
                 &sfu_url,
                 None,
+                None,
                 auth_header,
                 Arc::new(member_resolver),
                 None,
@@ -2837,6 +2838,7 @@ where
             sfu_url,
             None,
             None,
+            None,
             hkdf_extra_info,
         );
 
@@ -2880,6 +2882,7 @@ where
         proxy_info: Option<ProxyInfo>,
         auth_presentation: &[u8],
         root_key: CallLinkRootKey,
+        epoch: Option<CallLinkEpoch>,
         admin_passkey: Option<Vec<u8>>,
         hkdf_extra_info: Vec<u8>,
         audio_levels_interval: Option<Duration>,
@@ -2925,6 +2928,7 @@ where
             Box::new(self.http_client.clone()),
             sfu_url,
             Some(&room_id),
+            epoch,
             admin_passkey,
             hkdf_extra_info,
         );
