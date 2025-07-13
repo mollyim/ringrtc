@@ -1264,6 +1264,7 @@ public class CallManager {
   @Nullable
   public GroupCall createCallLinkCall(@NonNull  String                sfuUrl,
                                       @Nullable ProxyInfo             proxyInfo,
+                                      @NonNull  byte[]                endorsementPublicKey,
                                       @NonNull  byte[]                authCredentialPresentation,
                                       @NonNull  CallLinkRootKey       linkRootKey,
                                       @Nullable CallLinkEpoch         epoch,
@@ -1284,7 +1285,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, authCredentialPresentation, linkRootKey, epoch, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, endorsementPublicKey, authCredentialPresentation, linkRootKey, epoch, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.

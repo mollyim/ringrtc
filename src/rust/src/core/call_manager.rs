@@ -30,8 +30,11 @@ use crate::{
         call::Call,
         call_mutex::CallMutex,
         connection::{Connection, ConnectionType},
+        endorsements::EndorsementUpdateResultRef,
         group_call,
-        group_call::{Client, ClientStartParams, GroupCallKind, HttpSfuClient, Observer, Reaction},
+        group_call::{
+            Client, ClientId, ClientStartParams, GroupCallKind, HttpSfuClient, Observer, Reaction,
+        },
         platform::Platform,
         signaling,
         signaling::ReceivedOffer,
@@ -1199,36 +1202,35 @@ where
 
     /// Handle message_send_failure() API from application.
     fn handle_message_send_failure(&mut self, call_id: CallId) -> Result<()> {
-        let mut is_active_call = false;
         let mut should_handle = true;
 
-        if let Ok(active_call) = self.active_call() {
-            if active_call.call_id() == call_id {
-                is_active_call = true;
-                if let Ok(state) = active_call.state() {
-                    if state.connected_or_reconnecting() {
-                        // Get the last sent message type and see if it was for ICE.
-                        // Since we are in a connected state, don't handle it if so.
-                        if let Ok(message_queue) = self.message_queue.lock() {
-                            if message_queue.last_sent_message_type
-                                == Some(signaling::MessageType::Ice)
-                            {
-                                should_handle = false
-                            }
-                        }
+        let active_call = self.active_call().ok().inspect(|active_call| {
+            if active_call.call_id() == call_id
+                && active_call
+                    .state()
+                    .is_ok_and(|state| state.connected_or_reconnecting())
+            {
+                // Get the last sent message type and see if it was for ICE.
+                // Since we are in a connected state, don't handle it if so.
+                if let Ok(message_queue) = self.message_queue.lock() {
+                    if message_queue.last_sent_message_type == Some(signaling::MessageType::Ice) {
+                        should_handle = false;
                     }
                 }
             }
-        }
+        });
 
         if should_handle {
-            if is_active_call {
+            if let Some(active_call) = active_call {
                 info!(
-                    "handle_message_send_failure(): id: {}, concluding active call",
+                    "handle_message_send_failure(): id: {}, terminating active call",
                     call_id
                 );
 
-                let _ = self.terminate_active_call(true, ApplicationEvent::EndedSignalingFailure);
+                let _ = self.terminate_active_call(
+                    active_call.should_send_hangup_on_failure(),
+                    ApplicationEvent::EndedSignalingFailure,
+                );
             } else {
                 // See if the associated call is in the call map.
                 let mut call = None;
@@ -1243,12 +1245,17 @@ where
                 match call {
                     Some(call) => {
                         info!(
-                            "handle_message_send_failure(): id: {}, concluding call",
+                            "handle_message_send_failure(): id: {}, terminating call",
                             call_id
                         );
+
+                        let hangup = call
+                            .should_send_hangup_on_failure()
+                            .then_some(signaling::Hangup::Normal);
+
                         self.terminate_call(
                             call,
-                            Some(signaling::Hangup::Normal),
+                            hangup,
                             Some(ApplicationEvent::EndedSignalingFailure),
                         )?;
                     }
@@ -2339,12 +2346,16 @@ where
 
     /// Network failure occurred on the active call.
     pub(super) fn connection_failure(&mut self, call_id: CallId) -> Result<()> {
-        info!("call_failed(): call_id: {}", call_id);
+        info!("connection_failure(): call_id: {}", call_id);
 
         if self.call_is_active(call_id)? {
-            self.terminate_active_call(true, ApplicationEvent::EndedConnectionFailure)
+            let call = self.active_call()?;
+            self.terminate_active_call(
+                call.should_send_hangup_on_failure(),
+                ApplicationEvent::EndedConnectionFailure,
+            )
         } else {
-            info!("call_failed(): ignoring for inactive call");
+            info!("connection_failure(): ignoring for inactive call");
             Ok(())
         }
     }
@@ -2357,7 +2368,11 @@ where
         info!("internal_error(): call_id: {}, error: {}", call_id, error);
 
         if self.call_is_active(call_id)? {
-            self.terminate_active_call(true, ApplicationEvent::EndedInternalFailure)
+            let call = self.active_call()?;
+            self.terminate_active_call(
+                call.should_send_hangup_on_failure(),
+                ApplicationEvent::EndedInternalFailure,
+            )
         } else {
             info!("internal_error(): ignoring for inactive call");
             Ok(())
@@ -2641,6 +2656,21 @@ where
         );
     }
 
+    fn handle_endorsements_update(&self, client_id: ClientId, update: EndorsementUpdateResultRef) {
+        debug!("handle_endorsements_update(client_id={}):", client_id);
+        match update {
+            Ok((_expiration, endorsements)) => {
+                info!(
+                    "Received endorsements update with {} new endorsements",
+                    endorsements.len()
+                );
+            }
+            Err(e) => {
+                error!("Endorsements update error: {:?}", e);
+            }
+        }
+    }
+
     fn handle_low_bandwidth_for_video(&self, client_id: group_call::ClientId, recovered: bool) {
         info!("handle_low_bandwidth_for_video(): {}", recovered);
         platform_handler!(self, handle_low_bandwidth_for_video, client_id, recovered);
@@ -2842,7 +2872,8 @@ where
             hkdf_extra_info,
         );
 
-        let obfuscated_resolver = ObfuscatedResolver::new(Arc::new(MemberMap::new(&[])), None);
+        let obfuscated_resolver =
+            ObfuscatedResolver::new(Arc::new(MemberMap::new(&[])), None, None);
 
         let client = Client::start(ClientStartParams {
             group_id,
@@ -2880,6 +2911,7 @@ where
         &mut self,
         sfu_url: String,
         proxy_info: Option<ProxyInfo>,
+        endorsement_public_key: &[u8],
         auth_presentation: &[u8],
         root_key: CallLinkRootKey,
         epoch: Option<CallLinkEpoch>,
@@ -2937,7 +2969,13 @@ where
         ));
         sfu_client.set_member_resolver(member_resolver.clone());
 
-        let obfuscated_resolver = ObfuscatedResolver::new(member_resolver, Some(root_key));
+        let endorsements_public_key: zkgroup::EndorsementPublicKey =
+            zkgroup::deserialize(endorsement_public_key)?;
+        let obfuscated_resolver = ObfuscatedResolver::new(
+            member_resolver,
+            Some(root_key),
+            Some(endorsements_public_key),
+        );
 
         let client = Client::start(ClientStartParams {
             group_id: room_id,

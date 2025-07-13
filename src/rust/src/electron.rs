@@ -46,9 +46,7 @@ use crate::{
         field_trial,
         media::{AudioTrack, VideoFrame, VideoPixelFormat, VideoSink, VideoSource, VideoTrack},
         peer_connection::AudioLevel,
-        peer_connection_factory::{
-            self as pcf, AudioDevice, IceServer, PeerConnectionFactory, RffiAudioDeviceModuleType,
-        },
+        peer_connection_factory::{self as pcf, AudioDevice, IceServer, PeerConnectionFactory},
         peer_connection_observer::NetworkRoute,
     },
 };
@@ -378,18 +376,11 @@ pub struct CallEndpoint {
 }
 
 impl CallEndpoint {
-    fn new<'a>(
-        cx: &mut impl Context<'a>,
-        js_object: Handle<'a, JsObject>,
-        use_ringrtc_adm: bool,
-    ) -> Result<Self> {
+    fn new<'a>(cx: &mut impl Context<'a>, js_object: Handle<'a, JsObject>) -> Result<Self> {
         // Relevant for both group calls and 1:1 calls
         let (events_sender, events_receiver) = channel::<Event>();
-        let mut audio_config = pcf::AudioConfig::default();
-        if use_ringrtc_adm {
-            audio_config.audio_device_module_type = RffiAudioDeviceModuleType::RingRtc;
-        }
-        let peer_connection_factory = PeerConnectionFactory::new(&audio_config, false)?;
+        let peer_connection_factory =
+            PeerConnectionFactory::new(&pcf::AudioConfig::default(), false)?;
         let outgoing_audio_track = peer_connection_factory.create_outgoing_audio_track()?;
         outgoing_audio_track.set_enabled(false);
         let outgoing_video_source = peer_connection_factory.create_outgoing_video_source()?;
@@ -453,11 +444,9 @@ impl CallEndpoint {
             *event_reporter_for_logging = Some(event_reporter.clone());
         }
 
-        if use_ringrtc_adm {
-            // After initializing logs, log the backend in use.
-            let backend = peer_connection_factory.audio_backend();
-            info!("audio_device_module using cubeb backend {:?}", backend);
-        }
+        // After initializing logs, log the backend in use.
+        let backend = peer_connection_factory.audio_backend();
+        info!("audio_device_module using cubeb backend {:?}", backend);
 
         // Only relevant for 1:1 calls
         let signaling_sender = Box::new(event_reporter.clone());
@@ -696,7 +685,6 @@ impl Finalize for CallEndpoint {
 fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
     let js_call_manager = cx.argument::<JsObject>(0)?;
     let field_trial_string = cx.argument::<JsString>(1)?.value(&mut cx);
-    let use_ringrtc_adm = cx.argument::<JsBoolean>(2)?.value(&mut cx);
 
     if ENABLE_LOGGING {
         let is_first_time_initializing_logger = log::set_logger(&LOG).is_ok();
@@ -721,7 +709,7 @@ fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
     let _ = field_trial::init(&field_trial_string);
     info!("initialized field trials with {}", field_trial_string);
 
-    let endpoint = CallEndpoint::new(&mut cx, js_call_manager, use_ringrtc_adm)
+    let endpoint = CallEndpoint::new(&mut cx, js_call_manager)
         .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.boxed(RefCell::new(endpoint)).upcast())
 }
@@ -1410,18 +1398,20 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
 #[allow(non_snake_case)]
 fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sfu_url = cx.argument::<JsString>(0)?.value(&mut cx);
+    let endorsement_public_key = cx.argument::<JsBuffer>(1)?;
+    let endorsement_public_key = endorsement_public_key.as_slice(&cx).to_vec();
 
-    let auth_presentation = cx.argument::<JsBuffer>(1)?;
+    let auth_presentation = cx.argument::<JsBuffer>(2)?;
     let auth_presentation = auth_presentation.as_slice(&cx).to_vec();
 
-    let root_key_bytes = cx.argument::<JsBuffer>(2)?;
+    let root_key_bytes = cx.argument::<JsBuffer>(3)?;
     let root_key = CallLinkRootKey::try_from(root_key_bytes.as_slice(&cx))
         .or_else(|e| cx.throw_type_error(e.to_string()))?;
 
-    let epoch = cx.argument::<JsValue>(3)?;
+    let epoch = cx.argument::<JsValue>(4)?;
     let epoch = jsvalue_to_epoch(epoch, &mut cx)?;
 
-    let admin_passkey = cx.argument::<JsValue>(4)?;
+    let admin_passkey = cx.argument::<JsValue>(5)?;
     let admin_passkey = if admin_passkey.is_a::<JsUndefined, _>(&mut cx) {
         None
     } else {
@@ -1429,10 +1419,10 @@ fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
         Some(admin_passkey.as_slice(&cx).to_vec())
     };
 
-    let hkdf_extra_info = cx.argument::<JsBuffer>(5)?;
+    let hkdf_extra_info = cx.argument::<JsBuffer>(6)?;
     let hkdf_extra_info = hkdf_extra_info.as_slice(&cx).to_vec();
 
-    let audio_levels_interval_millis = cx.argument::<JsNumber>(6)?.value(&mut cx) as u64;
+    let audio_levels_interval_millis = cx.argument::<JsNumber>(7)?.value(&mut cx) as u64;
     let audio_levels_interval = if audio_levels_interval_millis == 0 {
         None
     } else {
@@ -1448,6 +1438,7 @@ fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
         let incoming_video_sink = endpoint.incoming_video_sink.clone();
         let result = endpoint.call_manager.create_call_link_call_client(
             sfu_url,
+            &endorsement_public_key,
             &auth_presentation,
             root_key,
             epoch,

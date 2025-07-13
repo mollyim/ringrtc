@@ -27,7 +27,6 @@ export function callIdFromRingId(ringId: bigint): CallId {
 
 class Config {
   field_trials: Record<string, string> | undefined;
-  use_ringrtc_adm?: boolean;
 }
 
 class NativeCallManager {
@@ -64,13 +63,7 @@ class NativeCallManager {
     Object.defineProperty(this, Native.callEndpointPropertyKey, {
       configurable: true, // allows it to be changed
       get() {
-        const use_ringrtc_adm =
-          config.use_ringrtc_adm === undefined ? false : config.use_ringrtc_adm;
-        const callEndpoint = Native.createCallEndpoint(
-          this,
-          fieldTrialsString,
-          use_ringrtc_adm
-        );
+        const callEndpoint = Native.createCallEndpoint(this, fieldTrialsString);
 
         Object.defineProperty(this, Native.callEndpointPropertyKey, {
           configurable: true, // allows it to be changed
@@ -1167,6 +1160,7 @@ export class RingRTCType {
   getGroupCall(
     groupId: Buffer,
     sfuUrl: string,
+    endorsementPublicKey: Buffer,
     hkdfExtraInfo: Buffer,
     audioLevelsIntervalMillis: number | undefined,
     observer: GroupCallObserver
@@ -1174,6 +1168,7 @@ export class RingRTCType {
     const clientId = this.callManager.createGroupCallClient(
       groupId,
       sfuUrl,
+      endorsementPublicKey,
       hkdfExtraInfo,
       audioLevelsIntervalMillis || 0
     );
@@ -1197,6 +1192,7 @@ export class RingRTCType {
   // Called by UX
   getCallLinkCall(
     sfuUrl: string,
+    endorsementPublicKey: Buffer,
     authCredentialPresentation: Buffer,
     rootKey: CallLinkRootKey,
     epoch: CallLinkEpoch | undefined,
@@ -1207,6 +1203,7 @@ export class RingRTCType {
   ): GroupCall | undefined {
     const clientId = this.callManager.createCallLinkCallClient(
       sfuUrl,
+      endorsementPublicKey,
       authCredentialPresentation,
       rootKey.bytes,
       epoch?.asNumber(),
@@ -3007,11 +3004,13 @@ export interface CallManager {
   createGroupCallClient(
     groupId: Buffer,
     sfuUrl: string,
+    endorsementPublicKey: Buffer,
     hkdfExtraInfo: Buffer,
     audioLevelsIntervalMillis: number
   ): GroupCallClientId;
   createCallLinkCallClient(
     sfuUrl: string,
+    endorsementPublicKey: Buffer,
     authCredentialPresentation: Buffer,
     linkRootKey: Buffer,
     epoch: number | undefined,
