@@ -103,8 +103,8 @@ describe('RingRTC', () => {
           ageSec: age,
           receivedAtCounter: 1,
           receivedAtDate: 100,
-          senderIdentityKey: Buffer.from([]),
-          receiverIdentityKey: Buffer.from([]),
+          senderIdentityKey: new Uint8Array(),
+          receiverIdentityKey: new Uint8Array(),
         });
       });
       assert.equal(reason, CallEndedReason.ReceivedOfferExpired);
@@ -144,8 +144,8 @@ describe('RingRTC', () => {
           ageSec: 10,
           receivedAtCounter: 2,
           receivedAtDate: 200,
-          senderIdentityKey: Buffer.from([]),
-          receiverIdentityKey: Buffer.from([]),
+          senderIdentityKey: new Uint8Array(),
+          receiverIdentityKey: new Uint8Array(),
         });
       });
       assert.equal(reason, CallEndedReason.Declined); // because we didn't set handleIncomingCall.
@@ -478,17 +478,15 @@ describe('RingRTC', () => {
 
     it('has accessors', () => {
       const anotherKey = CallLinkRootKey.generate();
-      assert.isFalse(EXAMPLE_CALL_LINK_ROOT_KEY.bytes.equals(anotherKey.bytes));
+      assert.notDeepEqual(EXAMPLE_CALL_LINK_ROOT_KEY.bytes, anotherKey.bytes);
 
-      assert.isTrue(
-        EXAMPLE_CALL_LINK_ROOT_KEY.deriveRoomId().equals(
-          EXAMPLE_CALL_LINK_ROOT_KEY.deriveRoomId()
-        )
+      assert.deepEqual(
+        EXAMPLE_CALL_LINK_ROOT_KEY.deriveRoomId(),
+        EXAMPLE_CALL_LINK_ROOT_KEY.deriveRoomId()
       );
-      assert.isFalse(
-        EXAMPLE_CALL_LINK_ROOT_KEY.deriveRoomId().equals(
-          anotherKey.deriveRoomId()
-        )
+      assert.notDeepEqual(
+        EXAMPLE_CALL_LINK_ROOT_KEY.deriveRoomId(),
+        anotherKey.deriveRoomId()
       );
     });
 
@@ -519,10 +517,10 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.createCallLink(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         CallLinkRootKey.generateAdminPassKey(),
-        Buffer.of(4, 5, 6),
+        new Uint8Array([4, 5, 6]),
         CallLinkRestrictions.None
       );
       const requestId = await requestIdPromise;
@@ -562,10 +560,10 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.createCallLink(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         CallLinkRootKey.generateAdminPassKey(),
-        Buffer.of(4, 5, 6),
+        new Uint8Array([4, 5, 6]),
         CallLinkRestrictions.None
       );
       const requestId = await requestIdPromise;
@@ -598,7 +596,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.readCallLink(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined
       );
@@ -639,7 +637,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.readCallLink(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined
       );
@@ -673,7 +671,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.updateCallLinkName(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined,
         CallLinkRootKey.generateAdminPassKey(),
@@ -710,7 +708,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.updateCallLinkName(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined,
         CallLinkRootKey.generateAdminPassKey(),
@@ -746,7 +744,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.updateCallLinkName(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined,
         CallLinkRootKey.generateAdminPassKey(),
@@ -783,7 +781,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.updateCallLinkRestrictions(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined,
         CallLinkRootKey.generateAdminPassKey(),
@@ -820,7 +818,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.deleteCallLink(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined,
         CallLinkRootKey.generateAdminPassKey()
@@ -856,7 +854,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.peekCallLinkCall(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined
       );
@@ -892,7 +890,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.peekCallLinkCall(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined
       );
@@ -930,7 +928,7 @@ describe('RingRTC', () => {
       });
       const callLinkResponse = RingRTC.peekCallLinkCall(
         'sfu.example',
-        Buffer.of(1, 2, 3),
+        new Uint8Array([1, 2, 3]),
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined
       );
@@ -976,11 +974,11 @@ describe('RingRTC', () => {
       const call = RingRTC.getCallLinkCall(
         'sfu.example',
         EXAMPLE_PUBLIC_ENDORSEMENT_KEY,
-        Buffer.of(1, 2, 3), // auth creds
+        new Uint8Array([1, 2, 3]), // auth creds
         EXAMPLE_CALL_LINK_ROOT_KEY,
         undefined, // epoch
         undefined, // admin pass
-        Buffer.of(), // hkdf
+        new Uint8Array(), // hkdf
         undefined, // audio levels
         observer
       );
