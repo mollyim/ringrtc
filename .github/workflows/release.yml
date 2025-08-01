@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  NDK_VERSION: '27.0.12077973'
+  NDK_VERSION: '28.0.13004108'
 
 jobs:
   release:

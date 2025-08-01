@@ -138,6 +138,10 @@ impl CallEndpoint {
                     "Audio recording devices: {:?}",
                     peer_connection_factory.get_audio_recording_devices()
                 );
+                peer_connection_factory.set_audio_playout_device(0).unwrap();
+                peer_connection_factory
+                    .set_audio_recording_device(0)
+                    .unwrap();
 
                 // Set up signaling/state
                 signaling_server.register(&endpoint);
@@ -332,7 +336,7 @@ impl CallEndpoint {
             match msg {
                 signaling::Message::Offer(offer) => {
                     cm.received_offer(
-                        sender_id,
+                        PeerId::from("dummy"),
                         call_id,
                         signaling::ReceivedOffer {
                             offer,
@@ -347,6 +351,7 @@ impl CallEndpoint {
                 }
                 signaling::Message::Answer(answer) => {
                     cm.received_answer(
+                        PeerId::from("dummy"),
                         call_id,
                         signaling::ReceivedAnswer {
                             answer,
@@ -359,6 +364,7 @@ impl CallEndpoint {
                 }
                 signaling::Message::Ice(ice) => {
                     cm.received_ice(
+                        PeerId::from("dummy"),
                         call_id,
                         signaling::ReceivedIce {
                             ice,
@@ -369,6 +375,7 @@ impl CallEndpoint {
                 }
                 signaling::Message::Hangup(hangup) => {
                     cm.received_hangup(
+                        PeerId::from("dummy"),
                         call_id,
                         signaling::ReceivedHangup {
                             hangup,
@@ -378,8 +385,12 @@ impl CallEndpoint {
                     .expect("received hangup");
                 }
                 signaling::Message::Busy => {
-                    cm.received_busy(call_id, signaling::ReceivedBusy { sender_device_id })
-                        .expect("received busy");
+                    cm.received_busy(
+                        PeerId::from("dummy"),
+                        call_id,
+                        signaling::ReceivedBusy { sender_device_id },
+                    )
+                    .expect("received busy");
                 }
             }
         });

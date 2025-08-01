@@ -88,6 +88,7 @@ final class TestDelegate: CallManagerDelegate & HTTPDelegate {
     var eventRemoteRingingInvoked = false
     var eventLocalConnectedInvoked = false
     var eventRemoteConnectedInvoked = false
+    var eventEndedLocalHangup = false
     var eventEndedRemoteHangup = false
     var eventEndedRemoteHangupAccepted = false
     var eventEndedRemoteHangupDeclined = false
@@ -142,7 +143,7 @@ final class TestDelegate: CallManagerDelegate & HTTPDelegate {
     var hangupDeviceId: UInt32?
 
     // CallManager to send ICE candidates when we get them.
-    var callManagerICE: [(callManager: CallManager<OpaqueCallData, TestDelegate>, delegate: TestDelegate, deviceId: UInt32)] = []
+    var callManagerICE: [(callManager: CallManager<OpaqueCallData, TestDelegate>, delegate: TestDelegate, deviceId: UInt32, call: OpaqueCallData)] = []
     var doAutomaticICE = false
 
     // This is a state variable, but since everything is run on the same
@@ -232,6 +233,7 @@ final class TestDelegate: CallManagerDelegate & HTTPDelegate {
         case .endedLocalHangup:
             Logger.debug("TestDelegate:endedLocalHangup")
             eventGeneralEnded = true
+            eventEndedLocalHangup = true
 
         case .endedRemoteHangup:
             Logger.debug("TestDelegate:endedRemoteHangup")
@@ -446,7 +448,7 @@ final class TestDelegate: CallManagerDelegate & HTTPDelegate {
                 // Send candidates to all referenced Call Managers (simulate replication).
                 for element in self.callManagerICE {
                     Logger.debug("Sending ICE candidates to \(element.deviceId) from \(self.localDevice)")
-                    try element.callManager.receivedIceCandidates(sourceDevice: self.localDevice, callId: callId, candidates: sentIceCandidates)
+                    try element.callManager.receivedIceCandidates(call: element.call, sourceDevice: self.localDevice, callId: callId, candidates: sentIceCandidates)
                 }
 
                 // Clear the queue.
@@ -812,14 +814,10 @@ class SignalRingRTCTests: XCTestCase {
 
         let videoCaptureController = VideoCaptureController()
 
+        let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
+
         do {
             Logger.debug("Test: Invoking call()...")
-
-            // Define some CallData for simulation. This is defined in a block
-            // so that we validate that it is retained correctly and accessible
-            // outside this block.
-            let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
-
             try callManager?.placeCall(call: call, callMediaType: .audioCall, localDevice: localDevice)
         } catch {
             XCTFail("Call Manager call() failed: \(error)")
@@ -829,7 +827,7 @@ class SignalRingRTCTests: XCTestCase {
         expect(delegate.startOutgoingCallInvoked).toEventually(equal(true))
         delegate.startOutgoingCallInvoked = false
 
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
 
         var callId = delegate.recentCallId
@@ -851,7 +849,7 @@ class SignalRingRTCTests: XCTestCase {
 
         do {
             Logger.debug("Test: Invoking receivedAnswer()...")
-            try callManager?.receivedAnswer(sourceDevice: 1, callId: callId, opaque: exampleV4Answer, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
+            try callManager?.receivedAnswer(call: call, sourceDevice: 1, callId: callId, opaque: exampleV4Answer, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
         } catch {
             XCTFail("Call Manager receivedAnswer() failed: \(error)")
             return
@@ -869,7 +867,7 @@ class SignalRingRTCTests: XCTestCase {
 
         do {
             Logger.debug("Test: Invoking receivedIceCandidates()...")
-            try callManager?.receivedIceCandidates(sourceDevice: sourceDevice, callId: callId, candidates: candidates)
+            try callManager?.receivedIceCandidates(call: call, sourceDevice: sourceDevice, callId: callId, candidates: candidates)
         } catch {
             XCTFail("Call Manager receivedIceCandidates() failed: \(error)")
             return
@@ -934,7 +932,7 @@ class SignalRingRTCTests: XCTestCase {
         expect(delegate.startOutgoingCallInvoked).toEventually(equal(true))
         delegate.startOutgoingCallInvoked = false
 
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
 
         let callId = delegate.recentCallId
@@ -982,14 +980,10 @@ class SignalRingRTCTests: XCTestCase {
 
         let videoCaptureController = VideoCaptureController()
 
+        let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
+
         do {
             Logger.debug("Test: Invoking receivedOffer()...")
-
-            // Define some CallData for simulation. This is defined in a block
-            // so that we validate that it is retained correctly and accessible
-            // outside this block.
-            let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
-
             try callManager?.receivedOffer(call: call, sourceDevice: sourceDevice, callId: callId, opaque: exampleV4V3V2Offer, messageAgeSec: 0, callMediaType: .audioCall, localDevice: localDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
         } catch {
             XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -999,7 +993,7 @@ class SignalRingRTCTests: XCTestCase {
         expect(delegate.startIncomingCallInvoked).toEventually(equal(true))
         delegate.startIncomingCallInvoked = false
 
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
 
         do {
@@ -1028,13 +1022,13 @@ class SignalRingRTCTests: XCTestCase {
 
         do {
             Logger.debug("Test: Invoking receivedIceCandidates()...")
-            try callManager?.receivedIceCandidates(sourceDevice: sourceDevice, callId: callId, candidates: candidates)
+            try callManager?.receivedIceCandidates(call: call, sourceDevice: sourceDevice, callId: callId, candidates: candidates)
         } catch {
             XCTFail("Call Manager receivedIceCandidates() failed: \(error)")
             return
         }
 
-        // Try hanging up, which is essentially a "Decline Call" at this point...
+        // Try hanging up the call...
         do {
             Logger.debug("Test: Invoking hangup()...")
             try callManager?.hangup()
@@ -1042,6 +1036,8 @@ class SignalRingRTCTests: XCTestCase {
             XCTFail("Call Manager hangup() failed: \(error)")
             return
         }
+
+        expect(delegate.eventEndedLocalHangup).toEventually(equal(true))
 
         // Cleanup
         callManager = nil
@@ -1170,7 +1166,7 @@ class SignalRingRTCTests: XCTestCase {
             expect(delegate.startOutgoingCallInvoked).toEventually(equal(true))
             delegate.startOutgoingCallInvoked = false
 
-            let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+            let iceServers: [RTCIceServer] = []
             let useTurnOnly = false
 
             let callId = delegate.recentCallId
@@ -1239,7 +1235,7 @@ class SignalRingRTCTests: XCTestCase {
             expect(delegate.startOutgoingCallInvoked).toEventually(equal(true))
             delegate.startOutgoingCallInvoked = false
 
-            let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+            let iceServers: [RTCIceServer] = []
             let useTurnOnly = false
 
             let callId = delegate.recentCallId
@@ -1295,18 +1291,14 @@ class SignalRingRTCTests: XCTestCase {
         delegate.doAutomaticProceed = true
         let videoCaptureController = VideoCaptureController()
         delegate.videoCaptureController = videoCaptureController
-        delegate.iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        delegate.iceServers = []
         delegate.useTurnOnly = false
         delegate.localDevice = 1
 
+        let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
+
         do {
             Logger.debug("Test: Invoking receivedOffer()...")
-
-            // Define some CallData for simulation. This is defined in a block
-            // so that we validate that it is retained correctly and accessible
-            // outside this block.
-            let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
-
             try callManager?.receivedOffer(call: call, sourceDevice: sourceDevice, callId: callId, opaque: exampleV4V3V2Offer, messageAgeSec: 0, callMediaType: .audioCall, localDevice: localDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
         } catch {
             XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -1316,7 +1308,7 @@ class SignalRingRTCTests: XCTestCase {
         // Say a hangup comes in immediately, because the other end does a quick hangup.
         do {
             Logger.debug("Test: Invoking receivedHangup()...")
-            try callManager?.receivedHangup(sourceDevice: sourceDevice, callId: callId, hangupType: .normal, deviceId: 0)
+            try callManager?.receivedHangup(call: call, sourceDevice: sourceDevice, callId: callId, hangupType: .normal, deviceId: 0)
         } catch {
             XCTFail("Call Manager receivedHangup() failed: \(error)")
             return
@@ -1354,18 +1346,14 @@ class SignalRingRTCTests: XCTestCase {
         delegate.doAutomaticProceed = true
         let videoCaptureController = VideoCaptureController()
         delegate.videoCaptureController = videoCaptureController
-        delegate.iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        delegate.iceServers = []
         delegate.useTurnOnly = false
         delegate.localDevice = 1
 
+        let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
+
         do {
             Logger.debug("Test: Invoking receivedOffer()...")
-
-            // Define some CallData for simulation. This is defined in a block
-            // so that we validate that it is retained correctly and accessible
-            // outside this block.
-            let call = OpaqueCallData(value: delegate.expectedValue, remote: delegate.expectedValue)
-
             try callManager?.receivedOffer(call: call, sourceDevice: sourceDevice, callId: callId, opaque: exampleV4V3V2Offer, messageAgeSec: 0, callMediaType: .audioCall, localDevice: localDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
         } catch {
             XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -1378,7 +1366,7 @@ class SignalRingRTCTests: XCTestCase {
         // Say a hangup comes in immediately, because the other end does a quick hangup.
         do {
             Logger.debug("Test: Invoking receivedHangup()...")
-            try callManager?.receivedHangup(sourceDevice: sourceDevice, callId: callId, hangupType: .normal, deviceId: 0)
+            try callManager?.receivedHangup(call: call, sourceDevice: sourceDevice, callId: callId, hangupType: .normal, deviceId: 0)
         } catch {
             XCTFail("Call Manager receivedHangup() failed: \(error)")
             return
@@ -1417,15 +1405,19 @@ class SignalRingRTCTests: XCTestCase {
         let calleeAddress: Int32 = 777777
         let calleeLocalDevice: UInt32 = 1
 
+        let callCaller = OpaqueCallData(value: delegateCaller.expectedValue, remote: calleeAddress)
+        let callCallee = OpaqueCallData(value: delegateCallee.expectedValue, remote: callerAddress)
+
         // Setup the automatic ICE flow for the call.
-        delegateCaller.callManagerICE = [(callManagerCallee!, delegateCallee, 1)]
-        delegateCallee.callManagerICE = [(callManagerCaller!, delegateCaller, 1)]
+        delegateCaller.callManagerICE = [(callManagerCallee!, delegateCallee, 1, call: callCallee)]
         delegateCaller.doAutomaticICE = true
+
+        delegateCallee.callManagerICE = [(callManagerCaller!, delegateCaller, 1, call: callCaller)]
         delegateCallee.doAutomaticICE = true
         delegateCallee.canSendICE = true  // A callee is safe to send Ice whenever needed.
 
         // For now, these variables will be common to both Call Managers.
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
         let sourceDevice: UInt32 = 1
 
@@ -1440,13 +1432,7 @@ class SignalRingRTCTests: XCTestCase {
 
             do {
                 Logger.debug("Test: Invoking call()...")
-
-                // Define some CallData for simulation. This is defined in a block
-                // so that we validate that it is retained correctly and accessible
-                // outside this block.
-                let call = OpaqueCallData(value: delegateCaller.expectedValue, remote: calleeAddress)
-
-                try callManagerCaller?.placeCall(call: call, callMediaType: .audioCall, localDevice: callerLocalDevice)
+                try callManagerCaller?.placeCall(call: callCaller, callMediaType: .audioCall, localDevice: callerLocalDevice)
             } catch {
                 XCTFail("Call Manager call() failed: \(error)")
                 return
@@ -1472,18 +1458,12 @@ class SignalRingRTCTests: XCTestCase {
             // We sent the offer! Let's give it to our callee!
             do {
                 Logger.debug("Test: Invoking receivedOffer()...")
-
-                // Define some CallData for simulation. This is defined in a block
-                // so that we validate that it is retained correctly and accessible
-                // outside this block.
-                let call = OpaqueCallData(value: delegateCallee.expectedValue, remote: callerAddress)
-
                 guard let opaque = delegateCaller.sentOfferOpaque else {
                     XCTFail("No sentOfferOpaque detected!")
                     return
                 }
 
-                try callManagerCallee?.receivedOffer(call: call, sourceDevice: sourceDevice, callId: callId, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: calleeLocalDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
+                try callManagerCallee?.receivedOffer(call: callCallee, sourceDevice: sourceDevice, callId: callId, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: calleeLocalDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
             } catch {
                 XCTFail("Call Manager receivedOffer() failed: \(error)")
                 return
@@ -1491,7 +1471,7 @@ class SignalRingRTCTests: XCTestCase {
 
             // We've given the offer to the callee device, let's let ICE flow from caller as well.
             // @note Some ICE may flow starting now.
-            Logger.debug("Starting ICE flow for caller...")
+            Logger.debug("Test: Starting ICE flow for caller...")
             delegateCaller.canSendICE = true
             delegateCaller.tryToSendIceCandidates(callId: callId, destinationDeviceId: nil, candidates: [])
 
@@ -1521,7 +1501,7 @@ class SignalRingRTCTests: XCTestCase {
                     return
                 }
 
-                try callManagerCaller?.receivedAnswer(sourceDevice: sourceDevice, callId: callId, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+                try callManagerCaller?.receivedAnswer(call: callCaller, sourceDevice: sourceDevice, callId: callId, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
             } catch {
                 XCTFail("Call Manager receivedAnswer() failed: \(error)")
                 return
@@ -1547,7 +1527,7 @@ class SignalRingRTCTests: XCTestCase {
 
             do {
                 Logger.debug("Test: Invoking receivedHangup()...")
-                _ = try callManagerCallee?.receivedHangup(sourceDevice: sourceDevice, callId: callId, hangupType: .normal, deviceId: 0)
+                _ = try callManagerCallee?.receivedHangup(call: callCallee, sourceDevice: sourceDevice, callId: callId, hangupType: .normal, deviceId: 0)
             } catch {
                 XCTFail("Call Manager hangup() failed: \(error)")
                 return
@@ -1596,15 +1576,11 @@ class SignalRingRTCTests: XCTestCase {
 
         let videoCaptureController = VideoCaptureController()
 
+        let callCaller = OpaqueCallData(value: delegateCaller.expectedValue, remote: delegateCaller.expectedValue)
+
         do {
             Logger.debug("Test: Invoking call()...")
-
-            // Define some CallData for simulation. This is defined in a block
-            // so that we validate that it is retained correctly and accessible
-            // outside this block.
-            let call = OpaqueCallData(value: delegateCaller.expectedValue, remote: delegateCaller.expectedValue)
-
-            try callManagerCaller?.placeCall(call: call, callMediaType: .audioCall, localDevice: callerLocalDevice)
+            try callManagerCaller?.placeCall(call: callCaller, callMediaType: .audioCall, localDevice: callerLocalDevice)
         } catch {
             XCTFail("Call Manager call() failed: \(error)")
             return
@@ -1614,7 +1590,7 @@ class SignalRingRTCTests: XCTestCase {
         delegateCaller.startOutgoingCallInvoked = false
 
         // For now, these variables will be common to both Call Managers.
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
 
         let callId = delegateCaller.recentCallId
@@ -1638,22 +1614,18 @@ class SignalRingRTCTests: XCTestCase {
         // aren't dropped.
         let sourceDevice: UInt32 = 1
 
+        let callCallee = OpaqueCallData(value: delegateCallee.expectedValue, remote: delegateCallee.expectedValue)
+
         do {
             Logger.debug("Test: Invoking receivedOffer() and receivedIceCandidates()...")
-
-            // Define some CallData for simulation. This is defined in a block
-            // so that we validate that it is retained correctly and accessible
-            // outside this block.
-            let call = OpaqueCallData(value: delegateCallee.expectedValue, remote: delegateCallee.expectedValue)
-
             guard let opaque = delegateCaller.sentOfferOpaque else {
                 XCTFail("No sentOfferOpaque detected!")
                 return
             }
 
             // Send the ICE candidates right after the offer.
-            try callManagerCallee?.receivedOffer(call: call, sourceDevice: sourceDevice, callId: callId, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: calleeLocalDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
-            try callManagerCallee?.receivedIceCandidates(sourceDevice: sourceDevice, callId: callId, candidates: delegateCaller.sentIceCandidates)
+            try callManagerCallee?.receivedOffer(call: callCallee, sourceDevice: sourceDevice, callId: callId, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: calleeLocalDevice, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
+            try callManagerCallee?.receivedIceCandidates(call: callCallee, sourceDevice: sourceDevice, callId: callId, candidates: delegateCaller.sentIceCandidates)
         } catch {
             XCTFail("Call Manager receivedOffer() failed: \(error)")
             return
@@ -1686,7 +1658,7 @@ class SignalRingRTCTests: XCTestCase {
                 return
             }
 
-            try callManagerCaller?.receivedAnswer(sourceDevice: sourceDevice, callId: callId, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+            try callManagerCaller?.receivedAnswer(call: callCaller, sourceDevice: sourceDevice, callId: callId, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
         } catch {
             XCTFail("Call Manager receivedAnswer() failed: \(error)")
             return
@@ -1703,7 +1675,7 @@ class SignalRingRTCTests: XCTestCase {
 
         do {
             Logger.debug("Test: Invoking receivedIceCandidates()...")
-            try callManagerCaller?.receivedIceCandidates(sourceDevice: sourceDevice, callId: callId, candidates: delegateCallee.sentIceCandidates)
+            try callManagerCaller?.receivedIceCandidates(call: callCaller, sourceDevice: sourceDevice, callId: callId, candidates: delegateCallee.sentIceCandidates)
         } catch {
             XCTFail("Call Manager receivedIceCandidates() failed: \(error)")
             return
@@ -1712,6 +1684,20 @@ class SignalRingRTCTests: XCTestCase {
         // We should get to the ringing state in each client.
         expect(delegateCaller.eventRemoteRingingInvoked).toEventually(equal(true))
         expect(delegateCallee.eventLocalRingingInvoked).toEventually(equal(true))
+
+        // Hangup the calls.
+        do {
+            Logger.debug("Test: Invoking hangup() for all calls...")
+            _ = try callManagerCaller?.hangup()
+            _ = try callManagerCallee?.hangup()
+        } catch {
+            XCTFail("Call Manager hangup() failed: \(error)")
+            return
+        }
+
+        // And wait for them to end.
+        expect(delegateCaller.eventGeneralEnded).toEventually(equal(true))
+        expect(delegateCallee.eventGeneralEnded).toEventually(equal(true))
 
         // Cleanup
         callManagerCaller = nil
@@ -1745,14 +1731,18 @@ class SignalRingRTCTests: XCTestCase {
         delegateB.expectedValue = 11111
         let bAddress: Int32 = 777777
 
+        let callA = OpaqueCallData(value: delegateA.expectedValue, remote: bAddress)
+        let callB = OpaqueCallData(value: delegateB.expectedValue, remote: aAddress)
+
         // Setup the automatic ICE flow for the call.
-        delegateA.callManagerICE = [(callManagerB!, delegateB, 1)]
-        delegateB.callManagerICE = [(callManagerA!, delegateA, 1)]
+        delegateA.callManagerICE = [(callManagerB!, delegateB, 1, callB)]
         delegateA.doAutomaticICE = false
+
+        delegateB.callManagerICE = [(callManagerA!, delegateA, 1, callA)]
         delegateB.doAutomaticICE = false
 
         // For now, these variables will be common to both Call Managers.
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
         let localDevice: UInt32 = 1
         let sourceDevice: UInt32 = 1
@@ -1762,8 +1752,7 @@ class SignalRingRTCTests: XCTestCase {
         // A starts to call B.
         do {
             Logger.debug("Test: A calls B...")
-            let call = OpaqueCallData(value: delegateA.expectedValue, remote: bAddress)
-            try callManagerA?.placeCall(call: call, callMediaType: .audioCall, localDevice: localDevice)
+            try callManagerA?.placeCall(call: callA, callMediaType: .audioCall, localDevice: localDevice)
         } catch {
             XCTFail("Call Manager call() failed: \(error)")
             return
@@ -1787,8 +1776,7 @@ class SignalRingRTCTests: XCTestCase {
         // B starts to call A.
         do {
             Logger.debug("Test:B calls A...")
-            let call = OpaqueCallData(value: delegateB.expectedValue, remote: aAddress)
-            try callManagerB?.placeCall(call: call, callMediaType: .audioCall, localDevice: localDevice)
+            try callManagerB?.placeCall(call: callB, callMediaType: .audioCall, localDevice: localDevice)
         } catch {
             XCTFail("Call Manager call() failed: \(error)")
             return
@@ -1828,14 +1816,12 @@ class SignalRingRTCTests: XCTestCase {
         // Give the offer from A to B.
         do {
             Logger.debug("Test: Invoking B.receivedOffer(A)...")
-            let call = OpaqueCallData(value: delegateB.expectedValue, remote: aAddress)
-
             guard let opaque = delegateA.sentOfferOpaque else {
                 XCTFail("No sentOfferOpaque detected!")
                 return
             }
 
-            try callManagerB?.receivedOffer(call: call, sourceDevice: sourceDevice, callId: callIdAtoBOverride, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: localDevice, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+            try callManagerB?.receivedOffer(call: callB, sourceDevice: sourceDevice, callId: callIdAtoBOverride, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: localDevice, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
         } catch {
             XCTFail("Call Manager receivedOffer() failed: \(error)")
             return
@@ -1944,14 +1930,18 @@ class SignalRingRTCTests: XCTestCase {
         delegateB.expectedValue = 11111
         let bAddress: Int32 = 777777
 
+        let callA = OpaqueCallData(value: delegateA.expectedValue, remote: bAddress)
+        let callB = OpaqueCallData(value: delegateB.expectedValue, remote: aAddress)
+
         // Setup the automatic ICE flow for the call.
-        delegateA.callManagerICE = [(callManagerB!, delegateB, 1)]
-        delegateB.callManagerICE = [(callManagerA!, delegateA, 1)]
+        delegateA.callManagerICE = [(callManagerB!, delegateB, 1, call: callB)]
         delegateA.doAutomaticICE = true
+
+        delegateB.callManagerICE = [(callManagerA!, delegateA, 1, call: callA)]
         delegateB.doAutomaticICE = true
 
         // For now, these variables will be common to both Call Managers.
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
         let localDevice: UInt32 = 1
         let sourceDevice: UInt32 = 1
@@ -1960,7 +1950,6 @@ class SignalRingRTCTests: XCTestCase {
 
         // Get A and B into a call.
         do {
-            let callA = OpaqueCallData(value: delegateA.expectedValue, remote: bAddress)
             try callManagerA?.placeCall(call: callA, callMediaType: .audioCall, localDevice: localDevice)
             expect(delegateA.startOutgoingCallInvoked).toEventually(equal(true))
             delegateA.startOutgoingCallInvoked = false
@@ -1969,8 +1958,6 @@ class SignalRingRTCTests: XCTestCase {
             _ = try callManagerA?.proceed(callId: callIdAtoB, iceServers: iceServers, hideIp: useTurnOnly, videoCaptureController: videoCaptureController, dataMode: .normal, audioLevelsIntervalMillis: nil)
             expect(delegateA.shouldSendOfferInvoked).toEventually(equal(true))
             delegateA.shouldSendOfferInvoked = false
-
-            let callB = OpaqueCallData(value: delegateB.expectedValue, remote: aAddress)
 
             guard let opaque = delegateA.sentOfferOpaque else {
                 XCTFail("No sentOfferOpaque detected!")
@@ -1991,7 +1978,7 @@ class SignalRingRTCTests: XCTestCase {
                 return
             }
 
-            try callManagerA?.receivedAnswer(sourceDevice: sourceDevice, callId: callIdAtoB, opaque: opaqueAnswer, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
+            try callManagerA?.receivedAnswer(call: callA, sourceDevice: sourceDevice, callId: callIdAtoB, opaque: opaqueAnswer, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
 
             expect(delegateA.shouldSendIceCandidatesInvoked).toEventually(equal(true))
             delegateA.canSendICE = true
@@ -2083,7 +2070,7 @@ class SignalRingRTCTests: XCTestCase {
                 return
             }
 
-            try callManagerB?.receivedAnswer(sourceDevice: sourceDevice, callId: callIdB2toA, opaque: opaqueAnswer2, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
+            try callManagerB?.receivedAnswer(call: callB, sourceDevice: sourceDevice, callId: callIdB2toA, opaque: opaqueAnswer2, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
 
             expect(delegateB.shouldSendIceCandidatesInvoked).toEventually(equal(true))
             delegateB.canSendICE = true
@@ -2155,19 +2142,21 @@ class SignalRingRTCTests: XCTestCase {
         let videoCaptureController = VideoCaptureController()
 
         // Build the callee structures, the Call Manager and delegate for each.
-        var calleeDevices: [(callManager: CallManager<OpaqueCallData, TestDelegate>, delegate: TestDelegate, deviceId: UInt32)] = []
+        var calleeDevices: [(callManager: CallManager<OpaqueCallData, TestDelegate>, delegate: TestDelegate, deviceId: UInt32, call: OpaqueCallData)] = []
         for i in 1...calleeDeviceCount {
             let delegate = TestDelegate()
             let callManager = createCallManager(delegate)!
             delegate.expectedValue = Int32(i * 11111)
 
+            let call = OpaqueCallData(value: delegate.expectedValue, remote: callerAddress)
+
             // Setup automatic ICE for the callee.
-            delegate.callManagerICE = [(callManagerCaller!, delegateCaller, callerDevice)]
+            delegate.callManagerICE = [(callManagerCaller!, delegateCaller, callerDevice, call: call)]
             delegate.doAutomaticICE = true
             delegate.canSendICE = true // A callee is safe to send Ice whenever needed.
             delegate.localDevice = UInt32(i)
 
-            calleeDevices.append((callManager: callManager, delegate: delegate, deviceId: UInt32(i)))
+            calleeDevices.append((callManager: callManager, delegate: delegate, deviceId: UInt32(i), call: call))
         }
         let calleeAddress: Int32 = 777777
 
@@ -2177,7 +2166,7 @@ class SignalRingRTCTests: XCTestCase {
         delegateCaller.localDevice = callerDevice
 
         // For now, these variables will be common to both Call Managers.
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
 
         // An extra Call Manager for some scenarios (such as busy).
@@ -2196,19 +2185,21 @@ class SignalRingRTCTests: XCTestCase {
             // In the Busy case, one callee must already be in a call. The first
             // callee will place the call to the extra to get in to a call.
 
+            let callBusyCallee = OpaqueCallData(value: busyCallee.delegate.expectedValue, remote: extraAddress)
+            let callExtra = OpaqueCallData(value: delegateExtra.expectedValue, remote: busyCallee.call.remote)
+
             // Setup ICE for the busy callee, it won't be automatic.
-            busyCallee.delegate.callManagerICE = [(callManagerExtra!, delegateExtra, extraDevice)]
+            busyCallee.delegate.callManagerICE = [(callManagerExtra!, delegateExtra, extraDevice, call: callExtra)]
             busyCallee.delegate.canSendICE = false
 
             // Setup automatic ICE for the extra.
-            delegateExtra.callManagerICE = [(busyCallee.callManager, busyCallee.delegate, busyCallee.deviceId)]
+            delegateExtra.callManagerICE = [(busyCallee.callManager, busyCallee.delegate, busyCallee.deviceId, call: callBusyCallee)]
             delegateExtra.doAutomaticICE = true
             delegateExtra.canSendICE = true // A callee is safe to send Ice whenever needed.
             delegateExtra.localDevice = extraDevice
 
             do {
-                let call = OpaqueCallData(value: busyCallee.delegate.expectedValue, remote: extraAddress)
-                try busyCallee.callManager.placeCall(call: call, callMediaType: .audioCall, localDevice: busyCallee.deviceId)
+                try busyCallee.callManager.placeCall(call: callBusyCallee, callMediaType: .audioCall, localDevice: busyCallee.deviceId)
                 expect(busyCallee.delegate.startOutgoingCallInvoked).toEventually(equal(true))
                 busyCallee.delegate.startOutgoingCallInvoked = false
 
@@ -2216,8 +2207,6 @@ class SignalRingRTCTests: XCTestCase {
                 _ = try busyCallee.callManager.proceed(callId: callId, iceServers: iceServers, hideIp: useTurnOnly, videoCaptureController: videoCaptureController, dataMode: .normal, audioLevelsIntervalMillis: nil)
                 expect(busyCallee.delegate.shouldSendOfferInvoked).toEventually(equal(true))
                 busyCallee.delegate.shouldSendOfferInvoked = false
-
-                let callExtra = OpaqueCallData(value: delegateExtra.expectedValue, remote: calleeAddress)
 
                 guard let opaqueOffer = busyCallee.delegate.sentOfferOpaque else {
                     XCTFail("No sentOfferOpaque detected!")
@@ -2244,7 +2233,7 @@ class SignalRingRTCTests: XCTestCase {
                     return
                 }
 
-                try busyCallee.callManager.receivedAnswer(sourceDevice: extraDevice, callId: callId, opaque: opaqueAnswer, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+                try busyCallee.callManager.receivedAnswer(call: callBusyCallee, sourceDevice: extraDevice, callId: callId, opaque: opaqueAnswer, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
 
                 expect(delegateExtra.shouldSendIceCandidatesInvoked).toEventually(equal(true))
 
@@ -2277,15 +2266,12 @@ class SignalRingRTCTests: XCTestCase {
             delegateCaller.canSendICE = false
             delegateCaller.sentIceCandidates = []
 
+            // Define some CallData for simulation.
+            let callCaller = OpaqueCallData(value: delegateCaller.expectedValue, remote: calleeAddress)
+
             do {
                 Logger.debug("Test: Invoking call()...")
-
-                // Define some CallData for simulation. This is defined in a block
-                // so that we validate that it is retained correctly and accessible
-                // outside this block.
-                let call = OpaqueCallData(value: delegateCaller.expectedValue, remote: calleeAddress)
-
-                try callManagerCaller?.placeCall(call: call, callMediaType: .audioCall, localDevice: callerDevice)
+                try callManagerCaller?.placeCall(call: callCaller, callMediaType: .audioCall, localDevice: callerDevice)
             } catch {
                 XCTFail("Call Manager call() failed: \(error)")
                 return
@@ -2326,7 +2312,7 @@ class SignalRingRTCTests: XCTestCase {
 
                     // @note We are specifying multiple devices as primary, but it shouldn't
                     // matter for this type of testing.
-                    try element.callManager.receivedOffer(call: call, sourceDevice: callerDevice, callId: callId, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: element.deviceId, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
+                    try element.callManager.receivedOffer(call: element.call, sourceDevice: callerDevice, callId: callId, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: element.deviceId, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
                 }
             } catch {
                 XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -2335,7 +2321,7 @@ class SignalRingRTCTests: XCTestCase {
 
             // We've given the offer to each callee device, let's let ICE flow from caller as well.
             // @note Some ICE may flow starting now.
-            Logger.debug("Starting ICE flow for caller...")
+            Logger.debug("Test: Starting ICE flow for caller...")
             delegateCaller.canSendICE = true
             delegateCaller.tryToSendIceCandidates(callId: callId, destinationDeviceId: nil, candidates: [])
 
@@ -2376,7 +2362,7 @@ class SignalRingRTCTests: XCTestCase {
                             expect(element.delegate.recentBusyCallId).to(equal(callId))
 
                             Logger.debug("Test: Invoking receivedBusy()...")
-                            try callManagerCaller?.receivedBusy(sourceDevice: element.deviceId, callId: callId)
+                            try callManagerCaller?.receivedBusy(call: callCaller, sourceDevice: element.deviceId, callId: callId)
 
                             continue
                         }
@@ -2393,7 +2379,7 @@ class SignalRingRTCTests: XCTestCase {
                     }
 
                     Logger.debug("Test: Invoking receivedAnswer()...")
-                    try callManagerCaller?.receivedAnswer(sourceDevice: element.deviceId, callId: callId, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+                    try callManagerCaller?.receivedAnswer(call: callCaller, sourceDevice: element.deviceId, callId: callId, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
                 }
             } catch {
                 XCTFail("Call Manager receivedAnswer() failed: \(error)")
@@ -2431,7 +2417,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Now make sure all the callees get hungup.
                 for element in calleeDevices {
                     do {
-                        try element.callManager.receivedHangup(sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .normal, deviceId: 0)
+                        try element.callManager.receivedHangup(call: element.call, sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .normal, deviceId: 0)
                     } catch {
                         XCTFail("Call Manager receivedHangup(caller) failed: \(error)")
                         return
@@ -2461,7 +2447,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Give the hangup to the caller.
                 do {
                     Logger.debug("Test: Invoking hangup(caller)...")
-                    _ = try callManagerCaller?.receivedHangup(sourceDevice: decliningCallee.deviceId, callId: callId, hangupType: .normal, deviceId: 0)
+                    _ = try callManagerCaller?.receivedHangup(call: callCaller, sourceDevice: decliningCallee.deviceId, callId: callId, hangupType: .normal, deviceId: 0)
                 } catch {
                     XCTFail("Call Manager hangup(caller) failed: \(error)")
                     return
@@ -2474,7 +2460,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Now make sure all the callees get proper hangup indication.
                 for element in calleeDevices {
                     do {
-                        try element.callManager.receivedHangup(sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .declined, deviceId: delegateCaller.hangupDeviceId ?? 0)
+                        try element.callManager.receivedHangup(call: element.call, sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .declined, deviceId: delegateCaller.hangupDeviceId ?? 0)
                     } catch {
                         XCTFail("Call Manager receivedHangup(caller) failed: \(error)")
                         return
@@ -2505,7 +2491,7 @@ class SignalRingRTCTests: XCTestCase {
                     // Give each callee the hangup/busy.
                     for element in calleeDevices {
                         Logger.debug("Test: Invoking receivedHangup()...")
-                        _ = try element.callManager.receivedHangup(sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .busy, deviceId: delegateCaller.hangupDeviceId ?? 0)
+                        _ = try element.callManager.receivedHangup(call: element.call, sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .busy, deviceId: delegateCaller.hangupDeviceId ?? 0)
                     }
                 } catch {
                     XCTFail("Call Manager receivedHangup() failed: \(error)")
@@ -2557,7 +2543,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Now make sure all the callees get proper hangup indication.
                 for element in calleeDevices {
                     do {
-                        try element.callManager.receivedHangup(sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .accepted, deviceId: delegateCaller.hangupDeviceId ?? 0)
+                        try element.callManager.receivedHangup(call: element.call, sourceDevice: delegateCaller.localDevice, callId: callId, hangupType: .accepted, deviceId: delegateCaller.hangupDeviceId ?? 0)
                     } catch {
                         XCTFail("Call Manager receivedHangup(caller) failed: \(error)")
                         return
@@ -2587,7 +2573,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Give the hangup to the callee.
                 do {
                     Logger.debug("Test: Invoking hangup(callee)...")
-                    _ = try acceptingCallee.callManager.receivedHangup(sourceDevice: callerDevice, callId: callId, hangupType: .normal, deviceId: 0)
+                    _ = try acceptingCallee.callManager.receivedHangup(call: acceptingCallee.call, sourceDevice: callerDevice, callId: callId, hangupType: .normal, deviceId: 0)
                 } catch {
                     XCTFail("Call Manager hangup(callee) failed: \(error)")
                     return
@@ -2598,6 +2584,15 @@ class SignalRingRTCTests: XCTestCase {
 
                 // The other callees would get a hangup, but they are already
                 // hungup, so we won't simulate that now.
+            }
+
+            // Cleanup
+            do {
+                try callManagerCaller?.hangup()
+                try callManagerExtra?.hangup()
+            } catch {
+                XCTFail("Hangup() failed when cleaning up: \(error)")
+                return
             }
 
             delay(interval: 1.0)
@@ -2678,16 +2673,16 @@ class SignalRingRTCTests: XCTestCase {
         let b2Device: UInt32 = 2
 
         // For now, these variables will be common to both Call Managers.
-        let iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+        let iceServers: [RTCIceServer] = []
         let useTurnOnly = false
 
         let videoCaptureController = VideoCaptureController()
 
         // A1 starts to call B.
+        let callA1 = OpaqueCallData(value: delegateA1.expectedValue, remote: bAddress)
         do {
             Logger.debug("Test: A1 calls B...")
-            let call = OpaqueCallData(value: delegateA1.expectedValue, remote: bAddress)
-            try callManagerA1?.placeCall(call: call, callMediaType: .audioCall, localDevice: a1Device)
+            try callManagerA1?.placeCall(call: callA1, callMediaType: .audioCall, localDevice: a1Device)
         } catch {
             XCTFail("Call Manager call() failed: \(error)")
             return
@@ -2712,10 +2707,10 @@ class SignalRingRTCTests: XCTestCase {
             // @note Not using A2 for this case.
 
             // B1 starts to call A.
+            let callB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
             do {
                 Logger.debug("Test:B calls A...")
-                let call = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
-                try callManagerB1?.placeCall(call: call, callMediaType: .audioCall, localDevice: b1Device)
+                try callManagerB1?.placeCall(call: callB1, callMediaType: .audioCall, localDevice: b1Device)
             } catch {
                 XCTFail("Call Manager call() failed: \(error)")
                 return
@@ -2766,17 +2761,16 @@ class SignalRingRTCTests: XCTestCase {
             }
 
             // Give the offer from A1 to B1 & B2.
+            let callA1toB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
+            let callA1toB2 = OpaqueCallData(value: delegateB2.expectedValue, remote: aAddress)
             do {
                 Logger.debug("Test: Invoking B*.receivedOffer(A1)...")
-                let callA1toB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
-
                 guard let opaque = delegateA1.sentOfferOpaque else {
                     XCTFail("No sentOfferOpaque detected!")
                     return
                 }
 
                 try callManagerB1?.receivedOffer(call: callA1toB1, sourceDevice: a1Device, callId: callIdA1toBOverride, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: b1Device, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
-                let callA1toB2 = OpaqueCallData(value: delegateB2.expectedValue, remote: aAddress)
                 try callManagerB2?.receivedOffer(call: callA1toB2, sourceDevice: a1Device, callId: callIdA1toBOverride, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: b2Device, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
             } catch {
                 XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -2786,14 +2780,12 @@ class SignalRingRTCTests: XCTestCase {
             // Give the offer from B1 to A1.
             do {
                 Logger.debug("Test: Invoking A1.receivedOffer(B1)...")
-                let call = OpaqueCallData(value: delegateA1.expectedValue, remote: bAddress)
-
                 guard let opaque = delegateB1.sentOfferOpaque else {
                     XCTFail("No sentOfferOpaque detected!")
                     return
                 }
 
-                try callManagerA1?.receivedOffer(call: call, sourceDevice: b1Device, callId: callIdB1toAOverride, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: a1Device, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+                try callManagerA1?.receivedOffer(call: callA1, sourceDevice: b1Device, callId: callIdB1toAOverride, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: a1Device, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
             } catch {
                 XCTFail("Call Manager receivedOffer() failed: \(error)")
                 return
@@ -2901,8 +2893,8 @@ class SignalRingRTCTests: XCTestCase {
 
                 do {
                     Logger.debug("Test: Invoking B*.receivedHangup(A1)...")
-                    try callManagerB1?.receivedHangup(sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
-                    try callManagerB2?.receivedHangup(sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
+                    try callManagerB1?.receivedHangup(call: callA1toB1, sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
+                    try callManagerB2?.receivedHangup(call: callA1toB2, sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
                 } catch {
                     XCTFail("Call Manager receivedHangup() failed: \(error)")
                     return
@@ -2917,7 +2909,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Deliver Hangup from B1 to A.
                 do {
                     Logger.debug("Test: Invoking A1.receivedHangup(B1)...")
-                    try callManagerA1?.receivedHangup(sourceDevice: b1Device, callId: callIdB1toAOverride, hangupType: .normal, deviceId: 0)
+                    try callManagerA1?.receivedHangup(call: callA1, sourceDevice: b1Device, callId: callIdB1toAOverride, hangupType: .normal, deviceId: 0)
                 } catch {
                     XCTFail("Call Manager receivedHangup() failed: \(error)")
                     return
@@ -2931,8 +2923,8 @@ class SignalRingRTCTests: XCTestCase {
 
                 do {
                     Logger.debug("Test: Invoking B*.receivedHangup(A1)...")
-                    try callManagerB1?.receivedHangup(sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
-                    try callManagerB2?.receivedHangup(sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
+                    try callManagerB1?.receivedHangup(call: callA1toB1, sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
+                    try callManagerB2?.receivedHangup(call: callA1toB2, sourceDevice: a1Device, callId: callIdA1toBOverride, hangupType: .normal, deviceId: 0)
                 } catch {
                     XCTFail("Call Manager receivedHangup() failed: \(error)")
                     return
@@ -2947,8 +2939,8 @@ class SignalRingRTCTests: XCTestCase {
                 // Deliver Busy from A1 to B.
                 do {
                     Logger.debug("Test: Invoking B*.receivedBusy(A1)...")
-                    try callManagerB1?.receivedBusy(sourceDevice: a1Device, callId: callIdB1toA)
-                    try callManagerB2?.receivedBusy(sourceDevice: a1Device, callId: callIdB1toA)
+                    try callManagerB1?.receivedBusy(call: callA1toB1, sourceDevice: a1Device, callId: callIdB1toA)
+                    try callManagerB2?.receivedBusy(call: callA1toB2, sourceDevice: a1Device, callId: callIdB1toA)
                 } catch {
                     XCTFail("Call Manager receivedBusy() failed: \(error)")
                     return
@@ -2957,7 +2949,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Deliver Hangup from B1 to A.
                 do {
                     Logger.debug("Test: Invoking A1.receivedHangup(B1)...")
-                    try callManagerA1?.receivedHangup(sourceDevice: b1Device, callId: callIdB1toAOverride, hangupType: .normal, deviceId: 0)
+                    try callManagerA1?.receivedHangup(call: callA1, sourceDevice: b1Device, callId: callIdB1toAOverride, hangupType: .normal, deviceId: 0)
                 } catch {
                     XCTFail("Call Manager receivedHangup() failed: \(error)")
                     return
@@ -2966,7 +2958,7 @@ class SignalRingRTCTests: XCTestCase {
                 // Deliver Busy from B1 to A.
                 do {
                     Logger.debug("Test: Invoking A*.receivedBusy(B1)...")
-                    try callManagerA1?.receivedBusy(sourceDevice: a1Device, callId: callIdA1toB)
+                    try callManagerA1?.receivedBusy(call: callA1, sourceDevice: a1Device, callId: callIdA1toB)
                 } catch {
                     XCTFail("Call Manager receivedBusy() failed: \(error)")
                     return
@@ -2985,17 +2977,16 @@ class SignalRingRTCTests: XCTestCase {
             // Get A1 and B1 in to a call.
 
             // Give the offer from A1 to B1 & B2.
+            let callA1toB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
+            let callA1toB2 = OpaqueCallData(value: delegateB2.expectedValue, remote: aAddress)
             do {
                 Logger.debug("Test: Invoking B*.receivedOffer(A1)...")
-                let callA1toB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
-
                 guard let opaque = delegateA1.sentOfferOpaque else {
                     XCTFail("No sentOfferOpaque detected!")
                     return
                 }
 
                 try callManagerB1?.receivedOffer(call: callA1toB1, sourceDevice: a1Device, callId: callIdA1toB, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: b1Device, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
-                let callA1toB2 = OpaqueCallData(value: delegateB2.expectedValue, remote: aAddress)
                 try callManagerB2?.receivedOffer(call: callA1toB2, sourceDevice: a1Device, callId: callIdA1toB, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: b2Device, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
             } catch {
                 XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -3037,9 +3028,9 @@ class SignalRingRTCTests: XCTestCase {
                     return
                 }
 
-                try callManagerA1?.receivedAnswer(sourceDevice: b1Device, callId: callIdA1toB, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
-                try callManagerB1?.receivedIceCandidates(sourceDevice: a1Device, callId: callIdA1toB, candidates: delegateA1.sentIceCandidates)
-                try callManagerA1?.receivedIceCandidates(sourceDevice: b1Device, callId: callIdA1toB, candidates: delegateB1.sentIceCandidates)
+                try callManagerA1?.receivedAnswer(call: callA1, sourceDevice: b1Device, callId: callIdA1toB, opaque: opaque, senderIdentityKey: dummyLocalIdentityKey, receiverIdentityKey: dummyRemoteIdentityKey)
+                try callManagerB1?.receivedIceCandidates(call: callA1toB1, sourceDevice: a1Device, callId: callIdA1toB, candidates: delegateA1.sentIceCandidates)
+                try callManagerA1?.receivedIceCandidates(call: callA1, sourceDevice: b1Device, callId: callIdA1toB, candidates: delegateB1.sentIceCandidates)
             } catch {
                 XCTFail("Call Manager received*() failed: \(error)")
                 return
@@ -3073,8 +3064,8 @@ class SignalRingRTCTests: XCTestCase {
             // Send hangup/Accepted to B1 and B2.
             do {
                 Logger.debug("Test: Invoking receivedHangup()...")
-                try callManagerB1?.receivedHangup(sourceDevice: a1Device, callId: callIdA1toB, hangupType: .accepted, deviceId: delegateA1.hangupDeviceId ?? 0)
-                try callManagerB2?.receivedHangup(sourceDevice: a1Device, callId: callIdA1toB, hangupType: .accepted, deviceId: delegateA1.hangupDeviceId ?? 0)
+                try callManagerB1?.receivedHangup(call: callA1toB1, sourceDevice: a1Device, callId: callIdA1toB, hangupType: .accepted, deviceId: delegateA1.hangupDeviceId ?? 0)
+                try callManagerB2?.receivedHangup(call: callA1toB2, sourceDevice: a1Device, callId: callIdA1toB, hangupType: .accepted, deviceId: delegateA1.hangupDeviceId ?? 0)
             } catch {
                 XCTFail("Call Manager accept() failed: \(error)")
                 return
@@ -3092,10 +3083,11 @@ class SignalRingRTCTests: XCTestCase {
             // Clear any state.
             delegateB2.sentIceCandidates = []
 
+            let callA2 = OpaqueCallData(value: delegateA2.expectedValue, remote: bAddress)
+
             do {
                 Logger.debug("Test: A2 calls B...")
-                let call = OpaqueCallData(value: delegateA2.expectedValue, remote: bAddress)
-                try callManagerA2?.placeCall(call: call, callMediaType: .audioCall, localDevice: a2Device)
+                try callManagerA2?.placeCall(call: callA2, callMediaType: .audioCall, localDevice: a2Device)
             } catch {
                 XCTFail("Call Manager call() failed: \(error)")
                 return
@@ -3117,17 +3109,16 @@ class SignalRingRTCTests: XCTestCase {
             delegateA2.shouldSendOfferInvoked = false
 
             // Give the offer from A2 to B1 & B2.
+            let callA2toB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
+            let callA2toB2 = OpaqueCallData(value: delegateB2.expectedValue, remote: aAddress)
             do {
                 Logger.debug("Test: Invoking B*.receivedOffer(A2)...")
-                let callA2toB1 = OpaqueCallData(value: delegateB1.expectedValue, remote: aAddress)
-
                 guard let opaque = delegateA2.sentOfferOpaque else {
                     XCTFail("No sentOfferOpaque detected!")
                     return
                 }
 
                 try callManagerB1?.receivedOffer(call: callA2toB1, sourceDevice: a2Device, callId: callIdA2toB, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: b1Device, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
-                let callA2toB2 = OpaqueCallData(value: delegateB2.expectedValue, remote: aAddress)
                 try callManagerB2?.receivedOffer(call: callA2toB2, sourceDevice: a2Device, callId: callIdA2toB, opaque: opaque, messageAgeSec: 0, callMediaType: .audioCall, localDevice: b2Device, senderIdentityKey: dummyRemoteIdentityKey, receiverIdentityKey: dummyLocalIdentityKey)
             } catch {
                 XCTFail("Call Manager receivedOffer() failed: \(error)")
@@ -3168,8 +3159,8 @@ class SignalRingRTCTests: XCTestCase {
             // Give the busy from B1 back to A.
             do {
                 Logger.debug("Test: Invoking A*.receivedBusy(B1)...")
-                try callManagerA1?.receivedBusy(sourceDevice: b1Device, callId: callIdA2toB)
-                try callManagerA2?.receivedBusy(sourceDevice: b1Device, callId: callIdA2toB)
+                try callManagerA1?.receivedBusy(call: callA1, sourceDevice: b1Device, callId: callIdA2toB)
+                try callManagerA2?.receivedBusy(call: callA2, sourceDevice: b1Device, callId: callIdA2toB)
             } catch {
                 XCTFail("Call Manager receivedBusy() failed: \(error)")
                 return
