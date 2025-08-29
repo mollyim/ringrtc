@@ -39,16 +39,18 @@ jobs:
           -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
           ringrtc-builder --release-build
 
-    - name: Publish to GitHub Packages
+    - name: Publish to Cloudsmith
       if: "github.ref_type == 'tag'"
       run: |
         docker run \
           -v ringrtc:/ringrtc \
           -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
-          -e GITHUB_TOKEN \
+          -e CLOUDSMITH_USER \
+          -e CLOUDSMITH_API_KEY \
           ringrtc-builder --release-build --publish
       env:
-        GITHUB_TOKEN: ${{ secrets.PUBLISH_PAT }}
+        CLOUDSMITH_USER: ${{ secrets.CLOUDSMITH_USER }}
+        CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
 
     - name: Clean up Docker
       if: always()

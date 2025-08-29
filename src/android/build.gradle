@@ -112,11 +112,11 @@ afterEvaluate {
         repositories {
             mavenLocal()
             maven {
-                name = 'GitHubPackages'
-                url = uri('https://maven.pkg.github.com/mollyim/ringrtc')
+                name = 'Cloudsmith'
+                url = uri('https://maven.cloudsmith.io/mollyim/ringrtc-staging/')
                 credentials {
-                    username = System.getenv("GITHUB_ACTOR")
-                    password = System.getenv("GITHUB_TOKEN")
+                    username = System.getenv('CLOUDSMITH_USER')
+                    password = System.getenv('CLOUDSMITH_API_KEY')
                 }
             }
         }
@@ -131,7 +131,7 @@ afterEvaluate {
     }
 
     tasks.register('uploadArchives') {
-        dependsOn publishMavenJavaPublicationToGitHubPackagesRepository
+        dependsOn publishMavenJavaPublicationToCloudsmithRepository
     }
 }
 
