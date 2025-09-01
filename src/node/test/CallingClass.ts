@@ -164,7 +164,7 @@ export class CallingClass {
 
   private handleSendCallMessageToGroup(
     groupIdBytes: Uint8Array,
-    data: Buffer,
+    data: Uint8Array,
     urgency: CallMessageUrgency
   ): void {
     log('handleSendCallMessageToGroup');
@@ -173,7 +173,7 @@ export class CallingClass {
   private handleGroupCallRingUpdate(
     groupIdBytes: Uint8Array,
     ringId: bigint,
-    ringerBytes: Buffer,
+    ringerBytes: Uint8Array,
     update: RingUpdate
   ): void {
     log('handleGroupCallRingUpdate');

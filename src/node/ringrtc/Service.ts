@@ -168,7 +168,7 @@ class NativeCallManager {
   Native.cm_setRtcStatsInterval;
 
 type GroupId = Uint8Array;
-type GroupCallUserId = Buffer;
+type GroupCallUserId = Uint8Array;
 
 export interface PeekDeviceInfo {
   demuxId: number;
@@ -414,14 +414,14 @@ export class RingRTCType {
         url: string,
         method: HttpMethod,
         headers: { [name: string]: string },
-        body: Buffer | undefined
+        body: Uint8Array | undefined
       ) => void)
     | null = null;
 
   handleSendCallMessage:
     | ((
-        recipientUuid: Buffer,
-        message: Buffer,
+        recipientUuid: Uint8Array,
+        message: Uint8Array,
         urgency: CallMessageUrgency
       ) => void)
     | null = null;
@@ -429,9 +429,9 @@ export class RingRTCType {
   handleSendCallMessageToGroup:
     | ((
         groupId: GroupId,
-        message: Buffer,
+        message: Uint8Array,
         urgency: CallMessageUrgency,
-        overrideRecipients: Array<Buffer>
+        overrideRecipients: Array<Uint8Array>
       ) => void)
     | null = null;
 
@@ -439,7 +439,7 @@ export class RingRTCType {
     | ((
         groupId: GroupId,
         ringId: bigint,
-        sender: Buffer,
+        sender: GroupCallUserId,
         update: RingUpdate
       ) => void)
     | null = null;
@@ -461,7 +461,7 @@ export class RingRTCType {
   }
 
   // Called by UX
-  setSelfUuid(uuid: Buffer): void {
+  setSelfUuid(uuid: Uint8Array): void {
     this.callManager.setSelfUuid(uuid);
   }
 
@@ -794,7 +794,7 @@ export class RingRTCType {
     callId: CallId,
     broadcast: boolean,
     offerType: OfferType,
-    opaque: Buffer
+    opaque: Uint8Array
   ): void {
     const message = new CallingMessage();
     message.offer = new OfferMessage(callId, offerType, opaque);
@@ -813,7 +813,7 @@ export class RingRTCType {
     remoteDeviceId: DeviceId,
     callId: CallId,
     broadcast: boolean,
-    opaque: Buffer
+    opaque: Uint8Array
   ): void {
     const message = new CallingMessage();
     message.answer = new AnswerMessage(callId, opaque);
@@ -832,7 +832,7 @@ export class RingRTCType {
     remoteDeviceId: DeviceId,
     callId: CallId,
     broadcast: boolean,
-    candidates: Array<Buffer>
+    candidates: Array<Uint8Array>
   ): void {
     const message = new CallingMessage();
     message.iceCandidates = [];
@@ -1132,7 +1132,11 @@ export class RingRTCType {
 
   // HTTP callbacks
 
-  receivedHttpResponse(requestId: number, status: number, body: Buffer): void {
+  receivedHttpResponse(
+    requestId: number,
+    status: number,
+    body: Uint8Array
+  ): void {
     sillyDeadlockProtection(() => {
       try {
         this.callManager.receivedHttpResponse(requestId, status, body);
@@ -1230,7 +1234,7 @@ export class RingRTCType {
   // Returns a list of user IDs
   peekGroupCall(
     sfuUrl: string,
-    membershipProof: Buffer,
+    membershipProof: Uint8Array,
     groupMembers: Array<GroupMemberInfo>
   ): Promise<PeekInfo> {
     const [requestId, promise] = this._peekRequests.add();
@@ -1614,7 +1618,7 @@ export class RingRTCType {
     message: CallingMessage,
     options: {
       remoteUserId: UserId;
-      remoteUuid?: Buffer;
+      remoteUuid?: Uint8Array;
       remoteDeviceId: DeviceId;
       localDeviceId: DeviceId;
       ageSec: number;
@@ -1634,7 +1638,7 @@ export class RingRTCType {
 
     if (message.offer?.callId) {
       const callId = message.offer.callId;
-      const opaque = toBuffer(message.offer.opaque);
+      const opaque = toUint8Array(message.offer.opaque);
 
       // opaque is required. sdp is obsolete, but it might still come with opaque.
       if (!opaque) {
@@ -1669,7 +1673,7 @@ export class RingRTCType {
     }
     if (message.answer?.callId) {
       const callId = message.answer.callId;
-      const opaque = toBuffer(message.answer.opaque);
+      const opaque = toUint8Array(message.answer.opaque);
 
       // opaque is required. sdp is obsolete, but it might still come with opaque.
       if (!opaque) {
@@ -1693,9 +1697,9 @@ export class RingRTCType {
       // We assume they all have the same .callId
       const callId = message.iceCandidates[0].callId;
       // We have to copy them to do the .toArrayBuffer() thing.
-      const candidates: Array<Buffer> = [];
+      const candidates: Array<Uint8Array> = [];
       for (const candidate of message.iceCandidates) {
-        const copy = toBuffer(candidate.opaque);
+        const copy = toUint8Array(candidate.opaque);
         if (copy) {
           candidates.push(copy);
         } else {
@@ -1753,7 +1757,7 @@ export class RingRTCType {
         );
         return;
       }
-      const data = toBuffer(message.opaque.data);
+      const data = toUint8Array(message.opaque.data);
       if (data == undefined) {
         this.logError(
           'handleCallingMessage(): opaque message received without data!'
@@ -1776,7 +1780,7 @@ export class RingRTCType {
     url: string,
     method: HttpMethod,
     headers: { [name: string]: string },
-    body: Buffer | undefined
+    body: Uint8Array | undefined
   ): void {
     if (this.handleSendHttpRequest) {
       this.handleSendHttpRequest(requestId, url, method, headers, body);
@@ -1787,8 +1791,8 @@ export class RingRTCType {
 
   // Called by Rust
   sendCallMessage(
-    recipientUuid: Buffer,
-    message: Buffer,
+    recipientUuid: Uint8Array,
+    message: Uint8Array,
     urgency: CallMessageUrgency
   ): void {
     if (this.handleSendCallMessage) {
@@ -1801,9 +1805,9 @@ export class RingRTCType {
   // Called by Rust
   sendCallMessageToGroup(
     groupId: GroupId,
-    message: Buffer,
+    message: Uint8Array,
     urgency: CallMessageUrgency,
-    overrideRecipients: Array<Buffer>
+    overrideRecipients: Array<Uint8Array>
   ): void {
     if (this.handleSendCallMessageToGroup) {
       this.handleSendCallMessageToGroup(
@@ -2330,7 +2334,7 @@ export class LocalDeviceState {
 // All remote devices in a group call and their associated state.
 export class RemoteDeviceState {
   demuxId: number; // UInt32
-  userId: Buffer;
+  userId: Uint8Array;
   mediaKeysReceived: boolean;
   audioMuted: boolean | undefined;
   videoMuted: boolean | undefined;
@@ -2345,7 +2349,7 @@ export class RemoteDeviceState {
 
   constructor(
     demuxId: number,
-    userId: Buffer,
+    userId: Uint8Array,
     addedTime: string,
     speakerTime: string,
     mediaKeysReceived: boolean
@@ -2362,10 +2366,10 @@ export class RemoteDeviceState {
 
 // Used to communicate the group membership to RingRTC for a group call.
 export class GroupMemberInfo {
-  userId: Buffer;
-  userIdCipherText: Buffer;
+  userId: Uint8Array;
+  userIdCipherText: Uint8Array;
 
-  constructor(userId: Buffer, userIdCipherText: Buffer) {
+  constructor(userId: Uint8Array, userIdCipherText: Uint8Array) {
     this.userId = userId;
     this.userIdCipherText = userIdCipherText;
   }
@@ -2578,12 +2582,12 @@ export class GroupCall {
   }
 
   // Called by UI
-  approveUser(otherUserId: Buffer): void {
+  approveUser(otherUserId: Uint8Array): void {
     this._callManager.approveUser(this._clientId, otherUserId);
   }
 
   // Called by UI
-  denyUser(otherUserId: Buffer): void {
+  denyUser(otherUserId: Uint8Array): void {
     this._callManager.denyUser(this._clientId, otherUserId);
   }
 
@@ -2603,7 +2607,7 @@ export class GroupCall {
   }
 
   // Called by UI
-  setMembershipProof(proof: Buffer): void {
+  setMembershipProof(proof: Uint8Array): void {
     this._callManager.setMembershipProof(this._clientId, proof);
   }
 
@@ -2790,18 +2794,20 @@ class GroupCallVideoFrameSource {
   }
 }
 
-// When sending, we just set an Buffer.
+// When sending, we just set a Uint8Array.
 // When receiving, we call .toArrayBuffer().
-type ProtobufBuffer = Buffer | { toArrayBuffer: () => ArrayBuffer };
+type ProtobufBuffer = Uint8Array | { toArrayBuffer: () => ArrayBuffer };
 
-function toBuffer(pbab: ProtobufBuffer | undefined): Buffer | undefined {
+function toUint8Array(
+  pbab: ProtobufBuffer | undefined
+): Uint8Array | undefined {
   if (!pbab) {
     return pbab;
   }
-  if (pbab instanceof Buffer) {
+  if (pbab instanceof Uint8Array) {
     return pbab;
   }
-  return Buffer.from(pbab.toArrayBuffer());
+  return new Uint8Array(pbab.toArrayBuffer());
 }
 
 export type UserId = string;
@@ -2911,7 +2917,7 @@ export enum RingCancelReason {
 
 export interface CallManager {
   setConfig(config: Config): void;
-  setSelfUuid(uuid: Buffer): void;
+  setSelfUuid(uuid: Uint8Array): void;
   createOutgoingCall(
     remoteUserId: UserId,
     isVideoCall: boolean,
@@ -2956,7 +2962,7 @@ export interface CallManager {
     messageAgeSec: number,
     callId: CallId,
     offerType: OfferType,
-    opaque: Buffer,
+    opaque: Uint8Array,
     senderIdentityKey: Uint8Array,
     receiverIdentityKey: Uint8Array
   ): void;
@@ -2964,7 +2970,7 @@ export interface CallManager {
     remoteUserId: UserId,
     remoteDeviceId: DeviceId,
     callId: CallId,
-    opaque: Buffer,
+    opaque: Uint8Array,
     senderIdentityKey: Uint8Array,
     receiverIdentityKey: Uint8Array
   ): void;
@@ -2972,7 +2978,7 @@ export interface CallManager {
     remoteUserId: UserId,
     remoteDeviceId: DeviceId,
     callId: CallId,
-    candidates: Array<Buffer>
+    candidates: Array<Uint8Array>
   ): void;
   receivedHangup(
     remoteUserId: UserId,
@@ -2987,14 +2993,18 @@ export interface CallManager {
     callId: CallId
   ): void;
   receivedCallMessage(
-    remoteUserId: Buffer,
+    remoteUserId: Uint8Array,
     remoteDeviceId: DeviceId,
     localDeviceId: DeviceId,
-    data: Buffer,
+    data: Uint8Array,
     messageAgeSec: number
   ): void;
 
-  receivedHttpResponse(requestId: number, status: number, body: Buffer): void;
+  receivedHttpResponse(
+    requestId: number,
+    status: number,
+    body: Uint8Array
+  ): void;
   httpRequestFailed(requestId: number, debugInfo: string | undefined): void;
 
   // Group Calls
@@ -3032,7 +3042,10 @@ export interface CallManager {
     clientId: GroupCallClientId,
     isScreenShare: boolean
   ): void;
-  groupRing(clientId: GroupCallClientId, recipient: Buffer | undefined): void;
+  groupRing(
+    clientId: GroupCallClientId,
+    recipient: Uint8Array | undefined
+  ): void;
   groupReact(clientId: GroupCallClientId, value: string): void;
   groupRaiseHand(clientId: GroupCallClientId, raise: boolean): void;
   resendMediaKeys(clientId: GroupCallClientId): void;
@@ -3042,15 +3055,15 @@ export interface CallManager {
     resolutions: Array<VideoRequest>,
     activeSpeakerHeight: number
   ): void;
-  approveUser(clientId: GroupCallClientId, otherUserId: Buffer): void;
-  denyUser(clientId: GroupCallClientId, otherUserId: Buffer): void;
+  approveUser(clientId: GroupCallClientId, otherUserId: Uint8Array): void;
+  denyUser(clientId: GroupCallClientId, otherUserId: Uint8Array): void;
   removeClient(clientId: GroupCallClientId, otherClientDemuxId: number): void;
   blockClient(clientId: GroupCallClientId, otherClientDemuxId: number): void;
   setGroupMembers(
     clientId: GroupCallClientId,
     members: Array<GroupMemberInfo>
   ): void;
-  setMembershipProof(clientId: GroupCallClientId, proof: Buffer): void;
+  setMembershipProof(clientId: GroupCallClientId, proof: Uint8Array): void;
   // Same as receiveVideoFrame, but with a specific GroupCallClientId and remoteDemuxId.
   receiveGroupCallVideoFrame(
     clientId: GroupCallClientId,
@@ -3103,7 +3116,7 @@ export interface CallManager {
   peekGroupCall(
     requestId: number,
     sfu_url: string,
-    membership_proof: Buffer,
+    membership_proof: Uint8Array,
     group_members: Array<GroupMemberInfo>
   ): void;
   // Response comes back via handlePeekResponse
@@ -3144,21 +3157,21 @@ export interface CallManagerCallbacks {
     callId: CallId,
     broadcast: boolean,
     mediaType: number,
-    opaque: Buffer
+    opaque: Uint8Array
   ): void;
   onSendAnswer(
     remoteUserId: UserId,
     remoteDeviceId: DeviceId,
     callId: CallId,
     broadcast: boolean,
-    opaque: Buffer
+    opaque: Uint8Array
   ): void;
   onSendIceCandidates(
     remoteUserId: UserId,
     remoteDeviceId: DeviceId,
     callId: CallId,
     broadcast: boolean,
-    candidates: Array<Buffer>
+    candidates: Array<Uint8Array>
   ): void;
   onSendHangup(
     remoteUserId: UserId,
@@ -3175,22 +3188,22 @@ export interface CallManagerCallbacks {
     broadcast: boolean
   ): void;
   sendCallMessage(
-    recipientUuid: Buffer,
-    message: Buffer,
+    recipientUuid: Uint8Array,
+    message: Uint8Array,
     urgency: CallMessageUrgency
   ): void;
   sendCallMessageToGroup(
     groupId: GroupId,
-    message: Buffer,
+    message: Uint8Array,
     urgency: CallMessageUrgency,
-    overrideRecipients: Array<Buffer>
+    overrideRecipients: Array<Uint8Array>
   ): void;
   sendHttpRequest(
     requestId: number,
     url: string,
     method: HttpMethod,
     headers: { [name: string]: string },
-    body: Buffer | undefined
+    body: Uint8Array | undefined
   ): void;
 
   // Group Calls
