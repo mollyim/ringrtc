@@ -33,17 +33,16 @@ jobs:
       run: docker build -f Dockerfile.android -t ringrtc-builder .
 
     - name: Build library inside Docker
+      if: "github.ref_type != 'tag'"
       run: |
         docker run \
-          -v ringrtc:/ringrtc \
           -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
           ringrtc-builder --release-build
 
-    - name: Publish to Cloudsmith
+    - name: Build and publish to Cloudsmith
       if: "github.ref_type == 'tag'"
       run: |
         docker run \
-          -v ringrtc:/ringrtc \
           -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
           -e CLOUDSMITH_USER \
           -e CLOUDSMITH_API_KEY \
