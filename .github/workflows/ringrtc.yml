@@ -106,7 +106,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
       - run: bin/fetch-artifact -p android
       - run: bin/build-aar --release --ringrtc-only
         continue-on-error: true
