@@ -76,15 +76,18 @@ RUN SNAPSHOT_ID=$(git show -s --format=%cd --date=format:%Y%m%dT%H%M%SZ HEAD) &&
       pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+# Sync external dependencies
+RUN ./bin/prepare-workspace android
+
 # Create build script
 RUN cat <<'EOF' > build.sh
 #!/bin/sh
+set -eu
 export OVERRIDE_VERSION=$(git describe --tags)
-export TAR_OPTIONS="--no-same-owner"
-[ -s out/android.env ] || ./bin/prepare-workspace android
 ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "$@"
 EOF
 RUN chmod +x build.sh
 
 # Set entrypoint to the build script
 ENTRYPOINT ["/ringrtc/build.sh"]
+CMD ["--help"]
