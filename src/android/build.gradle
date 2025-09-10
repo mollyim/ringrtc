@@ -113,7 +113,7 @@ afterEvaluate {
             mavenLocal()
             maven {
                 name = 'Cloudsmith'
-                url = uri('https://maven.cloudsmith.io/mollyim/ringrtc-staging/')
+                url = uri('https://maven.cloudsmith.io/mollyim/ringrtc/')
                 credentials {
                     username = System.getenv('CLOUDSMITH_USER')
                     password = System.getenv('CLOUDSMITH_API_KEY')
