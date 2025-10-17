@@ -3,6 +3,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+// TODO(mutexlox): Remove these after 2024 upgrade
+#![warn(unsafe_attr_outside_unsafe)]
+#![warn(unsafe_op_in_unsafe_fn)]
+#![warn(missing_unsafe_on_extern)]
+#![warn(rust_2024_incompatible_pat)]
+#![warn(keyword_idents_2024)]
+
 mod audio;
 mod common;
 mod config;
@@ -140,7 +147,6 @@ async fn run_baseline(test: &mut Test) -> Result<()> {
             summary_report_columns: SummaryReportColumns {
                 show_visqol_mos_speech: true,
                 show_visqol_mos_audio: true,
-                show_visqol_mos_average: true,
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: false,
@@ -248,7 +254,6 @@ async fn run_deterministic_loss_test(test: &mut Test) -> Result<()> {
             summary_report_columns: SummaryReportColumns {
                 show_visqol_mos_speech: true,
                 show_visqol_mos_audio: true,
-                show_visqol_mos_average: true,
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: false,
@@ -545,7 +550,6 @@ async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
             summary_report_columns: SummaryReportColumns {
                 show_visqol_mos_speech: true,
                 show_visqol_mos_audio: true,
-                show_visqol_mos_average: true,
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: false,
@@ -598,7 +602,6 @@ async fn run_perf_test(test: &mut Test) -> Result<()> {
             summary_report_columns: SummaryReportColumns {
                 show_visqol_mos_speech: false,
                 show_visqol_mos_audio: false,
-                show_visqol_mos_average: false,
                 show_pesq_mos: false,
                 show_plc_mos: false,
                 show_video: false,

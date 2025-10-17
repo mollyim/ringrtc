@@ -1279,16 +1279,19 @@ impl Client {
                 debug!("group_call::Client(inner)::new(client_id: {})", client_id);
 
                 let peer_connection_factory = match peer_connection_factory {
-                    None => match PeerConnectionFactory::new(&pcf::AudioConfig::default(), false) {
-                        Ok(v) => v,
-                        Err(err) => {
-                            observer.handle_ended(
-                                client_id,
-                                EndReason::FailedToCreatePeerConnectionFactory,
-                            );
-                            return Err(err);
+                    None => {
+                        match PeerConnectionFactory::new(&pcf::AudioConfig::default(), false, None)
+                        {
+                            Ok(v) => v,
+                            Err(err) => {
+                                observer.handle_ended(
+                                    client_id,
+                                    EndReason::FailedToCreatePeerConnectionFactory,
+                                );
+                                return Err(err);
+                            }
                         }
-                    },
+                    }
                     Some(v) => v,
                 };
 
@@ -1319,14 +1322,6 @@ impl Client {
                         observer.handle_ended(client_id, EndReason::FailedToCreatePeerConnection);
                     })?;
                 let call_id_for_stats = CallId::from(client_id as u64);
-                info!(
-                    "ringrtc_stats!,\
-                        sfu,\
-                        recv,\
-                        target_send_rate,\
-                        ideal_send_rate,\
-                        allocated_send_rate"
-                );
                 Ok(State {
                     client_id,
                     group_id,
@@ -1866,6 +1861,16 @@ impl Client {
                 }
                 JoinState::NotJoined(ring_id) => {
                     if Self::take_busy(state) {
+                        info!(
+                            "ringrtc_stats!,\
+                                sfu,\
+                                recv,\
+                                target_send_rate,\
+                                ideal_send_rate,\
+                                allocated_send_rate"
+                        );
+                        StatsObserver::print_headers();
+
                         Self::set_join_state_and_notify_observer(state, JoinState::Joining);
                         Self::accept_ring_if_needed(state, ring_id);
 

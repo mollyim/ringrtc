@@ -6,22 +6,22 @@
 //! Utility functions for audio_device_module.rs
 //! Nothing in here should depend on webrtc directly.
 
-use std::ffi::{c_uchar, c_void, CString};
+use std::ffi::{c_uchar, CString};
 
 use anyhow::anyhow;
 use cubeb::{DeviceCollection, DeviceState};
-use cubeb_core::DevicePref;
 #[cfg(target_os = "linux")]
 use cubeb_core::DeviceType;
+use cubeb_core::{DeviceId, DevicePref};
 use regex::Regex;
 
-use crate::webrtc;
+use crate::{webrtc, webrtc::peer_connection_factory::AudioDevice};
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct MinimalDeviceInfo {
-    pub devid: *const c_void,
+    pub devid: DeviceId,
     pub device_id: Option<String>,
-    pub friendly_name: Option<String>,
+    pub friendly_name: String,
     #[cfg(target_os = "linux")]
     device_type: DeviceType,
     preferred: DevicePref,
@@ -35,7 +35,7 @@ pub struct MinimalDeviceInfo {
 ///
 /// Note that, in some cases, `devid` may be a pointer to state in the cubeb ctx,
 /// so in no event should this outlive the associated ctx.
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Default)]
 pub struct DeviceCollectionWrapper {
     device_collection: Vec<MinimalDeviceInfo>,
 }
@@ -53,15 +53,19 @@ impl DeviceCollectionWrapper {
     pub fn new(device_collection: &DeviceCollection<'_>) -> DeviceCollectionWrapper {
         let mut out = Vec::new();
         for device in device_collection.iter() {
-            out.push(MinimalDeviceInfo {
-                devid: device.devid(),
-                device_id: device.device_id().as_ref().map(|s| s.to_string()),
-                friendly_name: device.friendly_name().as_ref().map(|s| s.to_string()),
-                #[cfg(target_os = "linux")]
-                device_type: device.device_type(),
-                preferred: device.preferred(),
-                state: device.state(),
-            })
+            if let Some(friendly) = device.friendly_name() {
+                out.push(MinimalDeviceInfo {
+                    devid: device.devid(),
+                    device_id: device.device_id().as_ref().map(|s| s.to_string()),
+                    friendly_name: friendly.to_string(),
+                    #[cfg(target_os = "linux")]
+                    device_type: device.device_type(),
+                    preferred: device.preferred(),
+                    state: device.state(),
+                })
+            } else {
+                error!("Device {:?} has no friendly name", device.devid());
+            }
         }
         DeviceCollectionWrapper {
             device_collection: out,
@@ -168,6 +172,52 @@ impl DeviceCollectionWrapper {
             count + 1
         }
     }
+
+    /// Extract all names and IDs, **including repetitions** for the default device(s)!
+    pub fn extract_names(&self) -> Vec<Option<AudioDevice>> {
+        // On mac and windows, this is relatively simple -- we get the count and then get each reported
+        // device.
+        #[cfg(not(target_os = "windows"))]
+        let count = self.count();
+
+        // On Windows, it's different: count does not include the defaults.
+        #[cfg(target_os = "windows")]
+        let count = self.count() + 2;
+
+        let mut names = Vec::new();
+        for i in 0..count {
+            let info = if let Some(info) = self.get(i) {
+                info
+            } else {
+                warn!("Internal error enumerating devices {} vs {}", i, count);
+                names.push(None);
+                continue;
+            };
+            let mut name_copy = info.friendly_name.clone();
+            #[cfg(not(target_os = "windows"))]
+            if i == 0 {
+                name_copy = format!("default ({})", info.friendly_name);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if i == 0 {
+                    name_copy = format!("Default - {}", info.friendly_name);
+                } else if i == 1 {
+                    name_copy = format!("Communication - {}", info.friendly_name);
+                }
+            }
+            names.push(Some(AudioDevice {
+                // For devices missing unique_id, populate them with name + index
+                unique_id: info
+                    .device_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-{}", info.friendly_name, i)),
+                name: name_copy,
+                i18n_key: "".to_string(),
+            }));
+        }
+        names
+    }
 }
 
 /// Copy from |src| into |dest| at most |dest_size| - 1 bytes and write a nul terminator either after |src| or at the end of |dest_size|
@@ -241,6 +291,8 @@ pub fn redact_by_regex(re: &Regex, s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod audio_device_module_tests {
+    #[cfg(target_os = "linux")]
+    use cubeb_core::DeviceType;
     use lazy_static::lazy_static;
 
     use super::*;
@@ -368,5 +420,128 @@ mod audio_device_module_tests {
             ),
             Some("Found matching device for My S...: My O...".to_string())
         );
+    }
+
+    #[test]
+    fn extract_names_handles_normal() {
+        let devs = DeviceCollectionWrapper {
+            device_collection: vec![
+                MinimalDeviceInfo {
+                    devid: std::ptr::null(),
+                    device_id: Some("devid1".to_string()),
+                    friendly_name: "Device 1".to_string(),
+                    #[cfg(target_os = "linux")]
+                    device_type: DeviceType::INPUT,
+                    preferred: DevicePref::all(),
+                    state: DeviceState::Enabled,
+                },
+                MinimalDeviceInfo {
+                    devid: std::ptr::null(),
+                    device_id: Some("devid2".to_string()),
+                    friendly_name: "Device 2".to_string(),
+                    #[cfg(target_os = "linux")]
+                    device_type: DeviceType::INPUT,
+                    preferred: DevicePref::empty(),
+                    state: DeviceState::Enabled,
+                },
+            ],
+        };
+        let names = DeviceCollectionWrapper::extract_names(&devs);
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            names,
+            vec![
+                Some(AudioDevice {
+                    name: "default (Device 1)".to_string(),
+                    unique_id: "devid1".to_string(),
+                    i18n_key: "".to_string(),
+                }),
+                Some(AudioDevice {
+                    name: "Device 1".to_string(),
+                    unique_id: "devid1".to_string(),
+                    i18n_key: "".to_string(),
+                }),
+                Some(AudioDevice {
+                    name: "Device 2".to_string(),
+                    unique_id: "devid2".to_string(),
+                    i18n_key: "".to_string(),
+                })
+            ]
+        );
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            names,
+            vec![
+                Some(AudioDevice {
+                    name: "Default - Device 1".to_string(),
+                    unique_id: "devid1".to_string(),
+                    i18n_key: "".to_string(),
+                }),
+                Some(AudioDevice {
+                    name: "Communication - Device 1".to_string(),
+                    unique_id: "devid1".to_string(),
+                    i18n_key: "".to_string(),
+                }),
+                Some(AudioDevice {
+                    name: "Device 1".to_string(),
+                    unique_id: "devid1".to_string(),
+                    i18n_key: "".to_string(),
+                }),
+                Some(AudioDevice {
+                    name: "Device 2".to_string(),
+                    unique_id: "devid2".to_string(),
+                    i18n_key: "".to_string(),
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_names_handles_no_preferred_device() {
+        let devs = DeviceCollectionWrapper {
+            device_collection: vec![
+                MinimalDeviceInfo {
+                    devid: std::ptr::null(),
+                    device_id: Some("devid1".to_string()),
+                    friendly_name: "Device 1".to_string(),
+                    #[cfg(target_os = "linux")]
+                    device_type: DeviceType::INPUT,
+                    preferred: DevicePref::empty(),
+                    state: DeviceState::Enabled,
+                },
+                MinimalDeviceInfo {
+                    devid: std::ptr::null(),
+                    device_id: Some("devid2".to_string()),
+                    friendly_name: "Device 2".to_string(),
+                    #[cfg(target_os = "linux")]
+                    device_type: DeviceType::INPUT,
+                    preferred: DevicePref::empty(),
+                    state: DeviceState::Enabled,
+                },
+            ],
+        };
+        let names = DeviceCollectionWrapper::extract_names(&devs);
+
+        assert_eq!(
+            names,
+            vec![
+                None,
+                // Windows expects an extra communication device.
+                #[cfg(target_os = "windows")]
+                None,
+                Some(AudioDevice {
+                    name: "Device 1".to_string(),
+                    unique_id: "devid1".to_string(),
+                    i18n_key: "".to_string(),
+                }),
+                Some(AudioDevice {
+                    name: "Device 2".to_string(),
+                    unique_id: "devid2".to_string(),
+                    i18n_key: "".to_string(),
+                })
+            ]
+        )
     }
 }

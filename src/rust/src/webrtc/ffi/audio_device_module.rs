@@ -5,7 +5,10 @@
 
 //! WebRTC FFI ADM interface.
 
-use std::ffi::{c_uchar, c_void};
+use std::{
+    ffi::{c_uchar, c_void},
+    sync::{Arc, Mutex},
+};
 
 use libc::size_t;
 
@@ -15,7 +18,7 @@ use crate::{
 };
 
 /// Wrapper type for C++ AudioTransport.
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct RffiAudioTransport {
     pub callback: *const c_void,
 }
@@ -116,6 +119,7 @@ macro_rules! all_adm_functions {
 // Enum used to tag failures due to the adm pointer being null
 enum InternalFailure {
     NullPtr,
+    MutexPoison,
 }
 // Methods to convert rust-style errors into return types matching C/++ types
 impl From<InternalFailure> for i32 {
@@ -141,9 +145,16 @@ impl From<InternalFailure> for bool {
 macro_rules! adm_wrapper {
     () => {};
     ($f:ident($($param:ident: $arg_ty:ty),*) -> $ret:ty ; $($t:tt)*) => {
-        extern "C" fn $f(mut ptr: webrtc::ptr::Borrowed<AudioDeviceModule>, $($param: $arg_ty),*) -> $ret {
-            if let Some(adm) = unsafe { ptr.as_mut() } {
-                adm.$f($($param),*)
+        extern "C" fn $f(mut ptr: webrtc::ptr::Borrowed<Mutex<AudioDeviceModule>>, $($param: $arg_ty),*) -> $ret {
+            if let Some(mutex) = unsafe { ptr.as_mut() } {
+                match mutex.lock() {
+                    #[allow(unused_mut)]  // Some functions require mut; others don't.
+                    Ok(mut adm) => adm.$f($($param),*),
+                    Err(e) =>  {
+                        error!("Mutex was poisoned? {}", e);
+                        InternalFailure::MutexPoison.into()
+                    }
+                }
             } else {
                 error!("{} wrapper with null pointer", stringify!($f));
                 InternalFailure::NullPtr.into()
@@ -171,13 +182,13 @@ macro_rules! adm_struct_definition {
         adm_struct_definition!(struct AudioDeviceCallbacks {
             $($inner)*
             pub $f: extern "C" fn(
-              adm_borrowed: webrtc::ptr::Borrowed<AudioDeviceModule>, $($param: $arg_ty),*) -> $ret,
+              adm_borrowed: webrtc::ptr::Borrowed<Mutex<AudioDeviceModule>>, $($param: $arg_ty),*) -> $ret,
         } => $($t)*);
     };
     ($f:ident($($param:ident: $arg_ty:ty),*) -> $ret:ty ; $($t:tt)*) => {
         adm_struct_definition!(struct AudioDeviceCallbacks {
           pub $f: extern "C" fn(
-              adm_borrowed: webrtc::ptr::Borrowed<AudioDeviceModule>, $($param: $arg_ty),*) -> $ret,
+              adm_borrowed: webrtc::ptr::Borrowed<Mutex<AudioDeviceModule>>, $($param: $arg_ty),*) -> $ret,
         } => $($t)*);
     }
 }
@@ -211,7 +222,26 @@ macro_rules! adm_struct_instantiation {
 all_adm_functions!(adm_struct_instantiation);
 pub const AUDIO_DEVICE_CBS_PTR: *const AudioDeviceCallbacks = &AUDIO_DEVICE_CBS;
 
-extern "C" {
+/// Safety: Must be called with the same pointer passed to the C++ layer when
+/// constructing the PeerConnectionFactory.
+///
+/// The purpose of this function is to reclaim a pointer to the ADM that is
+/// "leaked" to the C++ layer (via Arc::into_raw)
+///
+/// The C++ layer must only call this function when it is done using the ADM,
+/// as this function could drop the ADM
+pub unsafe extern "C" fn decrement_adm_ref_count(adm_borrowed: webrtc::ptr::Borrowed<c_void>) {
+    // Don't try to convert null to an arc
+    if adm_borrowed.is_null() {
+        return;
+    }
+    // Get types right
+    let adm_borrowed = adm_borrowed.as_ptr() as *const Mutex<AudioDeviceModule>;
+    // Only used for decrementing the reference count.
+    let _adm = unsafe { Arc::from_raw(adm_borrowed) };
+}
+
+unsafe extern "C" {
     pub fn Rust_recordedDataIsAvailable(
         audio_transport: *const c_void,
         audio_samples: *const c_void,

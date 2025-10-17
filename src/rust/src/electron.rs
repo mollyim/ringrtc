@@ -7,6 +7,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     convert::TryFrom,
+    fmt::Formatter,
     sync::{
         atomic::AtomicBool,
         mpsc::{channel, Receiver, Sender},
@@ -46,7 +47,9 @@ use crate::{
         field_trial,
         media::{AudioTrack, VideoFrame, VideoPixelFormat, VideoSink, VideoSource, VideoTrack},
         peer_connection::AudioLevel,
-        peer_connection_factory::{self as pcf, AudioDevice, IceServer, PeerConnectionFactory},
+        peer_connection_factory::{
+            self as pcf, AudioDevice, AudioDeviceObserver, IceServer, PeerConnectionFactory,
+        },
         peer_connection_observer::NetworkRoute,
     },
 };
@@ -191,6 +194,8 @@ pub enum Event {
         peer_id: PeerId,
         recovered: bool,
     },
+    OutputDeviceChanged(Vec<Option<AudioDevice>>),
+    InputDeviceChanged(Vec<Option<AudioDevice>>),
 }
 
 /// Wraps a [`std::sync::mpsc::Sender`] with a callback to report new events.
@@ -347,6 +352,32 @@ impl GroupUpdateHandler for EventReporter {
     }
 }
 
+pub struct ElectronAudioDeviceObserver {
+    event_reporter: EventReporter,
+}
+impl AudioDeviceObserver for ElectronAudioDeviceObserver {
+    fn output_changed(&self, devices: Vec<Option<AudioDevice>>) {
+        if let Err(e) = self
+            .event_reporter
+            .send(Event::OutputDeviceChanged(devices))
+        {
+            error!("Failed to report output device change! {}", e);
+        }
+    }
+
+    fn input_changed(&self, devices: Vec<Option<AudioDevice>>) {
+        if let Err(e) = self.event_reporter.send(Event::InputDeviceChanged(devices)) {
+            error!("Failed to report input device change! {}", e);
+        }
+    }
+}
+
+impl std::fmt::Debug for ElectronAudioDeviceObserver {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ElectronAudioDeviceObserver")
+    }
+}
+
 pub struct CallEndpoint {
     call_manager: CallManager<NativePlatform>,
 
@@ -435,8 +466,13 @@ impl CallEndpoint {
         }
 
         // Relevant for both group calls and 1:1 calls
-        let peer_connection_factory =
-            PeerConnectionFactory::new(&pcf::AudioConfig::default(), false)?;
+        let peer_connection_factory = PeerConnectionFactory::new(
+            &pcf::AudioConfig::default(),
+            false,
+            Some(Box::new(ElectronAudioDeviceObserver {
+                event_reporter: event_reporter.clone(),
+            })),
+        )?;
         let outgoing_audio_track = peer_connection_factory.create_outgoing_audio_track()?;
         outgoing_audio_track.set_enabled(false);
         let outgoing_video_source = peer_connection_factory.create_outgoing_video_source()?;
@@ -1243,7 +1279,7 @@ fn sendVideoFrame(mut cx: FunctionContext) -> JsResult<JsValue> {
     let width = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
     let height = cx.argument::<JsNumber>(1)?.value(&mut cx) as u32;
     let pixel_format = cx.argument::<JsNumber>(2)?.value(&mut cx) as i32;
-    let buffer = cx.argument::<JsBuffer>(3)?;
+    let buffer = cx.argument::<JsUint8Array>(3)?;
 
     let pixel_format = VideoPixelFormat::from_i32(pixel_format);
     if pixel_format.is_none() {
@@ -1262,7 +1298,7 @@ fn sendVideoFrame(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 fn receive_video_frame<'a>(
     cx: &mut FunctionContext<'a>,
-    mut rgba_buffer: Handle<JsBuffer>,
+    mut rgba_buffer: Handle<JsUint8Array>,
     demux_id: DemuxId,
     max_width: u32,
     max_height: u32,
@@ -1305,7 +1341,7 @@ fn receive_video_frame<'a>(
 
 #[allow(non_snake_case)]
 fn receiveVideoFrame(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let rgba_buffer = cx.argument::<JsBuffer>(0)?;
+    let rgba_buffer = cx.argument::<JsUint8Array>(0)?;
     let max_width = cx.argument::<JsNumber>(1)?.value(&mut cx) as u32; // saturating cast
     let max_height = cx.argument::<JsNumber>(2)?.value(&mut cx) as u32; // saturating cast
     receive_video_frame(&mut cx, rgba_buffer, 0, max_width, max_height)
@@ -1317,7 +1353,7 @@ fn receiveVideoFrame(mut cx: FunctionContext) -> JsResult<JsValue> {
 fn receiveGroupCallVideoFrame(mut cx: FunctionContext) -> JsResult<JsValue> {
     let _client_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as group_call::ClientId;
     let remote_demux_id = cx.argument::<JsNumber>(1)?.value(&mut cx) as DemuxId;
-    let rgba_buffer = cx.argument::<JsBuffer>(2)?;
+    let rgba_buffer = cx.argument::<JsUint8Array>(2)?;
     let max_width = cx.argument::<JsNumber>(3)?.value(&mut cx) as u32; // saturating cast
     let max_height = cx.argument::<JsNumber>(4)?.value(&mut cx) as u32; // saturating cast
     receive_video_frame(&mut cx, rgba_buffer, remote_demux_id, max_width, max_height)
@@ -2203,6 +2239,31 @@ fn setRtcStatsInterval(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(cx.undefined().upcast())
 }
 
+fn devices_to_js_array<'a>(
+    cx: &mut FunctionContext<'a>,
+    devices: Vec<Option<AudioDevice>>,
+) -> JsResult<'a, JsArray> {
+    // Maintain original indices as the ADM sees them.
+    let devices_filtered = devices
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, d)| d.map(|dev| (i, dev)))
+        .collect::<Vec<_>>();
+    let js_devices = JsArray::new(cx, devices_filtered.len());
+    for (i, (adm_index, device)) in devices_filtered.into_iter().enumerate() {
+        let js_info = cx.empty_object();
+        let js_name = cx.string(&device.name);
+        js_info.set(cx, "name", js_name)?;
+        let js_unique_id = cx.string(&device.unique_id);
+        js_info.set(cx, "uniqueId", js_unique_id)?;
+        let js_index = cx.number(adm_index as f64);
+        js_info.set(cx, "index", js_index)?;
+
+        js_devices.set(cx, i as u32, js_info)?;
+    }
+    Ok(js_devices)
+}
+
 #[allow(non_snake_case)]
 fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.this::<JsObject>()?;
@@ -2906,6 +2967,20 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                     cx.number(mute_source).upcast(),
                     cx.number(mute_target).upcast(),
                 ];
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+            Event::OutputDeviceChanged(devices) => {
+                let method_name = "onOutputDeviceChanged";
+                let js_devices = devices_to_js_array(&mut cx, devices)?;
+                let args = [js_devices.upcast()];
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+            Event::InputDeviceChanged(devices) => {
+                let method_name = "onInputDeviceChanged";
+                let js_devices = devices_to_js_array(&mut cx, devices)?;
+                let args = [js_devices.upcast()];
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
             }

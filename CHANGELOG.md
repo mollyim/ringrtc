@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.59.0
+
+- Update to webrtc 7339c
+  - Update to webrtc 7339a (m140)
+  - Decrement rust ADM refcount in PCF destructor
+
+- iOS: Use UUID as RemotePeer for received messages
+
+- Desktop: Improve ADM lifecycle management
+
+- Desktop: Get rid of ProtobufBuffer type
+
+- Desktop: Drop last uses of Buffer/JsBuffer
+
+- Remove support for old data rtp ssrc
+
+- Call Sim: Average all mos values in reports
+
+- Rust 2024: Trivial fixes
+
+- Update CI and tests
+
+## v2.58.1
+
+- Desktop: New Audio Device Module improvements
+    - Reduce some error!s to warn!s in ADM
+    - Update to cubeb 0.31.2, which saves battery life
+    - handle missing default device
+
+- CI: Notify via bug on slow tests failure
+
+## v2.58.0
+
+- Desktop: New Audio Device Module improvements
+    - Refactor ADM to use cubeb in an async manner
+    - Implement device changed callbacks
+
+- Some minor logging refinements
+
 ## v2.57.1
 
 - Desktop: Update to cubeb 0.30.1

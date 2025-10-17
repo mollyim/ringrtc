@@ -26,7 +26,7 @@ use crate::{
     webrtc,
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetBuildInfo<'local>(
     mut env: JNIEnv<'local>,
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetBuildInfo
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcInitialize(
     mut env: JNIEnv,
@@ -52,7 +52,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcInitialize(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreateCallManager(
     mut env: JNIEnv,
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreateCallMa
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreatePeerConnection(
     mut env: JNIEnv,
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreatePeerCo
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetSelfUuid(
     mut env: JNIEnv,
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetSelfUuid(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCall(
     mut env: JNIEnv,
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCall(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
     mut env: JNIEnv,
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcMessageSent(
     mut env: JNIEnv,
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcMessageSent(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcMessageSendFailure(
     mut env: JNIEnv,
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcMessageSendF
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcHangup(
     mut env: JNIEnv,
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcHangup(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCancelGroupRing(
     mut env: JNIEnv,
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCancelGroupR
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedAnswer(
     mut env: JNIEnv,
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedAnsw
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedOffer(
     mut env: JNIEnv,
@@ -304,7 +304,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedOffe
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedIceCandidates(
     mut env: JNIEnv,
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedIceC
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHangup(
     mut env: JNIEnv,
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHang
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedBusy(
     mut env: JNIEnv,
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedBusy
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedCallMessage(
     mut env: JNIEnv,
@@ -410,7 +410,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedCall
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHttpResponse(
     mut env: JNIEnv,
@@ -434,7 +434,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReceivedHttp
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcHttpRequestFailed(
     mut env: JNIEnv,
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcHttpRequestF
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcAcceptCall(
     mut env: JNIEnv,
@@ -466,7 +466,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcAcceptCall(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveConnection(
     mut env: JNIEnv,
@@ -484,7 +484,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveCon
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveCallContext(
     mut env: JNIEnv,
@@ -502,7 +502,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcGetActiveCal
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetAudioEnable(
     mut env: JNIEnv,
@@ -518,7 +518,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetAudioEnab
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetVideoEnable(
     mut env: JNIEnv,
@@ -534,7 +534,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetVideoEnab
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateDataMode(
     mut env: JNIEnv,
@@ -553,7 +553,7 @@ pub extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateDataMode(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcDrop(
     mut env: JNIEnv,
@@ -569,7 +569,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcDrop(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReset(
     mut env: JNIEnv,
@@ -584,7 +584,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReset(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcClose(
     mut env: JNIEnv,
@@ -601,7 +601,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcClose(
 
 // Call Links
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReadCallLink(
     mut env: JNIEnv,
@@ -629,7 +629,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcReadCallLink
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreateCallLink(
     mut env: JNIEnv,
@@ -661,7 +661,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCreateCallLi
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateCallLink(
     mut env: JNIEnv,
@@ -697,7 +697,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcUpdateCallLi
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcDeleteCallLink(
     mut env: JNIEnv,
@@ -729,7 +729,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcDeleteCallLi
 
 // Group Calls
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekGroupCall(
     mut env: JNIEnv,
@@ -755,7 +755,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekGroupCal
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekCallLinkCall(
     mut env: JNIEnv,
@@ -783,7 +783,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcPeekCallLink
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCallClient(
     mut env: JNIEnv,
@@ -818,7 +818,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCal
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLinkCallClient(
     mut env: JNIEnv,
@@ -861,7 +861,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLink
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDeleteGroupCallClient(
     mut env: JNIEnv,
@@ -880,7 +880,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDeleteGroupCal
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcConnect(
     mut env: JNIEnv,
@@ -899,7 +899,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcConnect(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcJoin(
     mut env: JNIEnv,
@@ -918,7 +918,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcJoin(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcLeave(
     mut env: JNIEnv,
@@ -937,7 +937,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcLeave(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDisconnect(
     mut env: JNIEnv,
@@ -956,7 +956,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDisconnect(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingAudioMuted(
     mut env: JNIEnv,
@@ -977,7 +977,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingAud
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingAudioMutedRemotely(
     mut env: JNIEnv,
@@ -998,7 +998,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingAud
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSendRemoteMuteRequest(
     mut env: JNIEnv,
@@ -1019,7 +1019,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSendRemoteMute
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingVideoMuted(
     mut env: JNIEnv,
@@ -1040,7 +1040,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetOutgoingVid
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRing(
     mut env: JNIEnv,
@@ -1062,7 +1062,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRing(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcResendMediaKeys(
     mut env: JNIEnv,
@@ -1081,7 +1081,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcResendMediaKey
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetDataMode(
     mut env: JNIEnv,
@@ -1102,7 +1102,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetDataMode(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRequestVideo(
     mut env: JNIEnv,
@@ -1126,7 +1126,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRequestVideo(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcApproveUser(
     mut env: JNIEnv,
@@ -1148,7 +1148,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcApproveUser(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDenyUser(
     mut env: JNIEnv,
@@ -1170,7 +1170,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcDenyUser(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRemoveClient(
     mut env: JNIEnv,
@@ -1191,7 +1191,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRemoveClient(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcBlockClient(
     mut env: JNIEnv,
@@ -1212,7 +1212,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcBlockClient(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetGroupMembers(
     mut env: JNIEnv,
@@ -1234,7 +1234,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetGroupMember
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetMembershipProof(
     mut env: JNIEnv,
@@ -1256,7 +1256,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcSetMembershipP
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcReact(
     mut env: JNIEnv,
@@ -1278,7 +1278,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcReact(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRaiseHand(
     mut env: JNIEnv,
@@ -1299,7 +1299,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcRaiseHand(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallId_ringrtcFromEraId(
     mut env: JNIEnv,
