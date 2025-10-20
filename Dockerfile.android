@@ -83,7 +83,7 @@ RUN ./bin/prepare-workspace android
 RUN cat <<'EOF' > build.sh
 #!/bin/sh
 set -eu
-export OVERRIDE_VERSION=$(git describe --tags)
+export OVERRIDE_VERSION=$(git describe --tags --always)
 ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "$@"
 EOF
 RUN chmod +x build.sh
