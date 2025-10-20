@@ -57,6 +57,7 @@ android {
 
     publishing {
       singleVariant("release")
+      singleVariant("debug")
     }
 }
 
@@ -83,6 +84,25 @@ tasks.register('javadoc', Javadoc) {
 }
 
 afterEvaluate {
+    def configurePom = { pom ->
+        pom.packaging = 'aar'
+        pom.url = 'https://github.com/mollyim/ringrtc/'
+
+        pom.scm {
+            url = 'https://github.com/mollyim/ringrtc/'
+            connection = 'scm:git:git://github.com/mollyim/ringrtc.git'
+            developerConnection = 'scm:git:git@github.com:mollyim/ringrtc.git'
+        }
+
+        pom.licenses {
+            license {
+                name = 'AGPL-3.0-only'
+                url = 'https://www.gnu.org/licenses/agpl-3.0.txt'
+                distribution = 'repo'
+            }
+        }
+    }
+
     publishing {
         publications {
             mavenJava(MavenPublication) {
@@ -94,24 +114,23 @@ afterEvaluate {
 
                 pom {
                     name = archivesBaseName
-                    packaging = 'aar'
                     description = 'RingRTC for Android'
-                    url = 'https://github.com/mollyim/ringrtc/'
-
-                    scm {
-                        url = 'https://github.com/mollyim/ringrtc/'
-                        connection = 'scm:git:git://github.com/mollyim/ringrtc.git'
-                        developerConnection = 'scm:git:git@github.com:mollyim/ringrtc.git'
-                    }
-
-                    licenses {
-                        license {
-                            name = 'AGPL-3.0-only'
-                            url = 'https://www.gnu.org/licenses/agpl-3.0.txt'
-                            distribution = 'repo'
-                        }
-                    }
                 }
+                configurePom(pom)
+            }
+
+            mavenJavaDebug(MavenPublication) {
+                from components.debug
+
+                group = 'im.molly'
+                artifactId = archivesBaseName + '-debug'
+                version = ringrtcVersion
+
+                pom {
+                    name = archivesBaseName + '-debug'
+                    description = 'RingRTC for Android (Debug)'
+                }
+                configurePom(pom)
             }
         }
         repositories {
@@ -127,16 +146,20 @@ afterEvaluate {
         }
     }
 
-    tasks.withType(AbstractPublishToMaven).configureEach {
-        dependsOn assembleRelease
-    }
-
     tasks.register('installArchives') {
         dependsOn publishMavenJavaPublicationToMavenLocal
     }
 
+    tasks.register('installArchivesDebug') {
+        dependsOn publishMavenJavaDebugPublicationToMavenLocal
+    }
+
     tasks.register('uploadArchives') {
         dependsOn publishMavenJavaPublicationToCloudsmithRepository
+    }
+
+    tasks.register('uploadArchivesDebug') {
+        dependsOn publishMavenJavaDebugPublicationToCloudsmithRepository
     }
 }
 

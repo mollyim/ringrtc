@@ -36,8 +36,14 @@ jobs:
     - name: Build Docker image
       run: docker build -f Dockerfile.android -t ringrtc-builder .
 
-    - name: Build library inside Docker
+    - name: Build release version inside Docker
       run: |
-        docker run \
+        docker run --rm \
           -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
-          ringrtc-builder --release-build
+          ringrtc-builder --release-build --install-local
+
+    - name: Build debug version inside Docker
+      run: |
+        docker run --rm \
+          -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
+          ringrtc-builder --debug-build --install-local

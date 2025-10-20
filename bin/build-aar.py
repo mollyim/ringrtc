@@ -516,15 +516,16 @@ def PerformBuild(dry_run, extra_gradle_args, version, webrtc_version,
     gradle_exec.extend(('assembleDebug' if build_type == 'debug' else 'assembleRelease' for build_type in build_types))
 
     if install_local is True:
-        if 'release' not in build_types:
-            raise Exception('The `debug` build type is not supported with '
-                            '--install-local. Remove --install-local and build again to '
-                            'have a debug AAR created in the Gradle output directory.')
-
-        gradle_exec.append('installArchives')
+        if 'release' in build_types:
+            gradle_exec.append('installArchives')
+        if 'debug' in build_types:
+            gradle_exec.append('installArchivesDebug')
 
     if publish_to_maven:
-        gradle_exec.append('uploadArchives')
+        if 'release' in build_types:
+            gradle_exec.append('uploadArchives')
+        if 'debug' in build_types:
+            gradle_exec.append('uploadArchivesDebug')
 
     gradle_exec.extend(extra_gradle_args)
 
@@ -595,11 +596,6 @@ def main():
         for dir in ('debug', 'release', 'javadoc', 'rustdoc', 'rust-lint'):
             clean_dir(os.path.join(build_dir, dir), args.dry_run)
         return 0
-
-    if args.publish is True:
-        if args.debug_build is True:
-            print('ERROR: Only the release build can be uploaded')
-            return 1
 
     publish_to_maven = args.publish
 
