@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.59.2
+
+- Add support for fragmenting large data messages to SFU
+
+- Add error stats to deviceToSfu
+
+- Add macOS support to virtual_audio
+
+- Update to Rust 2024
+
+- Call Sim: Improvements to support long running tests
+
+## v2.59.1
+
+- Revert: iOS: Use UUID as RemotePeer for received messages
+
 ## v2.59.0
 
 - Update to webrtc 7339c

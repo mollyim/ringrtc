@@ -7,15 +7,15 @@ use std::{process::Stdio, time::Duration};
 
 use anyhow::Result;
 use bollard::{
-    container::{MemoryStatsStats, Stats, StatsOptions},
     Docker,
+    container::{MemoryStatsStats, Stats, StatsOptions},
 };
 use chrono::DateTime;
 use futures_util::stream::TryStreamExt;
 use itertools::Itertools;
 use tokio::{
     fs::OpenOptions,
-    io::{stdout, AsyncWriteExt},
+    io::{AsyncWriteExt, stdout},
     process::Command,
 };
 
@@ -244,19 +244,31 @@ pub async fn start_turn_server() -> Result<()> {
     Ok(())
 }
 
-pub async fn start_tcp_dump(report_path: &str) -> Result<()> {
-    println!("\nStarting tcpdump");
+pub async fn start_tcpdump(name: &str, report_path: &str) -> Result<()> {
+    println!("\nStarting tcpdump for `{}`", name);
 
     let _ = Command::new("docker")
         .args([
             "run",
             "--name",
-            "tcpdump",
+            &format!("tcpdump_{}", name),
             "-d",
-            "--net=host",
+            &format!("--network=container:{}", name),
             "-v",
             &format!("{}:/tcpdump", report_path),
             "kaazing/tcpdump",
+            "-i",
+            "any",
+            "-w",
+            &format!("/tcpdump/{}.pcap", name),
+            "tcp",
+            "or",
+            "udp",
+            "and",
+            "not",
+            "udp",
+            "port",
+            "5353",
         ])
         .spawn()?
         .wait()
@@ -967,12 +979,24 @@ pub async fn start_cli(
 
     args.push(format!("--field-trials={}", field_trials));
 
-    for relay_server in &call_config.relay_servers {
-        args.push(format!("--relay-servers={}", relay_server));
+    args.push(format!(
+        "--relay-username={}",
+        call_config.relay_servers.username
+    ));
+    args.push(format!(
+        "--relay-password={}",
+        call_config.relay_servers.password
+    ));
+    for relay_server in &call_config.relay_servers.urls {
+        args.push(format!("--relay-urls={}", relay_server));
+    }
+    for relay_server in &call_config.relay_servers.urls_with_ips {
+        args.push(format!("--relay-ips={}", relay_server));
+    }
+    if let Some(hostname) = &call_config.relay_servers.hostname {
+        args.push(format!("--relay-hostname={}", hostname));
     }
 
-    args.push(format!("--relay-username={}", call_config.relay_username));
-    args.push(format!("--relay-password={}", call_config.relay_password));
     args.push(format!("--force-relay={}", call_config.force_relay));
 
     args.push(format!(

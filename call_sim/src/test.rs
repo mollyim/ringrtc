@@ -17,7 +17,7 @@ use std::{
 
 use anyhow::Result;
 use calling::{
-    command_message::Command, test_management_client::TestManagementClient, CommandMessage, Empty,
+    CommandMessage, Empty, command_message::Command, test_management_client::TestManagementClient,
 };
 use chrono::{DateTime, Local};
 use relative_path::RelativePath;
@@ -25,18 +25,18 @@ use tonic::transport::Channel;
 use tower::timeout::Timeout;
 
 use crate::{
-    audio::{chop_audio_and_analyze, get_audio_and_analyze, AudioFiles},
+    audio::{AudioFiles, chop_audio_and_analyze, get_audio_and_analyze},
     common::{
         AudioAnalysisMode, ClientProfile, GroupConfig, NetworkConfigWithOffset, NetworkProfile,
         TestCaseConfig,
     },
     docker::{
-        analyze_video, analyze_visqol_mos, clean_network, clean_up, convert_mp4_to_yuv,
-        convert_raw_to_wav, convert_wav_to_16khz_mono, convert_yuv_to_mp4, create_network,
-        emulate_network_change, emulate_network_start, finish_perf, generate_spectrogram,
-        get_signaling_server_logs, get_turn_server_logs, start_cli, start_client, start_playout,
-        start_signaling_server, start_tcp_dump, start_turn_server, tear_down_virtual_audio,
-        DockerStats,
+        DockerStats, analyze_video, analyze_visqol_mos, clean_network, clean_up,
+        convert_mp4_to_yuv, convert_raw_to_wav, convert_wav_to_16khz_mono, convert_yuv_to_mp4,
+        create_network, emulate_network_change, emulate_network_start, finish_perf,
+        generate_spectrogram, get_signaling_server_logs, get_turn_server_logs, start_cli,
+        start_client, start_playout, start_signaling_server, start_tcpdump, start_turn_server,
+        tear_down_virtual_audio,
     },
     report::{AnalysisReport, AnalysisReportMos, Report},
 };
@@ -238,15 +238,11 @@ impl Test {
         create_network().await?;
         start_signaling_server().await?;
 
-        if !test_case_config.client_a_config.relay_servers.is_empty()
-            || !test_case_config.client_a_config.relay_servers.is_empty()
+        if test_case_config.client_a_config.start_turn_server
+            || test_case_config.client_b_config.start_turn_server
         {
             // We'll assume any relay server configuration should start the test turn server.
             start_turn_server().await?;
-        }
-
-        if test_case_config.tcp_dump {
-            start_tcp_dump(&test_case.test_path).await?;
         }
 
         // Sleep here to allow the server(s) to get running.
@@ -269,12 +265,21 @@ impl Test {
                 &self.set_path,
             )
             .await?;
+
+            if test_case_config.client_a_config.tcpdump {
+                start_tcpdump(test_case.client_a.name, &test_case.test_path).await?;
+            }
+
             start_client(
                 test_case.client_b.name,
                 &test_case.test_path,
                 &self.set_path,
             )
             .await?;
+
+            if test_case_config.client_b_config.tcpdump {
+                start_tcpdump(test_case.client_b.name, &test_case.test_path).await?;
+            }
 
             println!();
 
@@ -339,22 +344,22 @@ impl Test {
                             let mut timed_config_next = network_configs.next();
                             let mut emulation_started = false;
 
-                            if let Some(timed_network_config) = timed_config_next {
-                                if timed_network_config.offset == Duration::from_secs(0) {
-                                    println!("  Setting up network emulation.");
-                                    emulate_network_start(
-                                        test_case.client_a.name,
-                                        &timed_network_config.network_config,
-                                    )
-                                    .await?;
-                                    emulate_network_start(
-                                        test_case.client_b.name,
-                                        &timed_network_config.network_config,
-                                    )
-                                    .await?;
-                                    emulation_started = true;
-                                    timed_config_next = network_configs.next();
-                                }
+                            if let Some(timed_network_config) = timed_config_next
+                                && timed_network_config.offset == Duration::from_secs(0)
+                            {
+                                println!("  Setting up network emulation.");
+                                emulate_network_start(
+                                    test_case.client_a.name,
+                                    &timed_network_config.network_config,
+                                )
+                                .await?;
+                                emulate_network_start(
+                                    test_case.client_b.name,
+                                    &timed_network_config.network_config,
+                                )
+                                .await?;
+                                emulation_started = true;
+                                timed_config_next = network_configs.next();
                             }
 
                             // Start monitoring docker stats. They will end when the associated container stops.
@@ -404,67 +409,65 @@ impl Test {
                                 eprint!("\r{} seconds remaining...", i);
                                 tokio::time::sleep(Duration::from_secs(1)).await;
 
-                                if let Some(timed_network_config) = timed_config_next {
-                                    if start_time.elapsed() >= timed_network_config.offset {
-                                        // Changing the network emulation takes time, so do it concurrently.
-                                        let network_config = timed_network_config.network_config;
-                                        let client_name_a = test_case.client_a.name.to_string();
-                                        let client_name_b = test_case.client_b.name.to_string();
+                                if let Some(timed_network_config) = timed_config_next
+                                    && start_time.elapsed() >= timed_network_config.offset
+                                {
+                                    // Changing the network emulation takes time, so do it concurrently.
+                                    let network_config = timed_network_config.network_config;
+                                    let client_name_a = test_case.client_a.name.to_string();
+                                    let client_name_b = test_case.client_b.name.to_string();
 
-                                        // For now we will be ignoring errors when changing the emulation settings.
-                                        tokio::spawn(async move {
-                                            eprint!(
-                                                "\n  Applying new emulated network settings..."
-                                            );
+                                    // For now we will be ignoring errors when changing the emulation settings.
+                                    tokio::spawn(async move {
+                                        eprint!("\n  Applying new emulated network settings...");
 
-                                            let join_handle_a: tokio::task::JoinHandle<
-                                                Result<(), anyhow::Error>,
-                                            > = tokio::spawn(async move {
-                                                if emulation_started {
-                                                    emulate_network_change(
-                                                        &client_name_a,
-                                                        &network_config,
-                                                    )
-                                                    .await?;
-                                                } else {
-                                                    emulate_network_start(
-                                                        &client_name_a,
-                                                        &network_config,
-                                                    )
-                                                    .await?;
-                                                }
-                                                Ok(())
-                                            });
-                                            let join_handle_b: tokio::task::JoinHandle<
-                                                Result<(), anyhow::Error>,
-                                            > = tokio::spawn(async move {
-                                                if emulation_started {
-                                                    emulate_network_change(
-                                                        &client_name_b,
-                                                        &network_config,
-                                                    )
-                                                    .await?;
-                                                } else {
-                                                    emulate_network_start(
-                                                        &client_name_b,
-                                                        &network_config,
-                                                    )
-                                                    .await?;
-                                                }
-                                                Ok(())
-                                            });
-
-                                            // NOTE: We assume this block completes fairly quickly! To avoid issues,
-                                            // emulation shouldn't change more than once every 2 seconds!
-
-                                            let _ = tokio::join!(join_handle_a, join_handle_b);
-                                            eprintln!(" Done.");
+                                        let join_handle_a: tokio::task::JoinHandle<
+                                            Result<(), anyhow::Error>,
+                                        > = tokio::spawn(async move {
+                                            if emulation_started {
+                                                emulate_network_change(
+                                                    &client_name_a,
+                                                    &network_config,
+                                                )
+                                                .await?;
+                                            } else {
+                                                emulate_network_start(
+                                                    &client_name_a,
+                                                    &network_config,
+                                                )
+                                                .await?;
+                                            }
+                                            Ok(())
+                                        });
+                                        let join_handle_b: tokio::task::JoinHandle<
+                                            Result<(), anyhow::Error>,
+                                        > = tokio::spawn(async move {
+                                            if emulation_started {
+                                                emulate_network_change(
+                                                    &client_name_b,
+                                                    &network_config,
+                                                )
+                                                .await?;
+                                            } else {
+                                                emulate_network_start(
+                                                    &client_name_b,
+                                                    &network_config,
+                                                )
+                                                .await?;
+                                            }
+                                            Ok(())
                                         });
 
-                                        emulation_started = true;
+                                        // NOTE: We assume this block completes fairly quickly! To avoid issues,
+                                        // emulation shouldn't change more than once every 2 seconds!
 
-                                        timed_config_next = network_configs.next();
-                                    }
+                                        let _ = tokio::join!(join_handle_a, join_handle_b);
+                                        eprintln!(" Done.");
+                                    });
+
+                                    emulation_started = true;
+
+                                    timed_config_next = network_configs.next();
                                 }
                             }
 
@@ -520,7 +523,8 @@ impl Test {
         let mut audio_test_results = AudioTestResults::default();
 
         if !test_case_config.save_media_files {
-            anyhow::bail!("Skipping artifacts");
+            // Return a default result if media files are not saved.
+            return Ok(audio_test_results);
         }
 
         // Perform conversions of audio data.
@@ -847,10 +851,10 @@ impl Test {
                 // For debugging, dump the signaling_server logs.
                 get_signaling_server_logs(&test_case.test_path).await?;
 
-                if !test_case_config.client_a_config.relay_servers.is_empty()
-                    || !test_case_config.client_a_config.relay_servers.is_empty()
+                if test_case_config.client_a_config.start_turn_server
+                    || test_case_config.client_b_config.start_turn_server
                 {
-                    // Also dump the turn server logs if it was used.
+                    // Also dump the turn server logs if the local one was running.
                     get_turn_server_logs(&test_case.test_path).await?;
                 }
 

@@ -5,13 +5,16 @@
 
 use std::{collections::HashMap, fmt::Write, str::FromStr};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use itertools::Itertools;
-use plotly::{
-    color::NamedColor,
-    common::{Font, Line, LineShape, Marker, Mode, Title},
-    layout::{Axis, AxisType, BarMode, Margin},
-    Bar, ImageFormat, Layout, Plot, Scatter,
+use plotters::{
+    backend::SVGBackend,
+    chart::ChartBuilder,
+    drawing::IntoDrawingArea,
+    element::Circle,
+    prelude::IntoSegmentedCoord,
+    series::{Histogram, LineSeries},
+    style::{Color, IntoFont, RGBColor, full_palette::WHITE},
 };
 use regex::Regex;
 use tokio::{
@@ -27,7 +30,18 @@ use crate::{
     test::{AudioTestResults, GroupRun, Sound, TestCase},
 };
 
+// Chart colors.
+const DIM_GRAY: RGBColor = RGBColor(105, 105, 105);
+const VERY_LIGHT_GRAY: RGBColor = RGBColor(250, 250, 250);
+const STEEL_BLUE: RGBColor = RGBColor(70, 130, 180);
+
 type ChartPoint = (f32, f32);
+
+#[derive(Debug, Clone)]
+pub enum LineShape {
+    Linear,
+    Hv,
+}
 
 #[derive(Debug, Clone)]
 pub struct StatsConfig {
@@ -1261,7 +1275,9 @@ pub struct Report {
     pub client_name: String,
     pub client_name_wav: String,
 
-    pub analysis_report: AnalysisReport,
+    /// Only available if there were actually media files generated.
+    pub analysis_report: Option<AnalysisReport>,
+
     pub docker_stats_report: DockerStatsReport,
     pub client_log_report: ClientLogReport,
 
@@ -1278,17 +1294,23 @@ impl Report {
         test_case_config: &TestCaseConfig,
         audio_test_results: AudioTestResults,
     ) -> Result<Self> {
-        let analysis_report = AnalysisReport::build(
-            // Note: _Move_ the audio_test_results to the report.
-            audio_test_results,
-            test_case
-                .client_b
-                .output_yuv
-                .as_ref()
-                .map(|output_yuv| format!("{}/{}.json", test_case.test_path, output_yuv))
-                .as_deref(),
-        )
-        .await?;
+        let analysis_report = if test_case_config.save_media_files {
+            Some(
+                AnalysisReport::build(
+                    // Note: _Move_ the audio_test_results to the report.
+                    audio_test_results,
+                    test_case
+                        .client_b
+                        .output_yuv
+                        .as_ref()
+                        .map(|output_yuv| format!("{}/{}.json", test_case.test_path, output_yuv))
+                        .as_deref(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let docker_stats_report = DockerStatsReport::build(
             &format!(
                 "{}/{}_stats.log",
@@ -1331,127 +1353,130 @@ impl Report {
         Ok(test_report)
     }
 
-    fn create_bar_chart(test_path: &str, stats: &Stats, domain: Vec<String>, data: Vec<f32>) {
-        let width = 800;
-        let height = 600;
-        let margin = Margin::default().left(60).right(40).top(70).bottom(60);
-
-        let trace = Bar::new(domain, data);
-
-        let x_axis = Axis::default()
-            .color(NamedColor::DimGray)
-            .show_line(true)
-            .title(Title::from(&*stats.config.x_label))
-            .type_(AxisType::Category);
+    fn create_bar_chart(
+        test_path: &str,
+        stats: &Stats,
+        domain: Vec<String>,
+        data: Vec<f32>,
+    ) -> Result<()> {
+        let output_path = format!("{}/{}", test_path, stats.config.chart_name);
+        let root = SVGBackend::new(&output_path, (800, 600)).into_drawing_area();
+        root.fill(&WHITE)?;
 
         let y_min = stats.config.y_min.unwrap_or(0.0);
-        let y_max = stats.config.y_max.unwrap_or({
-            // Default to 10% more than the overall max value.
-            stats.data.overall_max.mul_add(0.1, stats.data.overall_max)
-        });
+        let y_max = stats.config.y_max.unwrap_or(stats.data.overall_max * 1.1);
 
-        let y_axis = Axis::default()
-            .color(NamedColor::DimGray)
-            .show_line(true)
-            .title(Title::from(&*stats.config.y_label))
-            .range(vec![y_min, y_max]);
-
-        let layout = Layout::new()
-            .bar_mode(BarMode::Group)
-            .title(
-                Title::from(&*stats.config.title)
-                    .font(Font::new().size(24).color(NamedColor::DimGray)),
+        let mut chart = ChartBuilder::on(&root)
+            .caption(
+                &stats.config.title,
+                ("Arial", 30).into_font().color(&DIM_GRAY),
             )
-            .x_axis(x_axis)
-            .y_axis(y_axis)
-            .width(width)
-            .height(height)
-            .margin(margin);
+            .margin(5)
+            .margin_right(25)
+            .x_label_area_size(60)
+            .y_label_area_size(60)
+            .build_cartesian_2d(domain.into_segmented(), y_min..y_max)?;
 
-        let mut plot = Plot::new();
-        plot.add_trace(trace);
-        plot.set_layout(layout);
+        chart
+            .configure_mesh()
+            .x_desc(&stats.config.x_label)
+            .y_desc(&stats.config.y_label)
+            .y_label_formatter(&|y| format!("{:.1}", y))
+            .axis_style(DIM_GRAY)
+            .light_line_style(VERY_LIGHT_GRAY)
+            .max_light_lines(1)
+            .disable_x_mesh()
+            .label_style(("Arial", 16).into_font().color(&DIM_GRAY))
+            .axis_desc_style(("Arial", 18).into_font().color(&DIM_GRAY))
+            .draw()?;
 
-        plot.write_image(
-            format!("{}/{}", test_path, stats.config.chart_name),
-            ImageFormat::SVG,
-            width,
-            height,
-            1.0,
-        );
+        chart.draw_series(
+            Histogram::vertical(&chart)
+                .style(STEEL_BLUE.filled())
+                .margin(25)
+                .data(domain.iter().zip(data.iter()).map(|(x, y)| (x, *y))),
+        )?;
+
+        root.present()?;
+
+        Ok(())
     }
 
-    fn create_line_chart(test_path: &str, stats: &Stats) {
-        let width = 800;
-        let height = 600;
-        let margin = Margin::default().left(60).right(40).top(70).bottom(60);
-
-        let (x_trace, y_trace) = stats.data.points.iter().cloned().unzip();
-
-        let marker_size = if stats.data.points.len() > 60 {
-            // If the length is more than 60, we'll squelch markers.
-            2
-        } else {
-            // Use a reasonably sized circle to mark the plotted points.
-            10
-        };
-
-        let trace = Scatter::new(x_trace, y_trace)
-            .mode(Mode::LinesMarkers)
-            .marker(Marker::new().size(marker_size))
-            .line(
-                Line::new()
-                    .color(NamedColor::SteelBlue)
-                    .width(2.0)
-                    .shape(stats.config.line_shape.clone()),
-            );
+    fn create_line_chart(test_path: &str, stats: &Stats) -> Result<()> {
+        let output_path = format!("{}/{}", test_path, stats.config.chart_name);
+        let root = SVGBackend::new(&output_path, (800, 600)).into_drawing_area();
+        root.fill(&WHITE)?;
 
         let x_min = stats.config.x_min.unwrap_or(0.0);
-        let x_max = stats.config.x_max.unwrap_or({
-            // Default to the actual length of the data + 5 to avoid cut-off.
-            stats.data.points.len() as f32 + 5.0
-        });
-
-        let x_axis = Axis::default()
-            .color(NamedColor::DimGray)
-            .show_line(true)
-            .title(Title::from(&*stats.config.x_label))
-            .range(vec![x_min, x_max]);
-
+        let x_max = stats
+            .config
+            .x_max
+            .unwrap_or(stats.data.points.len() as f32 + 5.0);
         let y_min = stats.config.y_min.unwrap_or(0.0);
-        let y_max = stats.config.y_max.unwrap_or({
-            // Default to 10% more than the overall max value.
-            stats.data.overall_max.mul_add(0.1, stats.data.overall_max)
-        });
+        let y_max = stats.config.y_max.unwrap_or(stats.data.overall_max * 1.1);
 
-        let y_axis = Axis::default()
-            .color(NamedColor::DimGray)
-            .show_line(true)
-            .title(Title::from(&*stats.config.y_label))
-            .range(vec![y_min, y_max]);
-
-        let layout = Layout::new()
-            .title(
-                Title::with_text(&stats.config.title)
-                    .font(Font::new().size(24).color(NamedColor::DimGray)),
+        let mut chart = ChartBuilder::on(&root)
+            .caption(
+                &stats.config.title,
+                ("Arial", 30).into_font().color(&DIM_GRAY),
             )
-            .x_axis(x_axis)
-            .y_axis(y_axis)
-            .width(width)
-            .height(height)
-            .margin(margin);
+            .margin(5)
+            .margin_right(25)
+            .x_label_area_size(60)
+            .y_label_area_size(60)
+            .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
-        let mut plot = Plot::new();
-        plot.add_trace(trace);
-        plot.set_layout(layout);
+        chart
+            .configure_mesh()
+            .x_desc(&stats.config.x_label)
+            .y_desc(&stats.config.y_label)
+            .x_label_formatter(&|x| format!("{:.1}", x))
+            .y_label_formatter(&|y| format!("{:.1}", y))
+            .axis_style(DIM_GRAY)
+            .light_line_style(VERY_LIGHT_GRAY)
+            .max_light_lines(1)
+            .label_style(("Arial", 16).into_font().color(&DIM_GRAY))
+            .axis_desc_style(("Arial", 18).into_font().color(&DIM_GRAY))
+            .draw()?;
 
-        plot.write_image(
-            format!("{}/{}", test_path, stats.config.chart_name),
-            ImageFormat::SVG,
-            width,
-            height,
-            1.0,
-        );
+        let marker_size = if stats.data.points.len() > 60 { 1 } else { 5 };
+
+        // Apply line shaping to the data points.
+        let data_points: Vec<(f32, f32)> = if matches!(stats.config.line_shape, LineShape::Hv) {
+            // Convert to horizontal-vertical line shape since plotters doesn't support it.
+            let mut hv_points = Vec::new();
+            for i in 0..stats.data.points.len() {
+                let (x, y) = stats.data.points[i];
+                hv_points.push((x, y));
+
+                if i < stats.data.points.len() - 1 {
+                    let next_x = stats.data.points[i + 1].0;
+                    hv_points.push((next_x, y));
+                }
+            }
+            hv_points
+        } else {
+            // Default to LineShape::Linear.
+            stats.data.points.clone()
+        };
+
+        chart.draw_series(LineSeries::new(
+            data_points.iter().cloned(),
+            STEEL_BLUE.stroke_width(2),
+        ))?;
+
+        chart.draw_series(
+            stats
+                .data
+                .points
+                .iter()
+                .cloned()
+                .map(|(x, y)| Circle::new((x, y), marker_size, STEEL_BLUE.filled())),
+        )?;
+
+        root.present()?;
+
+        Ok(())
     }
 
     pub async fn create_charts(&self, test_path: &str) {
@@ -1520,17 +1545,19 @@ impl Report {
             }));
         }
 
-        // Generate charts for audio mos results if they represent a series.
-        let audio_reports = [
-            &self.analysis_report.audio_test_results.visqol_mos_speech,
-            &self.analysis_report.audio_test_results.visqol_mos_audio,
-            &self.analysis_report.audio_test_results.pesq_mos,
-            &self.analysis_report.audio_test_results.plc_mos,
-            &self.analysis_report.audio_test_results.mos_average,
-        ];
-        for report in audio_reports {
-            if let AnalysisReportMos::Series(stats) = report {
-                line_chart_stats.push(stats);
+        if let Some(analysis_report) = &self.analysis_report {
+            // Generate charts for audio mos results if they represent a series.
+            let audio_reports = [
+                &analysis_report.audio_test_results.visqol_mos_speech,
+                &analysis_report.audio_test_results.visqol_mos_audio,
+                &analysis_report.audio_test_results.pesq_mos,
+                &analysis_report.audio_test_results.plc_mos,
+                &analysis_report.audio_test_results.mos_average,
+            ];
+            for report in audio_reports {
+                if let AnalysisReportMos::Series(stats) = report {
+                    line_chart_stats.push(stats);
+                }
             }
         }
 
@@ -1539,7 +1566,9 @@ impl Report {
             let path = test_path.to_string();
             let stats = stats.clone();
             set.spawn_blocking(move || {
-                Report::create_line_chart(&path, &stats);
+                if let Err(err) = Report::create_line_chart(&path, &stats) {
+                    println!("create_line_chart() error: {}", err);
+                }
             });
         }
         while (set.join_next().await).is_some() {}
@@ -1566,7 +1595,7 @@ impl Report {
                 test_case_config,
                 &self.report_name,
                 &self.client_name,
-                &self.analysis_report.audio_test_results,
+                &self.analysis_report,
             )
             .as_bytes(),
         );
@@ -1576,27 +1605,28 @@ impl Report {
         // Add charts for audio mos results if they represent a series to the "Audio Core" section.
         let mut audio_core_stats: Vec<&Stats> = vec![];
 
-        if let AnalysisReportMos::Series(stats) =
-            &self.analysis_report.audio_test_results.visqol_mos_speech
-        {
-            audio_core_stats.push(stats);
-        }
-        if let AnalysisReportMos::Series(stats) =
-            &self.analysis_report.audio_test_results.visqol_mos_audio
-        {
-            audio_core_stats.push(stats);
-        }
-        if let AnalysisReportMos::Series(stats) = &self.analysis_report.audio_test_results.pesq_mos
-        {
-            audio_core_stats.push(stats);
-        }
-        if let AnalysisReportMos::Series(stats) = &self.analysis_report.audio_test_results.plc_mos {
-            audio_core_stats.push(stats);
-        }
-        if let AnalysisReportMos::Series(stats) =
-            &self.analysis_report.audio_test_results.mos_average
-        {
-            audio_core_stats.push(stats);
+        if let Some(analysis_report) = &self.analysis_report {
+            if let AnalysisReportMos::Series(stats) =
+                &analysis_report.audio_test_results.visqol_mos_speech
+            {
+                audio_core_stats.push(stats);
+            }
+            if let AnalysisReportMos::Series(stats) =
+                &analysis_report.audio_test_results.visqol_mos_audio
+            {
+                audio_core_stats.push(stats);
+            }
+            if let AnalysisReportMos::Series(stats) = &analysis_report.audio_test_results.pesq_mos {
+                audio_core_stats.push(stats);
+            }
+            if let AnalysisReportMos::Series(stats) = &analysis_report.audio_test_results.plc_mos {
+                audio_core_stats.push(stats);
+            }
+            if let AnalysisReportMos::Series(stats) =
+                &analysis_report.audio_test_results.mos_average
+            {
+                audio_core_stats.push(stats);
+            }
         }
 
         if !audio_core_stats.is_empty() {
@@ -1853,18 +1883,18 @@ impl Report {
     /// Return the stats value (the average) for the given dimension.
     fn get_stats_value_for_chart(report: &Report, chart_dimension: &ChartDimension) -> f32 {
         match chart_dimension {
-            ChartDimension::MosSpeech => report
-                .analysis_report
-                .audio_test_results
-                .visqol_mos_speech
-                .get_mos_for_display()
-                .unwrap_or(0f32),
-            ChartDimension::MosAudio => report
-                .analysis_report
-                .audio_test_results
-                .visqol_mos_audio
-                .get_mos_for_display()
-                .unwrap_or(0f32),
+            ChartDimension::MosSpeech => report.analysis_report.as_ref().map_or(0f32, |ar| {
+                ar.audio_test_results
+                    .visqol_mos_speech
+                    .get_mos_for_display()
+                    .unwrap_or(0f32)
+            }),
+            ChartDimension::MosAudio => report.analysis_report.as_ref().map_or(0f32, |ar| {
+                ar.audio_test_results
+                    .visqol_mos_audio
+                    .get_mos_for_display()
+                    .unwrap_or(0f32)
+            }),
             ChartDimension::ContainerCpuUsage => report.docker_stats_report.cpu_usage.data.ave,
             ChartDimension::ContainerMemUsage => report.docker_stats_report.mem_usage.data.ave,
             ChartDimension::ContainerTxBitrate => report.docker_stats_report.tx_bitrate.data.ave,
@@ -2211,7 +2241,9 @@ impl Report {
                     chart_dimension.get_name()
                 );
 
-                Report::create_bar_chart(set_path, &stats, domain, data);
+                if let Err(err) = Report::create_bar_chart(set_path, &stats, domain, data) {
+                    println!("create_line_chart() error: {}", err);
+                }
 
                 stats_charts.push(stats);
             }
@@ -2374,32 +2406,28 @@ impl SummaryRow {
             container_memory: report.docker_stats_report.mem_usage.data.ave,
             container_tx_bitrate: report.docker_stats_report.tx_bitrate.data.ave,
             container_rx_bitrate: report.docker_stats_report.rx_bitrate.data.ave,
-            visqol_mos_speech: report
-                .analysis_report
-                .audio_test_results
-                .visqol_mos_speech
-                .get_mos_for_display(),
+            visqol_mos_speech: report.analysis_report.as_ref().and_then(|ar| {
+                ar.audio_test_results
+                    .visqol_mos_speech
+                    .get_mos_for_display()
+            }),
             visqol_mos_audio: report
                 .analysis_report
-                .audio_test_results
-                .visqol_mos_audio
-                .get_mos_for_display(),
+                .as_ref()
+                .and_then(|ar| ar.audio_test_results.visqol_mos_audio.get_mos_for_display()),
             pesq_mos: report
                 .analysis_report
-                .audio_test_results
-                .pesq_mos
-                .get_mos_for_display(),
+                .as_ref()
+                .and_then(|ar| ar.audio_test_results.pesq_mos.get_mos_for_display()),
             plc_mos: report
                 .analysis_report
-                .audio_test_results
-                .plc_mos
-                .get_mos_for_display(),
+                .as_ref()
+                .and_then(|ar| ar.audio_test_results.plc_mos.get_mos_for_display()),
             mos_average: report
                 .analysis_report
-                .audio_test_results
-                .mos_average
-                .get_mos_for_display(),
-            vmaf: report.analysis_report.vmaf,
+                .as_ref()
+                .and_then(|ar| ar.audio_test_results.mos_average.get_mos_for_display()),
+            vmaf: report.analysis_report.as_ref().and_then(|ar| ar.vmaf),
             row_type: SummaryRowType::Single,
             row_index: 0,
         }
@@ -2528,9 +2556,16 @@ impl Html {
                 "<h4 class=\"accordion-header\" id=\"{}-heading{}\">\n",
                 id, i
             );
-            let _ = writeln!(buf, "<button class=\"accordion-button{}\" type=\"button\" data-bs-toggle=\"collapse\" \
+            let _ = writeln!(
+                buf,
+                "<button class=\"accordion-button{}\" type=\"button\" data-bs-toggle=\"collapse\" \
                     data-bs-target=\"#{}-collapse{}\" aria-expanded=\"true\" aria-controls=\"{}-collapse{}\">\n",
-                    if item.collapsed { " collapsed" } else { "" }, id, i, id, i);
+                if item.collapsed { " collapsed" } else { "" },
+                id,
+                i,
+                id,
+                i
+            );
 
             let _ = writeln!(buf, "<h4>{}</h4>\n", item.label);
             buf.push_str("</button>\n");
@@ -2583,7 +2618,7 @@ impl Html {
         test_case_config: &TestCaseConfig,
         test_name: &str,
         client_name: &str,
-        audio_test_results: &AudioTestResults,
+        analysis_report: &Option<AnalysisReport>,
     ) -> String {
         let mut buf = String::new();
 
@@ -2596,11 +2631,33 @@ impl Html {
         buf.push_str("</div>\n");
         buf.push_str("<div class=\"col-md-6\">\n");
 
-        let visqol_mos_speech = audio_test_results.visqol_mos_speech.get_mos_for_display();
-        let visqol_mos_audio = audio_test_results.visqol_mos_audio.get_mos_for_display();
-        let pesq_mos = audio_test_results.pesq_mos.get_mos_for_display();
-        let plc_mos = audio_test_results.plc_mos.get_mos_for_display();
-        let mos_average = audio_test_results.mos_average.get_mos_for_display();
+        let (visqol_mos_speech, visqol_mos_audio, pesq_mos, plc_mos, mos_average) =
+            if let Some(analysis_report) = analysis_report {
+                (
+                    analysis_report
+                        .audio_test_results
+                        .visqol_mos_speech
+                        .get_mos_for_display(),
+                    analysis_report
+                        .audio_test_results
+                        .visqol_mos_audio
+                        .get_mos_for_display(),
+                    analysis_report
+                        .audio_test_results
+                        .pesq_mos
+                        .get_mos_for_display(),
+                    analysis_report
+                        .audio_test_results
+                        .plc_mos
+                        .get_mos_for_display(),
+                    analysis_report
+                        .audio_test_results
+                        .mos_average
+                        .get_mos_for_display(),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
 
         let text_emphasis = Html::get_emphasis_for_mos(mos_average);
 

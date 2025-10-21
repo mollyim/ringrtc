@@ -15,7 +15,7 @@ use crate::webrtc::sim::peer_connection as pc;
 #[cfg(feature = "sim")]
 pub use crate::webrtc::sim::peer_connection::BoxedRtpPacketSink;
 use crate::{
-    common::{units::DataRate, Result},
+    common::{Result, units::DataRate},
     core::util::redact_string,
     error::RingRtcError,
     webrtc,
@@ -99,9 +99,13 @@ impl PeerConnection {
 
     #[cfg(feature = "sim")]
     pub fn set_rtp_packet_sink(&self, rtp_packet_sink: BoxedRtpPacketSink) {
-        unsafe { self.rffi.as_borrowed().as_ref() }
-            .unwrap()
-            .set_rtp_packet_sink(rtp_packet_sink)
+        unsafe {
+            self.rffi
+                .as_borrowed()
+                .as_ref()
+                .unwrap()
+                .set_rtp_packet_sink(rtp_packet_sink)
+        }
     }
 
     pub fn update_transceivers(&self, remote_demux_ids: &[u32]) -> Result<()> {
