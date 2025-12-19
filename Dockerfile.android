@@ -4,11 +4,11 @@ LABEL authors="mollyim"
 # Install essential tools
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git=1:2.43.0-1ubuntu7.3 \
-      python3=3.12.3-0ubuntu2 \
-      unzip=6.0-28ubuntu4.1 \
-      rustup=1.26.0-5build1 \
-      xz-utils=5.6.1+really5.4.5-1ubuntu0.2 \
+      git \
+      python3 \
+      unzip \
+      rustup \
+      xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Set a default Git identity
