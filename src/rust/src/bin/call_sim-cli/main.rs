@@ -48,6 +48,9 @@ struct Args {
     #[arg(long, default_value = "2")]
     stats_initial_offset_secs: u16,
 
+    #[arg(long, default_value = "30")]
+    call_summary_time_limit_secs: u16,
+
     /// Specifies the file (including path) to use for video input.
     ///
     /// Only supported in managed scenario mode at this time.
@@ -255,7 +258,6 @@ fn main() -> Result<()> {
     ringrtc::webrtc::logging::set_logger(log::LevelFilter::Debug);
 
     info!("Setting field trials to {}", &args.field_trials);
-    ringrtc::webrtc::field_trial::init(&args.field_trials).expect("no null characters");
 
     let ice_servers = if args.relay_urls.is_empty() && args.relay_ips.is_empty() {
         vec![IceServer::none()]
@@ -278,6 +280,7 @@ fn main() -> Result<()> {
         },
         stats_interval_secs: args.stats_interval_secs,
         stats_initial_offset_secs: args.stats_initial_offset_secs,
+        call_summary_time_limit_secs: args.call_summary_time_limit_secs,
         audio_config: AudioConfig {
             audio_device_module_type: RffiAudioDeviceModuleType::RingRtc,
             file_based_adm_config: None,
@@ -347,6 +350,7 @@ fn main() -> Result<()> {
             video_output: args.output_video_file.map(Into::into),
             deterministic_loss: args.deterministic_loss,
             call_type_config,
+            field_trials: args.field_trials.to_string(),
         },
     );
 

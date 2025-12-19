@@ -1,6 +1,11 @@
 {
   "name": "@signalapp/ringrtc",
-  "version": "2.59.2",
+  "version": "2.60.5",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/signalapp/ringrtc.git",
+    "directory": "src/node"
+  },
   "description": "Signal Messenger voice and video calling library.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

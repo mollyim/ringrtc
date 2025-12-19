@@ -12,12 +12,16 @@ use libc::size_t;
 use crate::{
     common::{CallConfig, CallMediaType, DataMode, DeviceId},
     core::{group_call, signaling},
-    ios::{call_manager, call_manager::IosCallManager},
+    ios::{
+        api::call_summary::rtc_callsummary_CallSummary,
+        call_manager::{self, IosCallManager},
+        ios_platform::IosCallData,
+    },
     lite::{
         call_links::{CallLinkRootKey, ios::from_optional_u32_to_epoch},
         ffi::ios::rtc_OptionalU32,
-        http, sfu,
-        sfu::DemuxId,
+        http,
+        sfu::{self, DemuxId},
     },
     webrtc::{self, media, peer_connection::AudioLevel, peer_connection_factory as pcf},
 };
@@ -336,85 +340,96 @@ pub struct AppVideoRequestArray {
 #[allow(non_snake_case)]
 /// iOS Interface for communicating with the Swift application.
 pub struct AppInterface {
-    /// Raw Swift object pointer.
+    /// Raw pointer to the Swift interface object.
     pub object: *mut c_void,
-    /// Swift object clean up method.
-    pub destroy: extern "C" fn(object: *mut c_void),
+    /// Swift interface object cleanup method.
+    pub destroy: extern "C" fn(interfaceObject: *mut c_void),
     pub onStartCall: extern "C" fn(
-        object: *mut c_void,
-        remote: *const c_void,
+        interfaceObject: *mut c_void,
+        appCallObject: *const c_void,
         callId: u64,
         isOutgoing: bool,
         callMediaType: i32,
     ),
+    pub onCallEnded: extern "C" fn(
+        interfaceObject: *mut c_void,
+        appCallObject: *const c_void,
+        callId: u64,
+        reason: i32,
+        callSummary: *const rtc_callsummary_CallSummary,
+    ),
     /// Swift event callback method.
-    pub onEvent: extern "C" fn(object: *mut c_void, remote: *const c_void, event: i32),
-    pub onNetworkRouteChanged:
-        extern "C" fn(object: *mut c_void, remote: *const c_void, localNetworkAdapterType: i32),
+    pub onEvent:
+        extern "C" fn(interfaceObject: *mut c_void, appCallObject: *const c_void, event: i32),
+    pub onNetworkRouteChanged: extern "C" fn(
+        interfaceObject: *mut c_void,
+        appCallObject: *const c_void,
+        localNetworkAdapterType: i32,
+    ),
     pub onAudioLevels: extern "C" fn(
-        object: *mut c_void,
-        remote: *const c_void,
+        interfaceObject: *mut c_void,
+        appCallObject: *const c_void,
         capturedLevel: u16,
         receivedLevel: u16,
     ),
     pub onLowBandwidthForVideo:
-        extern "C" fn(object: *mut c_void, remote: *const c_void, recovered: bool),
+        extern "C" fn(interfaceObject: *mut c_void, appCallObject: *const c_void, recovered: bool),
     pub onSendOffer: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         callId: u64,
-        remote: *const c_void,
+        appCallObject: *const c_void,
         destinationDeviceId: u32,
         broadcast: bool,
         opaque: AppByteSlice,
         callMediaType: i32,
     ),
     pub onSendAnswer: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         callId: u64,
-        remote: *const c_void,
+        appCallObject: *const c_void,
         destinationDeviceId: u32,
         broadcast: bool,
         opaque: AppByteSlice,
     ),
     pub onSendIceCandidates: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         callId: u64,
-        remote: *const c_void,
+        appCallObject: *const c_void,
         destinationDeviceId: u32,
         broadcast: bool,
         candidates: *const AppIceCandidateArray,
     ),
     pub onSendHangup: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         callId: u64,
-        remote: *const c_void,
+        appCallObject: *const c_void,
         destinationDeviceId: u32,
         broadcast: bool,
         hangupType: i32,
         deviceId: u32,
     ),
     pub onSendBusy: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         callId: u64,
-        remote: *const c_void,
+        appCallObject: *const c_void,
         destinationDeviceId: u32,
         broadcast: bool,
     ),
     pub sendCallMessage: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         recipientUuid: AppByteSlice,
         message: AppByteSlice,
         urgency: i32,
     ),
     pub sendCallMessageToGroup: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         groupId: AppByteSlice,
         message: AppByteSlice,
         urgency: i32,
         overrideRecipients: AppUuidArray,
     ),
     pub onCreateConnectionInterface: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         observer: *mut c_void,
         deviceId: u32,
         context: *mut c_void,
@@ -423,72 +438,80 @@ pub struct AppInterface {
     ) -> AppConnectionInterface,
     /// Request that the application create an application Media Stream object
     /// associated with the given application Connection object.
-    pub onCreateMediaStreamInterface:
-        extern "C" fn(object: *mut c_void, connection: *mut c_void) -> AppMediaStreamInterface,
+    pub onCreateMediaStreamInterface: extern "C" fn(
+        interfaceObject: *mut c_void,
+        connection: *mut c_void,
+    ) -> AppMediaStreamInterface,
     pub onConnectMedia: extern "C" fn(
-        object: *mut c_void,
-        remote: *const c_void,
+        interfaceObject: *mut c_void,
+        appCallObject: *const c_void,
         context: *mut c_void,
         stream: *const c_void,
     ),
-    pub onCompareRemotes:
-        extern "C" fn(object: *mut c_void, remote1: *const c_void, remote2: *const c_void) -> bool,
-    pub onCallConcluded: extern "C" fn(object: *mut c_void, remote: *const c_void),
+    pub onCallConcluded: extern "C" fn(interfaceObject: *mut c_void, appCallObject: *const c_void),
 
     // Group Calls
     pub groupCallRingUpdate: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         groupId: AppByteSlice,
         ringId: i64,
         senderUuid: AppByteSlice,
         ringUpdate: i32,
     ),
-    pub requestMembershipProof: extern "C" fn(object: *mut c_void, clientId: group_call::ClientId),
-    pub requestGroupMembers: extern "C" fn(object: *mut c_void, clientId: group_call::ClientId),
-    pub handleConnectionStateChanged:
-        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, connectionState: i32),
+    pub requestMembershipProof:
+        extern "C" fn(interfaceObject: *mut c_void, clientId: group_call::ClientId),
+    pub requestGroupMembers:
+        extern "C" fn(interfaceObject: *mut c_void, clientId: group_call::ClientId),
+    pub handleConnectionStateChanged: extern "C" fn(
+        interfaceObject: *mut c_void,
+        clientId: group_call::ClientId,
+        connectionState: i32,
+    ),
     pub handleNetworkRouteChanged: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         localNetworkAdapterType: i32,
     ),
     pub handleAudioLevels: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         capturedLevel: u16,
         receivedAudioLevels: AppReceivedAudioLevelArray,
     ),
-    pub handleLowBandwidthForVideo:
-        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, recovered: bool),
+    pub handleLowBandwidthForVideo: extern "C" fn(
+        interfaceObject: *mut c_void,
+        clientId: group_call::ClientId,
+        recovered: bool,
+    ),
     pub handleReactions: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         reactions: AppReactionsArray,
     ),
     pub handleRaisedHands: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         raisedHands: AppRaisedHandsArray,
     ),
     pub handleJoinStateChanged: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         joinState: i32,
         demuxId: AppOptionalUInt32,
     ),
     pub handleRemoteDevicesChanged: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         remoteDeviceStates: AppRemoteDeviceStateArray,
     ),
     pub handleIncomingVideoTrack: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         remoteDemuxId: DemuxId,
         nativeVideoTrack: *mut c_void,
     ),
     pub handlePeekChanged: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         joinedMembers: AppUuidArray,
         creator: AppByteSlice,
@@ -498,14 +521,21 @@ pub struct AppInterface {
         deviceCountExcludingPendingDevices: u32,
         pendingUsers: AppUuidArray,
     ),
-    pub handleEnded:
-        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, reason: i32),
+    pub handleEnded: extern "C" fn(
+        interfaceObject: *mut c_void,
+        clientId: group_call::ClientId,
+        reason: i32,
+        call_summary: *const rtc_callsummary_CallSummary,
+    ),
     pub handleSpeakingNotification:
-        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, event: i32),
-    pub handleRemoteMuteRequest:
-        extern "C" fn(object: *mut c_void, clientId: group_call::ClientId, mute_source: u32),
+        extern "C" fn(interfaceObject: *mut c_void, clientId: group_call::ClientId, event: i32),
+    pub handleRemoteMuteRequest: extern "C" fn(
+        interfaceObject: *mut c_void,
+        clientId: group_call::ClientId,
+        mute_source: u32,
+    ),
     pub handleObservedRemoteMute: extern "C" fn(
-        object: *mut c_void,
+        interfaceObject: *mut c_void,
         clientId: group_call::ClientId,
         mute_source: u32,
         mute_target: u32,
@@ -570,13 +600,23 @@ pub extern "C" fn ringrtcSetSelfUuid(callManager: *mut c_void, uuid: AppByteSlic
 #[allow(non_snake_case)]
 pub extern "C" fn ringrtcCall(
     callManager: *mut c_void,
-    appRemote: *const c_void,
+    appCallObject: *const c_void,
+    remoteUuid: AppByteSlice,
     callMediaType: i32,
     appLocalDevice: u32,
 ) -> *mut c_void {
+    let remote_uuid = if let Some(uuid) = byte_vec_from_app_slice(&remoteUuid) {
+        uuid
+    } else {
+        error!("Invalid remoteUuid");
+        return ptr::null_mut();
+    };
+
+    let call_data = IosCallData::new_call(AppObject::from(appCallObject), remote_uuid);
+
     match call_manager::call(
         callManager as *mut IosCallManager,
-        appRemote,
+        call_data,
         CallMediaType::from_i32(callMediaType),
         appLocalDevice as DeviceId,
     ) {
@@ -700,16 +740,25 @@ pub extern "C" fn ringrtcCancelGroupRing(
 pub extern "C" fn ringrtcReceivedAnswer(
     callManager: *mut c_void,
     callId: u64,
-    remotePeer: *const c_void,
+    remoteUuid: AppByteSlice,
     senderDeviceId: u32,
     opaque: AppByteSlice,
     senderIdentityKey: AppByteSlice,
     receiverIdentityKey: AppByteSlice,
 ) -> *mut c_void {
+    let remote_uuid = if let Some(uuid) = byte_vec_from_app_slice(&remoteUuid) {
+        uuid
+    } else {
+        error!("Invalid remoteUuid");
+        return ptr::null_mut();
+    };
+
+    let call_data = IosCallData::new_remote(remote_uuid);
+
     match call_manager::received_answer(
         callManager as *mut IosCallManager,
         callId,
-        remotePeer,
+        call_data,
         senderDeviceId as DeviceId,
         byte_vec_from_app_slice(&opaque),
         byte_vec_from_app_slice(&senderIdentityKey),
@@ -731,7 +780,8 @@ pub extern "C" fn ringrtcReceivedAnswer(
 pub extern "C" fn ringrtcReceivedOffer(
     callManager: *mut c_void,
     callId: u64,
-    remotePeer: *const c_void,
+    appCallObject: *const c_void,
+    remoteUuid: AppByteSlice,
     senderDeviceId: u32,
     opaque: AppByteSlice,
     messageAgeSec: u64,
@@ -740,10 +790,19 @@ pub extern "C" fn ringrtcReceivedOffer(
     senderIdentityKey: AppByteSlice,
     receiverIdentityKey: AppByteSlice,
 ) -> *mut c_void {
+    let remote_uuid = if let Some(uuid) = byte_vec_from_app_slice(&remoteUuid) {
+        uuid
+    } else {
+        error!("Invalid remoteUuid");
+        return ptr::null_mut();
+    };
+
+    let call_data = IosCallData::new_call(AppObject::from(appCallObject), remote_uuid);
+
     match call_manager::received_offer(
         callManager as *mut IosCallManager,
         callId,
-        remotePeer,
+        call_data,
         senderDeviceId as DeviceId,
         byte_vec_from_app_slice(&opaque),
         messageAgeSec,
@@ -768,10 +827,19 @@ pub extern "C" fn ringrtcReceivedOffer(
 pub extern "C" fn ringrtcReceivedIceCandidates(
     callManager: *mut c_void,
     callId: u64,
-    remotePeer: *const c_void,
+    remoteUuid: AppByteSlice,
     senderDeviceId: u32,
     appIceCandidateArray: *const AppIceCandidateArray,
 ) -> *mut c_void {
+    let remote_uuid = if let Some(uuid) = byte_vec_from_app_slice(&remoteUuid) {
+        uuid
+    } else {
+        error!("Invalid remoteUuid");
+        return ptr::null_mut();
+    };
+
+    let call_data = IosCallData::new_remote(remote_uuid);
+
     let count = unsafe { (*appIceCandidateArray).count };
     let candidates = unsafe { (*appIceCandidateArray).candidates };
 
@@ -793,7 +861,7 @@ pub extern "C" fn ringrtcReceivedIceCandidates(
     match call_manager::received_ice(
         callManager as *mut IosCallManager,
         callId,
-        remotePeer,
+        call_data,
         signaling::ReceivedIce {
             ice: signaling::Ice {
                 candidates: ice_candidates,
@@ -814,15 +882,24 @@ pub extern "C" fn ringrtcReceivedIceCandidates(
 pub extern "C" fn ringrtcReceivedHangup(
     callManager: *mut c_void,
     callId: u64,
-    remotePeer: *const c_void,
+    remoteUuid: AppByteSlice,
     remoteDevice: u32,
     hangupType: i32,
     deviceId: u32,
 ) -> *mut c_void {
+    let remote_uuid = if let Some(uuid) = byte_vec_from_app_slice(&remoteUuid) {
+        uuid
+    } else {
+        error!("Invalid remoteUuid");
+        return ptr::null_mut();
+    };
+
+    let call_data = IosCallData::new_remote(remote_uuid);
+
     match call_manager::received_hangup(
         callManager as *mut IosCallManager,
         callId,
-        remotePeer,
+        call_data,
         remoteDevice as DeviceId,
         signaling::HangupType::from_i32(hangupType).unwrap_or(signaling::HangupType::Normal),
         deviceId as DeviceId,
@@ -840,13 +917,22 @@ pub extern "C" fn ringrtcReceivedHangup(
 pub extern "C" fn ringrtcReceivedBusy(
     callManager: *mut c_void,
     callId: u64,
-    remotePeer: *const c_void,
+    remoteUuid: AppByteSlice,
     remoteDevice: u32,
 ) -> *mut c_void {
+    let remote_uuid = if let Some(uuid) = byte_vec_from_app_slice(&remoteUuid) {
+        uuid
+    } else {
+        error!("Invalid remoteUuid");
+        return ptr::null_mut();
+    };
+
+    let call_data = IosCallData::new_remote(remote_uuid);
+
     match call_manager::received_busy(
         callManager as *mut IosCallManager,
         callId,
-        remotePeer,
+        call_data,
         remoteDevice as DeviceId,
     ) {
         Ok(_v) => {

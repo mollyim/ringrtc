@@ -423,16 +423,20 @@ impl PeerConnectionFactory {
     pub fn new(
         audio_config: &AudioConfig,
         use_injectable_network: bool,
+        field_trials_string: &str,
         audio_device_observer: Option<Box<dyn AudioDeviceObserver>>,
     ) -> Result<Self> {
         debug!("PeerConnectionFactory::new()");
 
         let audio_config_rffi = audio_config.rffi(audio_device_observer)?;
 
+        let field_trials_cstr = CString::new(field_trials_string)?;
+
         let rffi = unsafe {
             webrtc::Arc::from_owned(pcf::Rust_createPeerConnectionFactory(
                 webrtc::ptr::Borrowed::from_ptr(&audio_config_rffi.rffi),
                 use_injectable_network,
+                field_trials_cstr.as_ptr(),
             ))
         };
         if rffi.is_null() {
@@ -503,7 +507,7 @@ impl PeerConnectionFactory {
         // the RffiPeerConnectionObserver is *not* passed as owned
         // by Rust_createPeerConnection, so we need to keep it alive
         // for as long as the native PeerConnection is alive.
-        // we do this by passing a webrtc::ptr::Unique<RffiPeerConnectionObserver> to
+        // We do this by passing a webrtc::ptr::Unique<RffiPeerConnectionObserver> to
         // the Rust-level PeerConnection and let it own it.
         let pc_observer_rffi = pc_observer.into_rffi();
         let servers: Vec<RffiIceServer> = ice_servers.iter().map(|s| s.rffi()).collect();
@@ -697,6 +701,16 @@ impl PeerConnectionFactory {
         }
     }
 
+    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    pub fn set_audio_playout_device_by_id(&mut self, device_id: &str) -> Result<()> {
+        self.adm
+            .as_ref()
+            .and_then(|adm| adm.lock().ok())
+            .map_or(Err(anyhow!("couldn't access ADM")), |mut adm| {
+                adm.set_playout_device_by_id(device_id)
+            })
+    }
+
     #[cfg(feature = "native")]
     fn get_audio_recording_device(&self, index: u16) -> Result<AudioDevice> {
         let mut name_buf = [0; ADM_MAX_DEVICE_NAME_SIZE];
@@ -817,10 +831,52 @@ impl PeerConnectionFactory {
     }
 
     #[cfg(all(not(feature = "sim"), feature = "native"))]
+    pub fn set_audio_recording_device_by_id(&mut self, device_id: &str) -> Result<()> {
+        self.adm
+            .as_ref()
+            .and_then(|adm| adm.lock().ok())
+            .map_or(Err(anyhow!("couldn't access ADM")), |mut adm| {
+                adm.set_recording_device_by_id(device_id)
+            })
+    }
+
+    #[cfg(all(not(feature = "sim"), feature = "native"))]
     pub fn audio_backend(&self) -> Option<String> {
         self.adm
             .as_ref()
             .and_then(|adm| adm.lock().ok())
             .map(|adm| adm.backend_name())
+    }
+
+    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    pub fn set_audio_warmup(&mut self, enable: bool) -> Result<()> {
+        if self
+            .adm
+            .as_ref()
+            .and_then(|adm| adm.lock().ok())
+            .and_then(|mut adm| {
+                if enable {
+                    if adm.init_recording() != 0 {
+                        warn!("Failed to init recording for warmup");
+                        return None;
+                    }
+                    adm.warmup_recording().ok()
+                } else {
+                    if adm.stop_recording() != 0 {
+                        warn!("failed to stop recording");
+                        return None;
+                    }
+                    Some(())
+                }
+            })
+            .is_none()
+        {
+            if enable {
+                return Err(anyhow!("Failed to warm up mic"));
+            } else {
+                return Err(anyhow!("Failed to stop warming up mic"));
+            }
+        };
+        Ok(())
     }
 }

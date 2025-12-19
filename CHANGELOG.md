@@ -1,5 +1,59 @@
 # Changelog
 
+## v2.60.5
+
+- Fix packet loss calculation
+
+## v2.60.4
+
+- Desktop: Retry build
+
+## v2.60.3
+
+- Retry build
+
+## v2.60.2
+
+- Improve call summary stats handling
+
+## v2.60.1
+
+- Desktop: Retry build
+
+## v2.60.0
+
+- Add support for the calling survey feature
+
+- Desktop: Allow for "microphone warm up"
+
+- Improve usability of virtual audio for rusty and other test use cases
+
+- Update to webrtc 7339f
+  - Update field trials mechanism
+  - Add separate rtp packet observer for received data
+  - Avoid errors when unregistering sinks
+
+- Build improvements
+
+## v2.59.4
+
+- Desktop: Update to cubeb 0.33.0
+
+- Desktop: Use OIDC auth instead of an automation token
+
+## v2.59.3
+
+- iOS: Use UUID as RemotePeer for received messages
+
+- Update to webrtc 7339d
+  - Add backup connection candidate stats and ICE check stats
+
+- Add ICE stats and connection stats for backup candidate pairs
+
+- Call Sim: Fix cleanup of tcpdump for clients
+
+- CI: Switch to macos-14 runner for Desktop builds
+
 ## v2.59.2
 
 - Add support for fragmenting large data messages to SFU

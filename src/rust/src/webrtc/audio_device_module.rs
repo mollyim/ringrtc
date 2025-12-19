@@ -57,7 +57,6 @@ pub enum AudioLayer {
 // Stays in sync with WindowsDeviceType in webrtc
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum WindowsDeviceType {
     DefaultCommunicationDevice = -1,
     DefaultDevice = -2,
@@ -85,12 +84,15 @@ enum Event {
     RefreshCache(DeviceType),
     SetCallback(Arc<Mutex<RffiAudioTransport>>),
     SetPlayoutDevice(u16),
+    SetPlayoutDeviceById(String),
     SetRecordingDevice(u16),
+    SetRecordingDeviceById(String),
     InitPlayout,
     StartPlayout,
     StopPlayout,
     InitRecording,
     StartRecording,
+    WarmupRecording,
     StopRecording,
     PlayoutDelay,
     Terminate,
@@ -105,7 +107,7 @@ struct UpdateCallbackData {
 
 struct Worker {
     ctx: Context,
-    // We will  pass raw pointers to these to the cubeb API.
+    // We will pass raw pointers to these to the cubeb API.
     // These must be destroyed **after** we unregister the callbacks with cubeb.
     input_data: UpdateCallbackData,
     output_data: UpdateCallbackData,
@@ -123,6 +125,7 @@ struct Worker {
     output_device_names: Arc<Mutex<Vec<Option<AudioDevice>>>>,
     audio_transport: Arc<Mutex<RffiAudioTransport>>,
     audio_device_observer: Option<Box<dyn AudioDeviceObserver>>,
+    send_to_webrtc: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -391,6 +394,12 @@ impl Worker {
     }
 
     fn init_recording(&mut self) -> anyhow::Result<()> {
+        if !self.send_to_webrtc.load(Ordering::SeqCst) && self.input_stream.is_some() {
+            // Assume that this is the flow to "upgrade" from warmup to recording and do nothing
+            info!("Skipping init_recording because we seem to be in warmup mode");
+            return Ok(());
+        }
+
         let recording_device = if let Some(device) = self.recording_device {
             device
         } else {
@@ -420,16 +429,24 @@ impl Worker {
             SAMPLE_LATENCY
         });
         info!("min recording latency: {}", min_latency);
+
+        // Default this to sending to WebRTC
+        self.send_to_webrtc.store(true, Ordering::SeqCst);
         // WebRTC can only accept data in WEBRTC_WINDOW-sized chunks.
         // This buffer tracks any extra data that would not fit in a call to WebRTC,
         // if `input.len()` is not an exact multiple of WEBRTC_WINDOW.
         let mut buffer = VecDeque::<i16>::new();
+        let send_to_webrtc = self.send_to_webrtc.clone();
         buffer.reserve(WEBRTC_WINDOW);
         builder
             .name("ringrtc input")
             .input(recording_device, &params)
             .latency(std::cmp::max(SAMPLE_LATENCY, min_latency))
             .data_callback(move |input, _| {
+                if !send_to_webrtc.load(Ordering::SeqCst) {
+                    // Just drop this; we're warming the mic
+                    return input.len() as isize;
+                }
                 // First add data from prior call(s).
                 let data = buffer
                     .drain(0..)
@@ -478,7 +495,12 @@ impl Worker {
         }
     }
 
-    fn start_recording(&mut self) -> anyhow::Result<()> {
+    fn start_recording(&mut self, send_to_webrtc: bool) -> anyhow::Result<()> {
+        let was_sending = self.send_to_webrtc.swap(send_to_webrtc, Ordering::SeqCst);
+        if !was_sending {
+            // We were warming up; all we need to do is start sending to webrtc (or continue warmup).
+            return Ok(());
+        }
         if let Some(input_stream) = &self.input_stream {
             if let Err(e) = input_stream.start() {
                 bail!("Failed to start recording: {}", e);
@@ -493,7 +515,10 @@ impl Worker {
 
     fn stop_recording(&mut self) -> anyhow::Result<()> {
         if let Some(input_stream) = &self.input_stream {
-            if let Err(e) = input_stream.stop() {
+            let res = input_stream.stop();
+            // Reset **after** we stop recording to avoid sending data to webrtc incorrectly
+            self.send_to_webrtc.store(true, Ordering::SeqCst);
+            if let Err(e) = res {
                 bail!("Failed to stop recording: {}", e);
             }
             // Drop the stream so that it isn't reused on future calls.
@@ -542,7 +567,29 @@ impl Worker {
                         ))
                     }
                 }
+                Event::SetPlayoutDeviceById(ref id) => {
+                    if let Some(d) = self.output_device_cache.iter().find(|d| {
+                        d.device_id
+                            .as_ref()
+                            .is_some_and(|actual_id| actual_id == id)
+                    }) {
+                        self.playout_device = Some(d.devid);
+                        Ok(())
+                    } else {
+                        Err(anyhow!(
+                            "Invalid playout device id {} requested",
+                            redact_for_logging(id)
+                        ))
+                    }
+                }
                 Event::SetRecordingDevice(index) => {
+                    if !self.send_to_webrtc.load(Ordering::SeqCst)
+                        && self.input_stream.is_some()
+                        && let Err(e) = self.stop_recording()
+                    {
+                        warn!("Failed to stop recording: {}", e);
+                    }
+
                     if let Some(d) = self.input_device_cache.get(index.into()) {
                         self.recording_device = Some(d.devid);
                         Ok(())
@@ -554,11 +601,27 @@ impl Worker {
                         ))
                     }
                 }
+                Event::SetRecordingDeviceById(ref id) => {
+                    if let Some(d) = self.input_device_cache.iter().find(|d| {
+                        d.device_id
+                            .as_ref()
+                            .is_some_and(|actual_id| actual_id == id)
+                    }) {
+                        self.recording_device = Some(d.devid);
+                        Ok(())
+                    } else {
+                        Err(anyhow!(
+                            "Invalid recording device id {} requested",
+                            redact_for_logging(id)
+                        ))
+                    }
+                }
                 Event::InitPlayout => self.init_playout(),
                 Event::StartPlayout => self.start_playout(),
                 Event::StopPlayout => self.stop_playout(),
                 Event::InitRecording => self.init_recording(),
-                Event::StartRecording => self.start_recording(),
+                Event::StartRecording => self.start_recording(true),
+                Event::WarmupRecording => self.start_recording(false),
                 Event::StopRecording => self.stop_recording(),
                 Event::PlayoutDelay => {
                     if let Err(e) = playout_delay_sender.send(self.playout_delay()) {
@@ -752,6 +815,7 @@ impl Worker {
                     callback: std::ptr::null(),
                 })),
                 audio_device_observer: None,
+                send_to_webrtc: Arc::new(AtomicBool::new(true)),
             };
             if let Err(e) = worker.register_device_collection_changed(DeviceType::INPUT) {
                 error!("Failed to register input device callback: {}", e);
@@ -1228,6 +1292,40 @@ impl AudioDeviceModule {
         0
     }
 
+    fn set_device_by_id(
+        &mut self,
+        id: &str,
+        device_type: DeviceType,
+        event: Event,
+    ) -> anyhow::Result<()> {
+        let devices = self.enumerate_devices(device_type)?;
+        // Do a quick plausibility check to see if we know about this device.
+        // Of course, the worker will still have to check again in case the device gets unplugged,
+        // but we can fail fast in the common case.
+        if devices
+            .iter()
+            .any(|dopt| dopt.as_ref().is_some_and(|d| d.unique_id == id))
+        {
+            if let Err(e) = self.mpsc_sender.send(event) {
+                bail!("Failed to request Set*DeviceById {}", e);
+            }
+        } else {
+            if devices.is_empty() {
+                info!("Likely failed to get device due to benign startup race");
+            }
+            bail!("No device with ID {}", redact_for_logging(id));
+        }
+        Ok(())
+    }
+
+    pub fn set_playout_device_by_id(&mut self, id: &str) -> anyhow::Result<()> {
+        self.set_device_by_id(
+            id,
+            DeviceType::OUTPUT,
+            Event::SetPlayoutDeviceById(id.to_string()),
+        )
+    }
+
     pub fn set_playout_device_win(&mut self, device: WindowsDeviceType) -> i32 {
         // DefaultDevice is at index 0 and DefaultCommunicationDevice at index 1
         self.set_playout_device(if device == WindowsDeviceType::DefaultDevice {
@@ -1266,6 +1364,14 @@ impl AudioDeviceModule {
         };
         self.has_recording_device = true;
         0
+    }
+
+    pub fn set_recording_device_by_id(&mut self, id: &str) -> anyhow::Result<()> {
+        self.set_device_by_id(
+            id,
+            DeviceType::INPUT,
+            Event::SetRecordingDeviceById(id.to_string()),
+        )
     }
 
     pub fn set_recording_device_win(&mut self, device: WindowsDeviceType) -> i32 {
@@ -1357,6 +1463,14 @@ impl AudioDeviceModule {
             return -1;
         }
         0
+    }
+
+    // Not a chromium interface function
+    pub fn warmup_recording(&mut self) -> anyhow::Result<()> {
+        if let Err(e) = self.mpsc_sender.send(Event::WarmupRecording) {
+            return Err(anyhow!("Failed to request WarmupRecording: {}", e));
+        }
+        Ok(())
     }
 
     pub fn stop_recording(&mut self) -> i32 {

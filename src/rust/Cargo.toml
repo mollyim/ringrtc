@@ -58,6 +58,9 @@ static_assertions = { version = "1.1.0"  }
 subtle            = { version = "2.6.1"  }
 thiserror         = { version = "1.0.69" }
 x25519-dalek      = { version = "2.0.1", features = ["static_secrets"] }
+strum             = { version = "0.27.2", features = ["derive"] }
+strum_macros      = { version = "0.27.2" }
+sketches-ddsketch = { version = "0.3.0" }
 
 # Used by call links. Be careful not to pull in more than strictly needed, for both code size and
 # maintenance reasons. In particular, anything involving credentials should be left to
@@ -95,8 +98,8 @@ call_protobuf = { path = "../../protobuf", package = "protobuf"}
 mrp = { path = "../../mrp" }
 
 # Optional, needed by "native" feature
-cubeb = {  version = "0.31.2", optional = true }
-cubeb-core = {  version = "0.31.2", optional = true }
+cubeb = {  version = "0.33.0", optional = true }
+cubeb-core = {  version = "0.33.0", optional = true }
 regex = {  version = "1.11.1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -120,6 +123,7 @@ sim_http = ["ureq", "rustls"]
 check-all = ["electron", "jni"]
 call_sim = ["call_protobuf/call_sim", "native", "injectable_network", "bitvec", "chrono", "clap", "fern", "tokio", "tonic", "tonic-prost", "tower", "sim_http"]
 direct = ["native", "simnet", "chrono", "clap"]
+virtual_audio = []
 
 [[test]]
 name = "incoming"

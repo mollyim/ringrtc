@@ -21,13 +21,14 @@ use neon::{
     prelude::*,
     types::{JsBigInt, buffer::TypedArray},
 };
+use strum::IntoDiscriminant;
 
 use crate::{
     common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result},
     core::{
         call_manager::CallManager,
-        group_call,
-        group_call::{GroupId, SignalingMessageUrgency},
+        call_summary::{CallSummary, MediaQualityStats, QualityStats},
+        group_call::{self, GroupId, SignalingMessageUrgency},
         signaling,
         util::minmax,
     },
@@ -36,15 +37,14 @@ use crate::{
             self, CallLinkDeleteRequest, CallLinkEpoch, CallLinkRestrictions, CallLinkRootKey,
             CallLinkState, CallLinkUpdateRequest, Empty,
         },
-        http, sfu,
-        sfu::{DemuxId, GroupMember, PeekInfo, UserId},
+        http,
+        sfu::{self, DemuxId, GroupMember, PeekInfo, UserId},
     },
     native::{
-        CallState, CallStateHandler, EndReason, GroupUpdate, GroupUpdateHandler, NativeCallContext,
-        NativePlatform, PeerId, SignalingSender,
+        CallState, CallStateHandler, GroupUpdate, GroupUpdateHandler, NativeCallContext,
+        NativePlatform, PeerId, RejectReason, SignalingSender,
     },
     webrtc::{
-        field_trial,
         media::{AudioTrack, VideoFrame, VideoPixelFormat, VideoSink, VideoSource, VideoTrack},
         peer_connection::AudioLevel,
         peer_connection_factory::{
@@ -407,7 +407,11 @@ pub struct CallEndpoint {
 }
 
 impl CallEndpoint {
-    fn new<'a>(cx: &mut impl Context<'a>, js_object: Handle<'a, JsObject>) -> Result<Self> {
+    fn new<'a>(
+        cx: &mut impl Context<'a>,
+        js_object: Handle<'a, JsObject>,
+        field_trial_string: &str,
+    ) -> Result<Self> {
         // Set up a channel for events and logs.
         let (events_sender, events_receiver) = channel::<Event>();
         let event_reported = Arc::new(AtomicBool::new(false));
@@ -469,6 +473,7 @@ impl CallEndpoint {
         let peer_connection_factory = PeerConnectionFactory::new(
             &pcf::AudioConfig::default(),
             false,
+            field_trial_string,
             Some(Box::new(ElectronAudioDeviceObserver {
                 event_reporter: event_reporter.clone(),
             })),
@@ -693,6 +698,82 @@ fn to_js_call_link_state<'a>(
     }
 }
 
+fn to_js_media_quality_stats<'a>(
+    cx: &mut FunctionContext<'a>,
+    media_quality_stats: &MediaQualityStats,
+) -> JsResult<'a, JsObject> {
+    let media_quality_stats_object = cx.empty_object();
+
+    if let Some(rtt_median) = media_quality_stats.rtt_median {
+        let rtt_median = cx.number(rtt_median);
+        media_quality_stats_object.set(cx, "rttMedianMillis", rtt_median)?;
+    }
+    if let Some(jitter_median_send) = media_quality_stats.jitter_median_send {
+        let jitter_median_send = cx.number(jitter_median_send);
+        media_quality_stats_object.set(cx, "jitterMedianSendMillis", jitter_median_send)?;
+    }
+    if let Some(jitter_median_recv) = media_quality_stats.jitter_median_recv {
+        let jitter_median_recv = cx.number(jitter_median_recv);
+        media_quality_stats_object.set(cx, "jitterMedianRecvMillis", jitter_median_recv)?;
+    }
+    if let Some(packet_loss_fraction_send) = media_quality_stats.packet_loss_fraction_send {
+        let packet_loss_fraction_send = cx.number(packet_loss_fraction_send);
+        media_quality_stats_object.set(cx, "packetLossFractionSend", packet_loss_fraction_send)?;
+    }
+    if let Some(packet_loss_fraction_recv) = media_quality_stats.packet_loss_fraction_recv {
+        let packet_loss_fraction_recv = cx.number(packet_loss_fraction_recv);
+        media_quality_stats_object.set(cx, "packetLossFractionRecv", packet_loss_fraction_recv)?;
+    }
+
+    Ok(media_quality_stats_object)
+}
+
+fn to_js_quality_stats<'a>(
+    cx: &mut FunctionContext<'a>,
+    quality_stats: &QualityStats,
+) -> JsResult<'a, JsObject> {
+    let quality_stats_object = cx.empty_object();
+
+    if let Some(rtt_median_connection) = quality_stats.rtt_median_connection {
+        let rtt_median_connection = cx.number(rtt_median_connection);
+        quality_stats_object.set(cx, "rttMedianConnectionMillis", rtt_median_connection)?;
+    }
+    let audio_stats = to_js_media_quality_stats(cx, &quality_stats.audio_stats)?;
+    quality_stats_object.set(cx, "audioStats", audio_stats)?;
+    let video_stats = to_js_media_quality_stats(cx, &quality_stats.video_stats)?;
+    quality_stats_object.set(cx, "videoStats", video_stats)?;
+
+    Ok(quality_stats_object)
+}
+
+fn to_js_call_summary<'a>(
+    cx: &mut FunctionContext<'a>,
+    summary: CallSummary,
+) -> JsResult<'a, JsObject> {
+    let summary_object = cx.empty_object();
+
+    let start_time = cx.number(summary.start_time);
+    summary_object.set(cx, "startTime", start_time)?;
+    let end_time = cx.number(summary.end_time);
+    summary_object.set(cx, "endTime", end_time)?;
+    let quality_stats_object = to_js_quality_stats(cx, &summary.quality_stats)?;
+    summary_object.set(cx, "qualityStats", quality_stats_object)?;
+    if let Some(raw_stats) = summary.raw_stats.as_ref() {
+        let raw_stats = JsUint8Array::from_slice(cx, raw_stats)?;
+        summary_object.set(cx, "rawStats", raw_stats)?;
+    }
+    if let Some(raw_stats_text) = summary.raw_stats_text.as_ref() {
+        let raw_stats_text = cx.string(raw_stats_text);
+        summary_object.set(cx, "rawStatsText", raw_stats_text)?;
+    }
+    let call_end_reason_text = cx.string(&summary.call_end_reason_text);
+    summary_object.set(cx, "callEndReasonText", call_end_reason_text)?;
+    let is_survey_candidate = cx.boolean(summary.is_survey_candidate);
+    summary_object.set(cx, "isSurveyCandidate", is_survey_candidate)?;
+
+    Ok(summary_object)
+}
+
 static CALL_ENDPOINT_PROPERTY_KEY: &str = "__call_endpoint_addr";
 
 fn with_call_endpoint<T>(cx: &mut FunctionContext, body: impl FnOnce(&mut CallEndpoint) -> T) -> T {
@@ -736,10 +817,7 @@ fn createCallEndpoint(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     debug!("JsCallManager()");
 
-    let _ = field_trial::init(&field_trial_string);
-    info!("initialized field trials with {}", field_trial_string);
-
-    let endpoint = CallEndpoint::new(&mut cx, js_call_manager)
+    let endpoint = CallEndpoint::new(&mut cx, js_call_manager, &field_trial_string)
         .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.boxed(RefCell::new(endpoint)).upcast())
 }
@@ -1220,6 +1298,18 @@ fn setOutgoingAudioEnabled(mut cx: FunctionContext) -> JsResult<JsValue> {
             })?;
         }
         Ok(())
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn setMicrophoneWarmupEnabled(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let enabled = cx.argument::<JsBoolean>(0)?.value(&mut cx);
+    info!("setMicrophoneWarmupEnabled({})", enabled);
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint.peer_connection_factory.set_audio_warmup(enabled)
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
     Ok(cx.undefined().upcast())
@@ -2389,37 +2479,30 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 method.call(&mut cx, observer, args)?;
             }
 
-            Event::CallState(peer_id, call_id, CallState::Ended(reason)) => {
-                let method_name = "onCallEnded";
-                let reason_string = match reason {
-                    EndReason::LocalHangup => "LocalHangup",
-                    EndReason::RemoteHangup => "RemoteHangup",
-                    EndReason::RemoteHangupNeedPermission => "RemoteHangupNeedPermission",
-                    EndReason::Declined => "Declined",
-                    EndReason::Busy => "Busy",
-                    EndReason::Glare => "Glare",
-                    EndReason::ReCall => "ReCall",
-                    EndReason::ReceivedOfferExpired { .. } => "ReceivedOfferExpired",
-                    EndReason::ReceivedOfferWhileActive => "ReceivedOfferWhileActive",
-                    EndReason::ReceivedOfferWithGlare => "ReceivedOfferWithGlare",
-                    EndReason::SignalingFailure => "SignalingFailure",
-                    EndReason::GlareFailure => "GlareFailure",
-                    EndReason::ConnectionFailure => "ConnectionFailure",
-                    EndReason::InternalFailure => "InternalFailure",
-                    EndReason::Timeout => "Timeout",
-                    EndReason::AcceptedOnAnotherDevice => "AcceptedOnAnotherDevice",
-                    EndReason::DeclinedOnAnotherDevice => "DeclinedOnAnotherDevice",
-                    EndReason::BusyOnAnotherDevice => "BusyOnAnotherDevice",
-                };
+            Event::CallState(peer_id, call_id, CallState::Rejected(reason)) => {
+                let method_name = "onCallRejected";
                 let age = match reason {
-                    EndReason::ReceivedOfferExpired { age } => age,
+                    RejectReason::ReceivedOfferExpired { age } => age,
                     _ => Duration::ZERO,
                 };
                 let args = [
                     cx.string(peer_id).upcast(),
                     create_id_arg(&mut cx, call_id.as_u64()),
-                    cx.string(reason_string).upcast(),
+                    cx.number(reason.discriminant() as i32).upcast(),
                     cx.number(age.as_secs_f64()).upcast(),
+                ];
+                let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
+                method.call(&mut cx, observer, args)?;
+            }
+
+            Event::CallState(peer_id, call_id, CallState::Ended(reason, summary)) => {
+                let method_name = "onCallEnded";
+                let js_summary = to_js_call_summary(&mut cx, summary)?;
+                let args = [
+                    cx.string(peer_id).upcast(),
+                    create_id_arg(&mut cx, call_id.as_u64()),
+                    cx.number(reason as i32).upcast(),
+                    js_summary.upcast(),
                 ];
                 let method = observer.get::<JsFunction, _, _>(&mut cx, method_name)?;
                 method.call(&mut cx, observer, args)?;
@@ -2447,7 +2530,8 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                     // All covered above.
                     CallState::Incoming(_) => "incoming",
                     CallState::Outgoing(_) => "outgoing",
-                    CallState::Ended(_) => "ended",
+                    CallState::Ended(_, _) => "ended",
+                    CallState::Rejected(_) => "rejected",
                 };
                 let args = [
                     cx.string(peer_id).upcast(),
@@ -2823,11 +2907,13 @@ fn processEvents(mut cx: FunctionContext) -> JsResult<JsValue> {
                 method.call(&mut cx, observer, args)?;
             }
 
-            Event::GroupUpdate(GroupUpdate::Ended(client_id, reason)) => {
+            Event::GroupUpdate(GroupUpdate::Ended(client_id, reason, summary)) => {
                 let method_name = "handleEnded";
+                let js_summary = to_js_call_summary(&mut cx, summary)?;
                 let args = [
                     cx.number(client_id).upcast(),
                     cx.number(reason as i32).upcast(),
+                    js_summary.upcast(),
                 ];
                 with_call_endpoint(&mut cx, |endpoint| {
                     endpoint.incoming_video_sink.clear();
@@ -3118,6 +3204,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_receivedHttpResponse", receivedHttpResponse)?;
     cx.export_function("cm_httpRequestFailed", httpRequestFailed)?;
     cx.export_function("cm_setOutgoingAudioEnabled", setOutgoingAudioEnabled)?;
+    cx.export_function("cm_setMicrophoneWarmupEnabled", setMicrophoneWarmupEnabled)?;
     cx.export_function("cm_setOutgoingVideoEnabled", setOutgoingVideoEnabled)?;
     cx.export_function(
         "cm_setOutgoingVideoIsScreenShare",
