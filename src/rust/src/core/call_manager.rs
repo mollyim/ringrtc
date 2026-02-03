@@ -19,6 +19,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use lazy_static::lazy_static;
 use prost::Message;
+use zkgroup::call_links::CallLinkSecretParams;
 
 use crate::{
     common::{
@@ -31,7 +32,7 @@ use crate::{
         call_mutex::CallMutex,
         call_summary::CallSummary,
         connection::{Connection, ConnectionType},
-        endorsements::EndorsementUpdateResultRef,
+        endorsements::{EndorsementUpdateResultRef, EndorsementsCache},
         group_call::{
             self, Client, ClientId, ClientStartParams, GroupCallKind, HttpSfuClient, Observer,
             Reaction,
@@ -228,10 +229,12 @@ enum ReceivedOfferCollision {
 /// Management of 1:1 call messages that arrive before the offer for a particular call.
 ///
 /// We don't save all message kinds here, only the ones that can affect an incoming call.
+#[derive(Default)]
 enum PendingCallMessages<T>
 where
     T: Platform,
 {
+    #[default]
     None,
     IceCandidates {
         remote_peer: <T as Platform>::AppRemotePeer,
@@ -316,15 +319,6 @@ where
             call_id: new_call_id,
             received: new_received,
         }
-    }
-}
-
-impl<T> Default for PendingCallMessages<T>
-where
-    T: Platform,
-{
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -1001,7 +995,7 @@ where
     /// Terminates Call and optionally notifies application of the reason why.
     /// Also removes/drops it from the map.
     fn terminate_and_drop_call(&mut self, call_id: CallId) -> Result<()> {
-        info!("terminate_call(): call_id: {}", call_id);
+        info!("terminate_and_drop_call(): call_id: {}", call_id);
 
         let mut call = match self.call_by_call_id.lock()?.remove(&call_id) {
             Some(v) => v,
@@ -2918,6 +2912,36 @@ where
             }
         }
     }
+
+    fn send_signaling_message_to_adhoc_group(
+        &mut self,
+        call_message: protobuf::signaling::CallMessage,
+        urgency: group_call::SignalingMessageUrgency,
+        expiration: u64,
+        recipients_to_endorsements: HashMap<UserId, Vec<u8>>,
+    ) {
+        debug!("send_signaling_message_to_adhoc_group():");
+
+        let platform = self.platform.lock().expect("platform.lock()");
+        let mut bytes = BytesMut::with_capacity(call_message.encoded_len());
+        match call_message.encode(&mut bytes) {
+            Ok(()) => {
+                platform
+                    .send_call_message_to_adhoc_group(
+                        bytes.to_vec(),
+                        urgency,
+                        expiration,
+                        recipients_to_endorsements,
+                    )
+                    .unwrap_or_else(|e| {
+                        error!("failed to send signaling message to adhoc group {:?}", e);
+                    });
+            }
+            Err(_) => {
+                error!("Failed to encode signaling message");
+            }
+        }
+    }
 }
 
 impl<T> CallManager<T>
@@ -3033,6 +3057,7 @@ where
             incoming_video_sink,
             ring_id,
             audio_levels_interval,
+            group_send_endorsement_cache: None,
         })?;
 
         client_by_id.insert(
@@ -3111,6 +3136,9 @@ where
         ));
         sfu_client.set_member_resolver(member_resolver.clone());
 
+        let group_send_endorsement_cache = Some(EndorsementsCache::new(
+            CallLinkSecretParams::derive_from_root_key(&root_key.bytes()),
+        ));
         let endorsements_public_key: zkgroup::EndorsementPublicKey =
             zkgroup::deserialize(endorsement_public_key)?;
         let obfuscated_resolver = ObfuscatedResolver::new(
@@ -3135,6 +3163,7 @@ where
             incoming_video_sink,
             ring_id: None,
             audio_levels_interval,
+            group_send_endorsement_cache,
         })?;
 
         client_by_id.insert(

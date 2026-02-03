@@ -8,7 +8,9 @@ use std::{process::Stdio, time::Duration};
 use anyhow::Result;
 use bollard::{
     Docker,
-    container::{MemoryStatsStats, Stats, StatsOptions},
+    models::ContainerMemoryStats,
+    query_parameters,
+    secret::{ContainerCpuStats, ContainerCpuUsage, ContainerStatsResponse},
 };
 use chrono::DateTime;
 use futures_util::stream::TryStreamExt;
@@ -458,7 +460,7 @@ pub async fn emulate_network_start(name: &str, network_config: &NetworkConfig) -
         .await?;
 
     // Add a class to the qdisc. This is used for traffic that isn't emulated. We will leave
-    // the bitrate wide-open for that (10Gbps).
+    // the bitrate wide-open for that (1Gbps).
     //
     // Use class id `1a1a:1` for traffic that isn't emulated.
     let _ = Command::new("docker")
@@ -476,7 +478,9 @@ pub async fn emulate_network_start(name: &str, network_config: &NetworkConfig) -
             "1a1a:1",
             "htb",
             "rate",
-            "10000000.0kbit",
+            "1000000.0kbit",
+            "quantum",
+            "60000",
         ])
         .spawn()?
         .wait()
@@ -484,9 +488,7 @@ pub async fn emulate_network_start(name: &str, network_config: &NetworkConfig) -
 
     // We will use the htb to specify the rate that we want to emulate. If we haven't set
     // any value (i.e. it is zero), then we will still set it, but to be wide-open.
-    // Note: We also could specify `burst` and `cburst` bytes, but let's see if the default
-    // values are good enough for now.
-    let mut rate = 10_000_000u64;
+    let mut rate = 1_000_000u64;
     if network_config.rate > 0 {
         rate = network_config.rate as u64;
     }
@@ -512,6 +514,12 @@ pub async fn emulate_network_start(name: &str, network_config: &NetworkConfig) -
             &format!("{}.0kbit", rate),
             "ceil",
             &format!("{}.0kbit", rate),
+            "quantum",
+            "1500",
+            "burst",
+            "3000",
+            "cburst",
+            "3000",
         ])
         .spawn()?
         .wait()
@@ -560,16 +568,6 @@ pub async fn emulate_network_start(name: &str, network_config: &NetworkConfig) -
         .spawn()?
         .wait()
         .await?;
-
-    // ARP (This does not work "Error: Filter with specified priority/protocol not found.")
-    // let _ = Command::new("docker")
-    //     .args(&[
-    //         "exec", name, "tc", "filter", "add", "dev", "eth0", "protocol", "arp", "parent",
-    //         "1a1a:", "prio", "1", "u32", "match", "u32", "0", "0", "flowid", "1a1a:1",
-    //     ])
-    //     .spawn()?
-    //     .wait()
-    //     .await?;
 
     // ICMP
     let _ = Command::new("docker")
@@ -649,7 +647,7 @@ pub async fn emulate_network_start(name: &str, network_config: &NetworkConfig) -
 
 /// Change the existing emulation to avoid reloading the qdisc.
 pub async fn emulate_network_change(name: &str, network_config: &NetworkConfig) -> Result<()> {
-    let mut rate = 10_000_000u64;
+    let mut rate = 1_000_000u64;
     if network_config.rate > 0 {
         rate = network_config.rate as u64;
     }
@@ -672,6 +670,10 @@ pub async fn emulate_network_change(name: &str, network_config: &NetworkConfig) 
             &format!("{}.0kbit", rate),
             "ceil",
             &format!("{}.0kbit", rate),
+            "burst",
+            "3000",
+            "cburst",
+            "3000",
         ])
         .spawn()?
         .wait()
@@ -1505,43 +1507,34 @@ pub async fn analyze_video(
 ) -> Result<()> {
     println!("\nAnalyzing video for `{}`:", degraded_file);
 
-    let output = Command::new("docker")
+    let _ = Command::new("docker")
         .args([
             "run",
-            "--name",
-            "vmaf",
+            "--rm",
             "-v",
             &format!("{}:/degraded", degraded_path),
             "-v",
             &format!("{}:/ref", ref_path),
             "vmaf",
-            "yuv420p",
-            &dimensions.0.to_string(),
-            &dimensions.1.to_string(),
+            "--reference",
             &format!("/ref/{}", ref_file),
+            "--distorted",
             &format!("/degraded/{}", degraded_file),
-            "--phone-model",
-            "--out-fmt",
-            "json",
+            "--width",
+            &dimensions.0.to_string(),
+            "--height",
+            &dimensions.1.to_string(),
+            "--pixel_format",
+            "420",
+            "--bitdepth",
+            "8",
+            "--json",
+            "--output",
+            &format!("/degraded/{}.json", degraded_file),
         ])
-        .output()
-        .await?;
-
-    // Remove the container.
-    let _ = Command::new("docker")
-        .args(["rm", "vmaf"])
         .spawn()?
         .wait()
         .await?;
-
-    // Save the output.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(format!("{}/{}.json", degraded_path, degraded_file))
-        .await?;
-    file.write_all(&output.stdout).await?;
 
     Ok(())
 }
@@ -1602,18 +1595,15 @@ impl DockerStats {
         let path = path.to_string();
 
         tokio::spawn(async move {
-            let stream = &mut docker.stats(
-                &name,
-                Some(StatsOptions {
-                    stream: true,
-                    ..Default::default()
-                }),
-            );
+            let query_parameters = query_parameters::StatsOptionsBuilder::new()
+                .stream(true)
+                .build();
+            let stream = &mut docker.stats(&name, Some(query_parameters));
 
             // Collect the stats. This will await until the container is stopped then dump
             // all the stats to a log.
-            match stream.try_collect::<Vec<Stats>>().await {
-                Ok(stats) => {
+            match stream.try_collect::<Vec<ContainerStatsResponse>>().await {
+                Ok(responses) => {
                     match OpenOptions::new()
                         .write(true)
                         .create(true)
@@ -1634,39 +1624,49 @@ impl DockerStats {
                             let mut prev_total_cpu_usage = 0u64;
                             let mut prev_system_cpu_usage = 0u64;
 
-                            for stat in stats {
-                                match (
-                                    stat.cpu_stats.system_cpu_usage,
-                                    stat.cpu_stats.online_cpus,
-                                    stat.memory_stats.usage,
-                                    stat.memory_stats.stats,
-                                    stat.networks,
-                                ) {
+                            for response in responses {
+                                match (response.cpu_stats, response.memory_stats, response.networks)
+                                {
                                     (
-                                        Some(system_cpu_usage),
-                                        Some(online_cpus),
-                                        Some(memory_usage),
-                                        Some(memory_stats),
+                                        Some(ContainerCpuStats {
+                                            system_cpu_usage: Some(system_cpu_usage),
+                                            online_cpus: Some(online_cpus),
+                                            cpu_usage:
+                                                Some(ContainerCpuUsage {
+                                                    total_usage: Some(cpu_total_usage),
+                                                    ..
+                                                }),
+                                            ..
+                                        }),
+                                        Some(ContainerMemoryStats {
+                                            usage: Some(memory_usage),
+                                            stats: Some(memory_stats),
+                                            ..
+                                        }),
                                         Some(networks),
                                     ) => {
-                                        let timestamp = DateTime::parse_from_rfc3339(&stat.read)
-                                            .expect("stats timestamp is valid")
-                                            .timestamp_millis();
+                                        let timestamp = DateTime::parse_from_rfc3339(
+                                            response.read.unwrap().as_str(),
+                                        )
+                                        .expect("stats timestamp is valid")
+                                        .timestamp_millis();
 
                                         let (tx_bitrate, rx_bitrate) = match networks.get("eth0") {
                                             Some(network) => {
+                                                let tx_bytes = network.tx_bytes.unwrap();
+                                                let rx_bytes = network.rx_bytes.unwrap();
                                                 let time_delta =
                                                     (timestamp - prev_timestamp) as f32 / 1000.0;
-                                                let tx_bitrate =
-                                                    (network.tx_bytes - prev_tx_bytes) as f32 * 8.0
-                                                        / time_delta;
-                                                let rx_bitrate =
-                                                    (network.rx_bytes - prev_rx_bytes) as f32 * 8.0
-                                                        / time_delta;
+                                                let tx_bitrate = (tx_bytes - prev_tx_bytes) as f32
+                                                    * 8.0
+                                                    / time_delta;
+                                                let rx_bitrate = (rx_bytes - prev_rx_bytes) as f32
+                                                    * 8.0
+                                                    / time_delta;
 
                                                 prev_timestamp = timestamp;
-                                                prev_tx_bytes = network.tx_bytes;
-                                                prev_rx_bytes = network.rx_bytes;
+                                                prev_tx_bytes = tx_bytes;
+                                                prev_rx_bytes = rx_bytes;
 
                                                 if prev_timestamp == 0 {
                                                     // Ignore the first data point since there was no reference.
@@ -1682,24 +1682,18 @@ impl DockerStats {
                                         };
 
                                         // cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
-                                        let cpu_percent = ((stat.cpu_stats.cpu_usage.total_usage
-                                            - prev_total_cpu_usage)
+                                        let cpu_percent = ((cpu_total_usage - prev_total_cpu_usage)
                                             as f32
                                             / (system_cpu_usage - prev_system_cpu_usage) as f32)
                                             * online_cpus as f32
                                             * 100.0;
 
+                                        // Exclude file cache usage since it causes the stats to
+                                        // grow over time and doesn't directly reflect RingRTC's
+                                        // memory usage.
+                                        // https://docs.docker.com/engine/reference/commandline/stats/#description
                                         let memory = memory_usage
-                                            - match memory_stats {
-                                                // Exclude file cache usage since it causes the stats to
-                                                // grow over time and doesn't directly reflect RingRTC's
-                                                // memory usage.
-                                                // https://docs.docker.com/engine/reference/commandline/stats/#description
-                                                MemoryStatsStats::V1(stats) => {
-                                                    stats.total_inactive_file
-                                                }
-                                                MemoryStatsStats::V2(stats) => stats.inactive_file,
-                                            };
+                                            - memory_stats.get("total_inactive_file").unwrap();
                                         let _ = file
                                             .write_all(
                                                 format!(
@@ -1714,7 +1708,7 @@ impl DockerStats {
                                             )
                                             .await;
 
-                                        prev_total_cpu_usage = stat.cpu_stats.cpu_usage.total_usage;
+                                        prev_total_cpu_usage = cpu_total_usage;
                                         prev_system_cpu_usage = system_cpu_usage;
                                     }
                                     _ => {

@@ -1,5 +1,48 @@
 # Changelog
 
+## v2.62.0
+
+- Add support for send_call_message_to_adhoc_group
+
+- Update to webrtc 7444c
+  - Skip send for opus DTX refresh packets
+  - Remove unneeded null-DCHECK
+
+- Android: Publish to GCS instead of Maven Central
+
+- Add freeze_count to ringrtc_stats and call summary blob
+
+- Remove debug logs parser
+
+- Call Sim: General improvements and fixes
+
+- Update dependencies
+
+## v2.61.0
+
+- Call Summary
+  - Fix CPU stats
+  - Provide fractions instead of percentages
+  - Always provide raw stats text
+
+- Update to webrtc 7444a (m142)
+
+- Desktop: Make sure that play (and record) don't restart
+
+- Update node, ios, and Rust dependencies
+
+- Update to Rust 1.91.1
+
+- CI: Update runners for new ios, macos, and android versions
+
+## v2.60.7
+
+- Desktop: Don't bubble up active call not found error
+
+## v2.60.6
+
+- Desktop: Fix audio mute state after call ends
+
 ## v2.60.5
 
 - Fix packet loss calculation

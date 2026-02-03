@@ -50,14 +50,14 @@ jobs:
         cache-targets: "false"
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component clippy --target aarch64-linux-android,aarch64-apple-ios
     - name: Install extra Rust tools
-      run: cargo +stable install --version 0.6.2 --locked cargo-about
+      run: cargo +stable install --version 0.8.4 --locked cargo-about
     - run: shellcheck **/*.sh bin/build-aar bin/build-direct bin/build-desktop bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/fetch-artifact bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check bin/set-up-for-cocoapods src/rust/scripts/run-tests
     # Skip the Python scripts not written with flake8 style. (Try not to add more.)
     - run: cd bin && python3 -m flake8 . --exclude measure-cpu.py
     - name: Set up mypy types
-      run: mkdir .mypy_cache/ && python3 -m mypy --install-types --non-interactive bin/logs-notebook/call_log_parser.py --cache-dir=.mypy_cache/
+      run: mkdir .mypy_cache/
     # Only include typed Python scripts here.
-    - run: python3 -m mypy --python-version 3.13 --strict bin/convert_webrtc_acknowledgments.py bin/fetch-artifact.py bin/logs-notebook/call_log_parser.py bin/logs-notebook/emos.py
+    - run: python3 -m mypy --python-version 3.13 --strict bin/convert_webrtc_acknowledgments.py bin/fetch-artifact.py
     - name: Check acknowledgments
       run: ./bin/regenerate_acknowledgments.sh && git diff --name-status --exit-code acknowledgments
     - name: Clippy
