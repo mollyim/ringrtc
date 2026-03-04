@@ -18,11 +18,7 @@ const INVALID_CLIENT_ID = 0;
 export const callIdFromEra: (era: string) => CallId = Native.callIdFromEra;
 
 export function callIdFromRingId(ringId: bigint): CallId {
-  return {
-    low: Number(BigInt.asIntN(32, ringId)),
-    high: Number(BigInt.asIntN(32, ringId >> BigInt(32))),
-    unsigned: true,
-  };
+  return ringId;
 }
 
 class Config {
@@ -381,11 +377,7 @@ export class RingRTCType {
   private _callInfoByCallId: Map<string, CallInfo>;
 
   private getCallInfoKey(callId: CallId): string {
-    // CallId is u64 so use a string key instead.
-    // Note that the representation is not padded, so we include a separator.
-    // Otherwise {1, 123} and {11, 23} would have the same key.
-    // (We could use Long.toString as well, but it doesn't matter what the key is.)
-    return `${callId.high} ${callId.low}`;
+    return callId.toString();
   }
 
   // Set by UX
@@ -1902,11 +1894,7 @@ export class RingRTCType {
   getCall(callId: CallId): Call | null {
     const call = this.call;
 
-    if (
-      call &&
-      call.callId.high === callId.high &&
-      call.callId.low === callId.low
-    ) {
+    if (call && call.callId === callId) {
       return call;
     }
     return null;
@@ -2853,14 +2841,7 @@ export type UserId = string;
 
 export type DeviceId = number;
 
-// A stripped-down version of Long.
-export type CallId = {
-  high: number;
-  low: number;
-  // RingRTC always treats call IDs as unsigned internally regardless of what this is set to.
-  // Call IDs produced by RingRTC will always set this to `true`.
-  unsigned: boolean;
-};
+export type CallId = bigint;
 
 export class CallingMessage {
   offer?: OfferMessage;

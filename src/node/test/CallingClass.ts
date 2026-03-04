@@ -20,7 +20,6 @@ import {
   UserId,
 } from '../ringrtc/Service';
 import { RingRTC } from '../index';
-import Long from 'long';
 import { log, sleep, uuidToBytes } from './Utils';
 
 // This class mimics the Desktop Client CallingClass in ts/services/calling.ts to facilitate testing
@@ -267,7 +266,7 @@ export class CallingClass {
       this._localDeviceId
     );
 
-    log(`Outgoing callId ${Long.fromValue(call.callId)}`);
+    log(`Outgoing callId ${call.callId}`);
 
     call.setOutgoingAudioMuted(false);
 
