@@ -413,6 +413,7 @@ public class CallManager {
    * @param hideIp                 if true hide caller's IP by using a TURN server
    * @param dataMode               desired data mode to start the session with
    * @param audioLevelsIntervalMs  if greater than 0, enable audio levels with this interval (in milliseconds)
+   * @param dredDuration           if provided, client will encode DRED PLC for the period specified
    * @param enableCamera           if true, enable the local camera video track when created
    *
    * @throws CallException for native code failures
@@ -429,6 +430,7 @@ public class CallManager {
                                 boolean                        hideIp,
                                 DataMode                       dataMode,
                       @Nullable Integer                        audioLevelsIntervalMs,
+                      @Nullable Byte                           dredDuration,
                                 boolean                        enableCamera)
     throws CallException
   {
@@ -455,11 +457,13 @@ public class CallManager {
     callContext.setVideoEnabled(enableCamera);
 
     int audioLevelsIntervalMillis = audioLevelsIntervalMs == null ? 0 : audioLevelsIntervalMs.intValue();
+    byte dredDurationByte = dredDuration == null ? 0 : dredDuration.byteValue();
     ringrtcProceed(nativeCallManager,
                    callId.longValue(),
                    callContext,
                    dataMode.ordinal(),
-                   audioLevelsIntervalMillis);
+                   audioLevelsIntervalMillis,
+                   dredDurationByte);
   }
 
   /**
@@ -1247,6 +1251,7 @@ public class CallManager {
    * @param sfuUrl                 the URL to use when accessing the SFU
    * @param hkdfExtraInfo          additional entropy to use for the connection with the SFU (it's okay if this is empty)
    * @param audioLevelsIntervalMs  if provided, the observer will receive audio level callbacks at this interval
+   * @param dredDuration           if provided, client will encode DRED PLC for the period specified
    * @param audioConfig            the audio configuration to use
    * @param observer               the observer that the group call object will use for callback notifications
    *
@@ -1256,6 +1261,7 @@ public class CallManager {
                                    @NonNull  String             sfuUrl,
                                    @NonNull  byte[]             hkdfExtraInfo,
                                    @Nullable Integer            audioLevelsIntervalMs,
+                                   @Nullable Byte               dredDuration,
                                    @NonNull  AudioConfig        audioConfig,
                                    @NonNull  GroupCall.Observer observer)
   {
@@ -1270,7 +1276,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, hkdfExtraInfo, audioLevelsIntervalMs, dredDuration, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.
@@ -1293,6 +1299,7 @@ public class CallManager {
    * @param adminPasskey               if present, the opaque passkey authorizing this user as an admin for the call link
    * @param hkdfExtraInfo              additional entropy to use for the connection with the SFU (it's okay if this is empty)
    * @param audioLevelsIntervalMs      if provided, the observer will receive audio level callbacks at this interval
+   * @param dredDuration               if provided, client will encode DRED PLC for the period specified
    * @param audioConfig                the audio configuration to use
    * @param observer                   the observer that the group call object will use for callback notifications
    *
@@ -1307,6 +1314,7 @@ public class CallManager {
                                       @Nullable byte[]                adminPasskey,
                                       @NonNull  byte[]                hkdfExtraInfo,
                                       @Nullable Integer               audioLevelsIntervalMs,
+                                      @Nullable Byte                  dredDuration,
                                       @NonNull  AudioConfig           audioConfig,
                                       @NonNull  GroupCall.Observer    observer)
   {
@@ -1321,7 +1329,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, endorsementPublicKey, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, endorsementPublicKey, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, dredDuration, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.
@@ -2503,7 +2511,8 @@ public class CallManager {
                         long        callId,
                         CallContext callContext,
                         int         dataMode,
-                        int         audioLevelsIntervalMillis)
+                        int         audioLevelsIntervalMillis,
+                        byte        dredDuration)
     throws CallException;
 
   private native

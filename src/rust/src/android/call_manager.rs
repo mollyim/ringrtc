@@ -10,7 +10,7 @@ use std::{borrow::Cow, convert::TryFrom, panic, sync::Arc, time::Duration};
 use jni::{
     JNIEnv,
     objects::{GlobalRef, JByteArray, JClass, JObject, JString},
-    sys::{jint, jlong},
+    sys::{jbyte, jint, jlong},
 };
 use log::Level;
 
@@ -836,6 +836,7 @@ pub fn create_group_call_client(
     sfu_url: JString,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -884,6 +885,7 @@ pub fn create_group_call_client(
         sfu_url,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration as u8,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
@@ -902,6 +904,7 @@ pub fn create_call_link_call_client(
     admin_passkey: JByteArray,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -961,6 +964,7 @@ pub fn create_call_link_call_client(
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration as u8,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,

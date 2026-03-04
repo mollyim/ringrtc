@@ -301,6 +301,7 @@ fn main() -> Result<()> {
             enable_cbr: args.cbr,
             enable_dtx: args.dtx,
             enable_fec: args.fec,
+            dred_duration: 0,
         },
         enable_tcc_audio: args.tcc,
         audio_jitter_buffer_config: AudioJitterBufferConfig {

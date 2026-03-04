@@ -366,6 +366,8 @@ pub struct RffiAudioEncoderConfig {
     enable_cbr: bool,
     enable_dtx: bool,
     enable_fec: bool,
+
+    dred_duration: u8,
 }
 
 // A nice form of RffiAudioEncoderConfig
@@ -391,6 +393,8 @@ pub struct AudioEncoderConfig {
     pub enable_cbr: bool,
     pub enable_dtx: bool,
     pub enable_fec: bool,
+    // Valid range: 0-100
+    pub dred_duration: u8,
 }
 
 impl Default for AudioEncoderConfig {
@@ -411,6 +415,8 @@ impl Default for AudioEncoderConfig {
             enable_cbr: true,
             enable_dtx: true,
             enable_fec: true,
+
+            dred_duration: 0,
         }
     }
 }
@@ -430,6 +436,7 @@ impl AudioEncoderConfig {
             enable_cbr: self.enable_cbr,
             enable_dtx: self.enable_dtx,
             enable_fec: self.enable_fec,
+            dred_duration: self.dred_duration,
         }
     }
 }

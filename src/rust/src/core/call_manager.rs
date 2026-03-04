@@ -3012,6 +3012,7 @@ where
         sfu_url: String,
         hkdf_extra_info: Vec<u8>,
         audio_levels_interval: Option<Duration>,
+        dred_duration: u8,
         peer_connection_factory: Option<PeerConnectionFactory>,
         outgoing_audio_track: AudioTrack,
         outgoing_video_track: VideoTrack,
@@ -3085,6 +3086,7 @@ where
             incoming_video_sink,
             ring_id,
             audio_levels_interval,
+            dred_duration,
             group_send_endorsement_cache: None,
         })?;
 
@@ -3111,6 +3113,7 @@ where
         admin_passkey: Option<Vec<u8>>,
         hkdf_extra_info: Vec<u8>,
         audio_levels_interval: Option<Duration>,
+        dred_duration: u8,
         peer_connection_factory: Option<PeerConnectionFactory>,
         outgoing_audio_track: AudioTrack,
         outgoing_video_track: VideoTrack,
@@ -3191,6 +3194,7 @@ where
             incoming_video_sink,
             ring_id: None,
             audio_levels_interval,
+            dred_duration,
             group_send_endorsement_cache,
         })?;
 

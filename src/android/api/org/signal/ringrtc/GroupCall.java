@@ -130,6 +130,7 @@ public final class GroupCall {
                             @NonNull  String                sfuUrl,
                             @NonNull  byte[]                hkdfExtraInfo,
                             @Nullable Integer               audioLevelsIntervalMs,
+                            @Nullable Byte                  dredDuration,
                             @NonNull  PeerConnectionFactory factory,
                             @NonNull  Observer              observer) {
         Log.i(TAG, "create():");
@@ -137,6 +138,7 @@ public final class GroupCall {
         GroupCall call = new GroupCall(Kind.SIGNAL_GROUP, nativeCallManager, factory, observer);
 
         int audioLevelsIntervalMillis = audioLevelsIntervalMs == null ? 0 : audioLevelsIntervalMs.intValue();
+        byte dredDurationByte = dredDuration == null ? 0 : dredDuration.byteValue();
         try {
             call.clientId = ringrtcCreateGroupCallClient(
                 nativeCallManager,
@@ -144,6 +146,7 @@ public final class GroupCall {
                 sfuUrl,
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
+                dredDurationByte,
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
                 // Returns a borrowed RC.
@@ -175,6 +178,7 @@ public final class GroupCall {
                             @Nullable byte[]                adminPasskey,
                             @NonNull  byte[]                hkdfExtraInfo,
                             @Nullable Integer               audioLevelsIntervalMs,
+                            @Nullable Byte                  dredDuration,
                             @NonNull  PeerConnectionFactory factory,
                             @NonNull  Observer              observer) {
         Log.i(TAG, "create():");
@@ -182,6 +186,7 @@ public final class GroupCall {
         GroupCall call = new GroupCall(Kind.CALL_LINK, nativeCallManager, factory, observer);
 
         int audioLevelsIntervalMillis = audioLevelsIntervalMs == null ? 0 : audioLevelsIntervalMs.intValue();
+        byte dredDurationByte = dredDuration == null ? 0 : dredDuration.byteValue();
         try {
             call.clientId = ringrtcCreateCallLinkCallClient(
                 nativeCallManager,
@@ -192,6 +197,7 @@ public final class GroupCall {
                 adminPasskey,
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
+                dredDuration,
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
                 // Returns a borrowed RC.
@@ -1299,6 +1305,7 @@ public final class GroupCall {
                                           String sfuUrl,
                                           byte[] hkdfExtraInfo,
                                           int audioLevelsIntervalMillis,
+                                          byte dredDuration,
                                           long nativePeerConnectionFactory,
                                           long nativeAudioTrack,
                                           long nativeVideoTrack)
@@ -1313,6 +1320,7 @@ public final class GroupCall {
                                              byte[] adminPasskey,
                                              byte[] hkdfExtraInfo,
                                              int audioLevelsIntervalMillis,
+                                             byte dredDuration,
                                              long nativePeerConnectionFactory,
                                              long nativeAudioTrack,
                                              long nativeVideoTrack)

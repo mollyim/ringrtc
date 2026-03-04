@@ -301,6 +301,7 @@ fn main() {
         incoming_video_sink: Some(Box::new(observer.clone())),
         ring_id: None,
         audio_levels_interval: None,
+        dred_duration: 0,
         group_send_endorsement_cache: None,
         asset_registry: AssetRegistry::default(),
     })

@@ -685,6 +685,7 @@ pub extern "C" fn ringrtcProceed(
     dataMode: i32,
     audioLevelsIntervalMillis: u64,
     enable_vp9: bool,
+    dred_duration: u8,
 ) -> *mut c_void {
     let audio_levels_interval = if audioLevelsIntervalMillis == 0 {
         None
@@ -697,7 +698,8 @@ pub extern "C" fn ringrtcProceed(
         appCallContext,
         CallConfig::default()
             .with_data_mode(DataMode::from_i32(dataMode))
-            .with_enable_vp9(enable_vp9),
+            .with_enable_vp9(enable_vp9)
+            .with_dred_duration(dred_duration),
         audio_levels_interval,
     ) {
         Ok(_v) => {
@@ -1141,6 +1143,7 @@ pub extern "C" fn ringrtcCreateGroupCallClient(
     sfuUrl: AppByteSlice,
     hkdfExtraInfo: AppByteSlice,
     audio_levels_interval_millis: u64,
+    dred_duration: u8,
     nativePeerConnectionFactoryOwnedRc: *const c_void,
     nativeAudioTrackOwnedRc: *const c_void,
     nativeVideoTrackOwnedRc: *const c_void,
@@ -1173,6 +1176,7 @@ pub extern "C" fn ringrtcCreateGroupCallClient(
         sfu_url,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration,
         unsafe {
             webrtc::ptr::OwnedRc::from_ptr(
                 nativePeerConnectionFactoryOwnedRc
@@ -1202,6 +1206,7 @@ pub extern "C" fn ringrtcCreateCallLinkCallClient(
     adminPasskey: AppByteSlice,
     hkdfExtraInfo: AppByteSlice,
     audioLevelsIntervalMillis: u64,
+    dred_duration: u8,
     nativePeerConnectionFactoryOwnedRc: *const c_void,
     nativeAudioTrackOwnedRc: *const c_void,
     nativeVideoTrackOwnedRc: *const c_void,
@@ -1250,6 +1255,7 @@ pub extern "C" fn ringrtcCreateCallLinkCallClient(
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration,
         unsafe {
             webrtc::ptr::OwnedRc::from_ptr(
                 nativePeerConnectionFactoryOwnedRc

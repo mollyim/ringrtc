@@ -649,7 +649,8 @@ export class RingRTCType {
         settings.iceServers,
         settings.hideIp,
         settings.dataMode,
-        settings.audioLevelsIntervalMillis || 0
+        settings.audioLevelsIntervalMillis || 0,
+        settings.dredDuration ?? 0
       );
     });
   }
@@ -1188,13 +1189,15 @@ export class RingRTCType {
     sfuUrl: string,
     hkdfExtraInfo: Uint8Array,
     audioLevelsIntervalMillis: number | undefined,
+    dredDuration: number | undefined,
     observer: GroupCallObserver
   ): GroupCall | undefined {
     const clientId = this.callManager.createGroupCallClient(
       groupId,
       sfuUrl,
       hkdfExtraInfo,
-      audioLevelsIntervalMillis || 0
+      audioLevelsIntervalMillis ?? 0,
+      dredDuration ?? 0
     );
     if (clientId === INVALID_CLIENT_ID) {
       // Return undefined since the group call client creation failed.
@@ -1222,6 +1225,7 @@ export class RingRTCType {
     adminPasskey: Uint8Array | undefined,
     hkdfExtraInfo: Uint8Array,
     audioLevelsIntervalMillis: number | undefined,
+    dredDuration: number | undefined,
     observer: GroupCallObserver
   ): GroupCall | undefined {
     const clientId = this.callManager.createCallLinkCallClient(
@@ -1231,7 +1235,8 @@ export class RingRTCType {
       rootKey.bytes,
       adminPasskey,
       hkdfExtraInfo,
-      audioLevelsIntervalMillis || 0
+      audioLevelsIntervalMillis || 0,
+      dredDuration ?? 0
     );
     if (clientId === INVALID_CLIENT_ID) {
       // Return undefined since the call link client creation failed.
@@ -1965,6 +1970,7 @@ export interface CallSettings {
   hideIp: boolean;
   dataMode: DataMode;
   audioLevelsIntervalMillis?: number;
+  dredDuration?: number;
 }
 
 interface IceServer {
@@ -2966,7 +2972,8 @@ export interface CallManager {
     iceServers: Array<IceServer>,
     hideIp: boolean,
     dataMode: DataMode,
-    audioLevelsIntervalMillis: number
+    audioLevelsIntervalMillis: number,
+    dredDuration: number
   ): void;
   accept(callId: CallId): void;
   ignore(callId: CallId): void;
@@ -3052,7 +3059,8 @@ export interface CallManager {
     groupId: GroupId,
     sfuUrl: string,
     hkdfExtraInfo: Uint8Array,
-    audioLevelsIntervalMillis: number
+    audioLevelsIntervalMillis: number,
+    dredDuration: number
   ): GroupCallClientId;
   createCallLinkCallClient(
     sfuUrl: string,
@@ -3061,7 +3069,8 @@ export interface CallManager {
     linkRootKey: Uint8Array,
     adminPasskey: Uint8Array | undefined,
     hkdfExtraInfo: Uint8Array,
-    audioLevelsIntervalMillis: number
+    audioLevelsIntervalMillis: number,
+    dredDuration: number
   ): GroupCallClientId;
   deleteGroupCallClient(clientId: GroupCallClientId): void;
   connect(clientId: GroupCallClientId): void;

@@ -957,6 +957,7 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
     let hide_ip = cx.argument::<JsBoolean>(2)?.value(&mut cx);
     let data_mode = cx.argument::<JsNumber>(3)?.value(&mut cx) as i32;
     let audio_levels_interval_millis = cx.argument::<JsNumber>(4)?.value(&mut cx) as u64;
+    let dred_duration = cx.argument::<JsNumber>(5)?.value(&mut cx) as u8;
 
     info!("proceed(): callId: {}, hideIp: {}", call_id, hide_ip);
     let mut ice_servers = Vec::new();
@@ -1011,12 +1012,12 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
             MAX_VIDEO_HEIGHT,
             MAX_VIDEO_FPS,
         );
-        endpoint.call_manager.proceed(
-            call_id,
-            call_context,
-            CallConfig::default().with_data_mode(DataMode::from_i32(data_mode)),
-            audio_levels_interval,
-        )?;
+        let call_config = CallConfig::default()
+            .with_data_mode(DataMode::from_i32(data_mode))
+            .with_dred_duration(dred_duration);
+        endpoint
+            .call_manager
+            .proceed(call_id, call_context, call_config, audio_levels_interval)?;
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -1506,6 +1507,7 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
     let hkdf_extra_info = cx.argument::<JsUint8Array>(2)?.as_slice(&cx).to_vec();
     let audio_levels_interval_millis = cx.argument::<JsNumber>(3)?.value(&mut cx) as u64;
+    let dred_duration = cx.argument::<JsNumber>(4)?.value(&mut cx) as u8;
 
     let mut client_id = group_call::INVALID_CLIENT_ID;
 
@@ -1531,6 +1533,7 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
             sfu_url,
             hkdf_extra_info,
             audio_levels_interval,
+            dred_duration,
             Some(peer_connection_factory),
             outgoing_audio_track,
             outgoing_video_track,
@@ -1568,6 +1571,7 @@ fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     let hkdf_extra_info = cx.argument::<JsUint8Array>(5)?.as_slice(&cx).to_vec();
 
     let audio_levels_interval_millis = cx.argument::<JsNumber>(6)?.value(&mut cx) as u64;
+    let dred_duration = cx.argument::<JsNumber>(7)?.value(&mut cx) as u8;
     let audio_levels_interval = if audio_levels_interval_millis == 0 {
         None
     } else {
@@ -1589,6 +1593,7 @@ fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
             admin_passkey,
             hkdf_extra_info,
             audio_levels_interval,
+            dred_duration,
             Some(peer_connection_factory),
             outgoing_audio_track,
             outgoing_video_track,

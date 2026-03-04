@@ -1069,6 +1069,7 @@ struct State {
     // Things for getting audio levels from the PeerConnection
     audio_levels_interval: Option<Duration>,
     next_audio_levels_time: Option<Instant>,
+    dred_duration: u8,
     // Variables to track the start of the current utterance, and how frequently
     // to poll for "is the user speaking?"
     speaking_interval: Duration,
@@ -1245,6 +1246,7 @@ pub struct ClientStartParams {
     pub incoming_video_sink: Option<Box<dyn VideoSink>>,
     pub ring_id: Option<RingId>,
     pub audio_levels_interval: Option<Duration>,
+    pub dred_duration: u8,
     pub obfuscated_resolver: ObfuscatedResolver,
     pub group_send_endorsement_cache: Option<EndorsementsCache>,
 }
@@ -1266,6 +1268,7 @@ impl Client {
             incoming_video_sink,
             ring_id,
             audio_levels_interval,
+            dred_duration,
             obfuscated_resolver,
             group_send_endorsement_cache,
         } = params;
@@ -1395,6 +1398,7 @@ impl Client {
 
                     audio_levels_interval,
                     next_audio_levels_time: None,
+                    dred_duration,
 
                     speaking_interval: SPEAKING_POLL_INTERVAL,
                     next_speaking_audio_levels_time: None,
@@ -2910,7 +2914,10 @@ impl Client {
     fn on_client_joined(state: &mut State) {
         state
             .peer_connection
-            .configure_audio_encoders(&AudioEncoderConfig::default());
+            .configure_audio_encoders(&AudioEncoderConfig {
+                dred_duration: state.dred_duration,
+                ..AudioEncoderConfig::default()
+            });
     }
 
     pub fn on_signaling_message_received(
@@ -6141,6 +6148,7 @@ mod tests {
                 outgoing_video_track: None,
                 incoming_video_sink: None,
                 ring_id: None,
+                dred_duration: 0,
                 audio_levels_interval: Some(Duration::from_millis(200)),
                 group_send_endorsement_cache,
             })

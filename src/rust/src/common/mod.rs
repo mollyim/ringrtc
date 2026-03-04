@@ -875,6 +875,11 @@ impl CallConfig {
         self.enable_vp9 = enable_vp9;
         self
     }
+
+    pub fn with_dred_duration(mut self, dred_duration: u8) -> Self {
+        self.audio_encoder_config.dred_duration = dred_duration;
+        self
+    }
 }
 
 // Benchmarking component list.
