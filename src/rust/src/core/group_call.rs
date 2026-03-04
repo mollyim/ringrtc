@@ -37,19 +37,18 @@ use crate::{
     core::{
         call_mutex::CallMutex,
         call_summary::{CallSummary, GroupCallSummary},
-        crypto as frame_crypto,
-        crypto::DecryptionErrorStats,
+        crypto::{self as frame_crypto, DecryptionErrorStats},
         endorsements::{EndorsementUpdateError, EndorsementUpdateResultRef, EndorsementsCache},
         signaling,
         util::uuid_to_string,
     },
     error::RingRtcError,
     lite::{
-        call_links::CallLinkEpoch,
+        call_links::CallLinkRootKey,
         http,
         sfu::{
             self, ClientStatus, DemuxId, GroupMember, MemberMap, MembershipProof,
-            ObfuscatedResolver, PeekInfo, PeekResult, PeekResultCallback, UserId,
+            ObfuscatedResolver, PeekArgs, PeekInfo, PeekResult, PeekResultCallback, UserId,
         },
     },
     protobuf::{
@@ -563,7 +562,7 @@ pub struct Joined {
 pub struct HttpSfuClient {
     sfu_url: String,
     room_id_header: Option<String>,
-    epoch_header: Option<String>,
+    call_link_root_key: Option<CallLinkRootKey>,
     admin_passkey: Option<Vec<u8>>,
     // For use post-DHE
     hkdf_extra_info: Vec<u8>,
@@ -578,14 +577,14 @@ impl HttpSfuClient {
         http_client: Box<dyn http::Client + Send>,
         url: String,
         room_id_for_header: Option<&[u8]>,
-        epoch_for_header: Option<CallLinkEpoch>,
+        call_link_root_key: Option<CallLinkRootKey>,
         admin_passkey: Option<Vec<u8>>,
         hkdf_extra_info: Vec<u8>,
     ) -> Self {
         Self {
             sfu_url: url,
             room_id_header: room_id_for_header.map(hex::encode),
-            epoch_header: epoch_for_header.map(|epoch| epoch.to_string()),
+            call_link_root_key,
             admin_passkey,
             hkdf_extra_info,
             http_client,
@@ -619,7 +618,7 @@ impl HttpSfuClient {
             self.http_client.as_ref(),
             &self.sfu_url,
             self.room_id_header.clone(),
-            self.epoch_header.clone(),
+            self.call_link_root_key,
             auth_header,
             self.admin_passkey.as_deref(),
             ice_ufrag,
@@ -700,11 +699,12 @@ impl SfuClient for HttpSfuClient {
             Some(auth_header) => sfu::peek(
                 self.http_client.as_ref(),
                 &self.sfu_url,
-                self.room_id_header.clone(),
-                self.epoch_header.clone(),
-                auth_header,
-                self.member_resolver.clone(),
-                None,
+                PeekArgs {
+                    room_id_header: self.room_id_header.clone(),
+                    auth_header,
+                    member_resolver: self.member_resolver.clone(),
+                    call_link_root_key: self.call_link_root_key,
+                },
                 result_callback,
             ),
             None => {
@@ -4454,12 +4454,10 @@ impl Client {
                                 Self::request_remote_devices_as_soon_as_possible(state);
                             }
                         }
+                    } else {
+                        info!("SFU notified that a remote device has joined or left, requesting update");
+                        Self::request_remote_devices_as_soon_as_possible(state);
                     }
-                } else {
-                    info!(
-                        "SFU notified that a remote device has joined or left, requesting update"
-                    );
-                    Self::request_remote_devices_as_soon_as_possible(state);
                 }
             });
         }
@@ -5363,7 +5361,7 @@ mod tests {
     static CALL_LINK_ROOT_KEY: LazyLock<CallLinkRootKey> =
         LazyLock::new(|| CallLinkRootKey::try_from([0x43u8; 16].as_ref()).unwrap());
     static CALL_LINK_SECRET_PARAMS: LazyLock<CallLinkSecretParams> =
-        LazyLock::new(|| CallLinkSecretParams::derive_from_root_key(&CALL_LINK_ROOT_KEY.bytes()));
+        LazyLock::new(|| CallLinkSecretParams::derive_from_root_key(CALL_LINK_ROOT_KEY.as_slice()));
     static MEMBER_CIPHERTEXTS: LazyLock<Vec<UuidCiphertext>> = LazyLock::new(|| {
         MEMBER_IDS
             .iter()
@@ -6126,7 +6124,7 @@ mod tests {
                 Some(EndorsementsCache::new(*CALL_LINK_SECRET_PARAMS));
             let obfuscated_resolver = ObfuscatedResolver::new(
                 Arc::new(CallLinkMemberResolver::from(&*CALL_LINK_ROOT_KEY)),
-                Some(CALL_LINK_ROOT_KEY.clone()),
+                Some(*CALL_LINK_ROOT_KEY),
                 Some(ENDORSEMENT_PUBLIC_ROOT_KEY.clone()),
             );
             let client = Client::start(ClientStartParams {

@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
   s.name             = "SignalRingRTC"
-  s.version          = "2.62.0"
+  s.version          = "2.65.0"
   s.summary          = "A Swift & Objective-C library used by the Signal iOS app for WebRTC interactions."
 
   s.description      = <<-DESC
@@ -56,6 +56,7 @@ Pod::Spec.new do |s|
     'CARGO_BUILD_TARGET[sdk=iphonesimulator*][arch=arm64]' => 'aarch64-apple-ios-sim',
     'CARGO_BUILD_TARGET[sdk=iphonesimulator*][arch=*]' => 'x86_64-apple-ios',
     'CARGO_BUILD_TARGET[sdk=iphoneos*]' => 'aarch64-apple-ios',
+    'SWIFT_ACTIVE_COMPILATION_CONDITIONS' => ENV.include?('RINGRTC_USE_FILE_BASED_CAMERA') ? 'USE_FILE_BASED_CAMERA' : '',
   }
 
   s.script_phases = [

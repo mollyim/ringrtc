@@ -10,10 +10,12 @@ members = [
     "mrp",
     "protobuf",
     "src/rust",
+    "webrtc-sys",
+    "webrtc-sys/build",
 ]
 
 [workspace.package]
-version = "2.62.0"
+version = "2.65.0"
 authors = ["Calling Team <callingteam@signal.org>"]
 
 [patch.crates-io]

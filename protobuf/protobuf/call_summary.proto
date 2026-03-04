@@ -18,12 +18,18 @@ message DistributionSummary {
   optional uint32 sample_count = 5;
 }
 
+enum VideoCodec {
+    Vp8 = 8;
+    Vp9 = 9;
+}
+
 message StreamSummary {
   optional DistributionSummary bitrate         = 1;
   optional DistributionSummary packet_loss_pct = 2;
   optional DistributionSummary jitter          = 3;
   // Only present for received video streams
   optional DistributionSummary freeze_count    = 4;
+  optional VideoCodec          video_codec     = 5;
 }
 
 message StreamSummaries {
@@ -69,6 +75,10 @@ message DirectCallSummary {
   optional uint32          ice_candidate_switch_count = 2;
   optional uint32          ice_reconnect_count        = 3;
   optional bool            relayed                    = 4;
+  optional uint64          offer_sent_time            = 5;
+  optional uint64          answer_sent_time           = 6;
+  optional uint64          answer_received_time       = 7;
+  optional uint64          ice_connected_time         = 8;
 }
 
 message GroupCallSummary {

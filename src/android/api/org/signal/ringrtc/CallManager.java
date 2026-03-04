@@ -932,7 +932,6 @@ public class CallManager {
    * @param sfuUrl                     the URL to use when accessing the SFU
    * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
    * @param linkRootKey                the root key for the call link
-   * @param epoch                      optional call link epoch
    * @param handler                    a handler function which is invoked with the room's current state, or an error status code
    *
    * Expected failure codes include:
@@ -947,7 +946,6 @@ public class CallManager {
     @NonNull  String                                     sfuUrl,
     @NonNull  byte[]                                     authCredentialPresentation,
     @NonNull  CallLinkRootKey                            linkRootKey,
-    @Nullable CallLinkEpoch                              epoch,
     @NonNull  ResponseHandler<HttpResult<CallLinkState>> handler)
     throws CallException
   {
@@ -955,7 +953,7 @@ public class CallManager {
     Log.i(TAG, "readCallLink():");
 
     long requestId = this.callLinkRequests.add(handler);
-    ringrtcReadCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), epoch, requestId);
+    ringrtcReadCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), requestId);
   }
 
   /**
@@ -1033,7 +1031,6 @@ public class CallManager {
    * @param sfuUrl                     the URL to use when accessing the SFU
    * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
    * @param linkRootKey                the root key for the call link
-   * @param epoch                      optional call link epoch
    * @param adminPasskey               the passkey specified when the link was created
    * @param newName                    the new name to use
    * @param handler                    a handler function which is invoked with the room's updated state, or an error status code
@@ -1045,7 +1042,6 @@ public class CallManager {
     @NonNull  String                                     sfuUrl,
     @NonNull  byte[]                                     authCredentialPresentation,
     @NonNull  CallLinkRootKey                            linkRootKey,
-    @Nullable CallLinkEpoch                              epoch,
     @NonNull  byte[]                                     adminPasskey,
     @NonNull  String                                     newName,
     @NonNull  ResponseHandler<HttpResult<CallLinkState>> handler)
@@ -1055,7 +1051,7 @@ public class CallManager {
     Log.i(TAG, "updateCallLinkName():");
 
     long requestId = this.callLinkRequests.add(handler);
-    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), epoch, adminPasskey, newName, -1, -1, requestId);
+    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, newName, -1, -1, requestId);
   }
 
   /**
@@ -1074,7 +1070,6 @@ public class CallManager {
    * @param sfuUrl                     the URL to use when accessing the SFU
    * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
    * @param linkRootKey                the root key for the call link
-   * @param epoch                      optional call link epoch
    * @param adminPasskey               the passkey specified when the link was created
    * @param restrictions               the new restrictions to use
    * @param handler                    a handler function which is invoked with the room's updated state, or an error status code
@@ -1086,7 +1081,6 @@ public class CallManager {
     @NonNull  String                                     sfuUrl,
     @NonNull  byte[]                                     authCredentialPresentation,
     @NonNull  CallLinkRootKey                            linkRootKey,
-    @Nullable CallLinkEpoch                              epoch,
     @NonNull  byte[]                                     adminPasskey,
     @NonNull  CallLinkState.Restrictions                 restrictions,
     @NonNull  ResponseHandler<HttpResult<CallLinkState>> handler)
@@ -1099,7 +1093,7 @@ public class CallManager {
     }
 
     long requestId = this.callLinkRequests.add(handler);
-    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), epoch, adminPasskey, null, restrictions.ordinal(), -1, requestId);
+    ringrtcUpdateCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, null, restrictions.ordinal(), -1, requestId);
   }
 
   /**
@@ -1117,7 +1111,6 @@ public class CallManager {
    * @param sfuUrl                     the URL to use when accessing the SFU
    * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
    * @param linkRootKey                the root key for the call link
-   * @param epoch                      optional call link epoch
    * @param adminPasskey               the passkey specified when the link was created
    * @param handler                    a handler function which is invoked with a trash boolean, or an error status code
    *
@@ -1128,7 +1121,6 @@ public class CallManager {
     @NonNull  String                                     sfuUrl,
     @NonNull  byte[]                                     authCredentialPresentation,
     @NonNull  CallLinkRootKey                            linkRootKey,
-    @Nullable CallLinkEpoch                              epoch,
     @NonNull  byte[]                                     adminPasskey,
     @NonNull  ResponseHandler<HttpResult<Boolean>>       handler)
     throws CallException
@@ -1137,7 +1129,7 @@ public class CallManager {
     Log.i(TAG, "deleteCallLink():");
 
     long requestId = this.emptyRequests.add(handler);
-    ringrtcDeleteCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), epoch, adminPasskey, requestId);
+    ringrtcDeleteCallLink(nativeCallManager, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), adminPasskey, requestId);
   }
 
   /**
@@ -1189,7 +1181,6 @@ public class CallManager {
    * @param sfuUrl                     the URL to use when accessing the SFU
    * @param authCredentialPresentation a serialized CallLinkAuthCredentialPresentation
    * @param linkRootKey                the root key for the call link
-   * @param epoch                      optional call link epoch
    * @param handler                    a handler function which is invoked once the data is available
    *
    * @throws CallException for native code failures
@@ -1199,7 +1190,6 @@ public class CallManager {
     @NonNull  String                                sfuUrl,
     @NonNull  byte[]                                authCredentialPresentation,
     @NonNull  CallLinkRootKey                       linkRootKey,
-    @Nullable CallLinkEpoch                         epoch,
     @NonNull  ResponseHandler<HttpResult<PeekInfo>> handler)
     throws CallException
   {
@@ -1208,7 +1198,7 @@ public class CallManager {
     Log.i(TAG, "peekCallLink():");
 
     long requestId = this.peekRequests.add(handler);
-    ringrtcPeekCallLinkCall(nativeCallManager, requestId, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes(), epoch);
+    ringrtcPeekCallLinkCall(nativeCallManager, requestId, sfuUrl, authCredentialPresentation, linkRootKey.getKeyBytes());
   }
 
   /**
@@ -1281,7 +1271,6 @@ public class CallManager {
                                       @NonNull  byte[]                endorsementPublicKey,
                                       @NonNull  byte[]                authCredentialPresentation,
                                       @NonNull  CallLinkRootKey       linkRootKey,
-                                      @Nullable CallLinkEpoch         epoch,
                                       @Nullable byte[]                adminPasskey,
                                       @NonNull  byte[]                hkdfExtraInfo,
                                       @Nullable Integer               audioLevelsIntervalMs,
@@ -1299,7 +1288,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, endorsementPublicKey, authCredentialPresentation, linkRootKey, epoch, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, endorsementPublicKey, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.
@@ -2617,7 +2606,6 @@ public class CallManager {
                              String sfuUrl,
                              byte[] authCredentialPresentation,
                              byte[] rootKeyBytes,
-                             CallLinkEpoch epoch,
                              long   requestId)
     throws CallException;
 
@@ -2637,7 +2625,6 @@ public class CallManager {
                                String sfuUrl,
                                byte[] authCredentialPresentation,
                                byte[] rootKeyBytes,
-                               CallLinkEpoch epoch,
                                byte[] adminPasskey,
                                String newName,
                                int    newRestrictions,
@@ -2650,7 +2637,6 @@ public class CallManager {
                                String sfuUrl,
                                byte[] authCredentialPresentation,
                                byte[] rootKeyBytes,
-                               CallLinkEpoch epoch,
                                byte[] adminPasskey,
                                long   requestId)
     throws CallException;
@@ -2660,7 +2646,6 @@ public class CallManager {
                                  long   requestId,
                                  String sfuUrl,
                                  byte[] authCredentialPresentation,
-                                 byte[] rootKeyBytes,
-                                 CallLinkEpoch epoch)
+                                 byte[] rootKeyBytes)
     throws CallException;
 }

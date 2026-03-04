@@ -67,7 +67,7 @@ sketches-ddsketch = { version = "0.3.0" }
 # libsignal-client.
 bincode = { version = "1.3.3" }
 uuid = { version = "1.19.0", optional = true }
-zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.86.7" }
+zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.1" }
 
 # Optional, needed by the "electron" feature
 neon = { version = "1.1.1", optional = true, default-features = false, features = ["napi-6"] }
@@ -98,8 +98,8 @@ call_protobuf = { path = "../../protobuf", package = "protobuf"}
 mrp = { path = "../../mrp" }
 
 # Optional, needed by "native" feature
-cubeb = {  version = "0.33.0", optional = true }
-cubeb-core = {  version = "0.33.0", optional = true }
+cubeb = {  version = "0.34.0", optional = true }
+cubeb-core = {  version = "0.34.0", optional = true }
 regex = {  version = "1.12.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -142,4 +142,4 @@ jni = { version = "0.21.1", default-features = false }
 uuid = { version = "1.19.0" }
 env_logger = { version = "0.11.8" }
 rand_chacha = { version = "0.3.1" }
-libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.86.7" }
+libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.1" }
