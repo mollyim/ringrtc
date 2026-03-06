@@ -573,13 +573,42 @@ impl LastFramesVideoSink {
     }
 }
 
+fn js_num_to_u64(num: f64) -> u64 {
+    // Convert safely from signed.
+    num as i32 as u32 as u64
+}
+
+fn u64_to_js_num(val: u64) -> f64 {
+    // Convert safely to signed.
+    val as u32 as i32 as f64
+}
+
 fn get_id_arg(cx: &mut FunctionContext, i: usize) -> u64 {
-    let obj = cx.argument::<JsBigInt>(i).expect("Get id argument");
-    obj.to_u64(cx).expect("bigint")
+    let obj = cx.argument::<JsObject>(i).expect("Get id argument");
+    let high = js_num_to_u64(
+        obj.get::<JsNumber, _, _>(cx, "high")
+            .expect("Get id.high")
+            .value(cx),
+    );
+    let low = js_num_to_u64(
+        obj.get::<JsNumber, _, _>(cx, "low")
+            .expect("Get id.low")
+            .value(cx),
+    );
+    let id = ((high << 32) & 0xFFFFFFFF00000000) | (low & 0xFFFFFFFF);
+    debug!("id: {} converted from (high: {} low: {})", id, high, low);
+    id
 }
 
 fn create_id_arg<'a>(cx: &mut FunctionContext<'a>, id: u64) -> Handle<'a, JsValue> {
-    JsBigInt::from_u64(cx, id).as_value(cx)
+    let high = cx.number(u64_to_js_num((id >> 32) & 0xFFFFFFFF));
+    let low = cx.number(u64_to_js_num(id & 0xFFFFFFFF));
+    let unsigned = cx.boolean(true);
+    let obj = cx.empty_object();
+    obj.set(cx, "high", high).expect("set id.high");
+    obj.set(cx, "low", low).expect("set id.low");
+    obj.set(cx, "unsigned", unsigned).expect("set id.unsigned");
+    obj.upcast()
 }
 
 fn to_js_peek_info<'a>(

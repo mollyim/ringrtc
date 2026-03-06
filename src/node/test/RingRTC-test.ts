@@ -11,6 +11,7 @@ import { createHash, randomBytes } from 'crypto';
 import {
   CallEndReason,
   callIdFromEra,
+  callIdFromRingId,
   CallingMessage,
   CallLinkRestrictions,
   CallLinkRootKey,
@@ -27,6 +28,7 @@ import {
   RingRTC,
   SpeechEvent,
 } from '../index';
+import Long from 'long';
 import sinon, { SinonSpy } from 'sinon';
 import sinonChai from 'sinon-chai';
 import { CallingClass } from './CallingClass';
@@ -36,7 +38,7 @@ use(chaiAsPromised);
 should();
 use(sinonChai);
 
-function generateOfferCallingMessage(callId: bigint): CallingMessage {
+function generateOfferCallingMessage(callId: Long): CallingMessage {
   // Audio-only hex based SDP generated from a direct client call
   const audioOnlySdp = new Uint8Array(
     Buffer.from(
@@ -79,7 +81,7 @@ describe('RingRTC', () => {
   it('reports an age for expired offers', async () => {
     const offer: CallingMessage = {
       offer: {
-        callId: 123n,
+        callId: { high: 0, low: 123, unsigned: true },
         type: OfferType.AudioCall,
         opaque: new Uint8Array(),
       },
@@ -133,7 +135,7 @@ describe('RingRTC', () => {
 
     const offer: CallingMessage = {
       offer: {
-        callId: 123n,
+        callId: { high: 0, low: 123, unsigned: true },
         type: OfferType.AudioCall,
         opaque: new Uint8Array(),
       },
@@ -211,7 +213,7 @@ describe('RingRTC', () => {
     initializeSpies();
 
     // Generate incoming calling message
-    const callId = 0x00000001_00000001n;
+    const callId = new Long(1, 1, true);
     const offerCallingMessage = generateOfferCallingMessage(callId);
 
     RingRTC.handleCallingMessage(offerCallingMessage, {
@@ -293,12 +295,20 @@ describe('RingRTC', () => {
 
     await outgoingCallLatch.finished;
 
-    const outgoingCallId = RingRTC.call!.callId;
+    const outgoingCallId = Long.fromValue(RingRTC.call!.callId);
 
     // Generate a call id based on the desired glare winner
-    const incomingCallId = outgoingWinner
-      ? outgoingCallId - 1n
-      : outgoingCallId + 1n;
+    const incomingCallId = outgoingCallId.unsigned
+      ? new Long(
+          outgoingWinner ? outgoingCallId.low - 1 : outgoingCallId.low + 1,
+          outgoingCallId.high,
+          outgoingCallId.unsigned
+        )
+      : new Long(
+          outgoingWinner ? outgoingCallId.low + 1 : outgoingCallId.low - 1,
+          outgoingCallId.high,
+          outgoingCallId.unsigned
+        );
 
     // Generate incoming calling message
     const offerCallingMessage = generateOfferCallingMessage(incomingCallId);
@@ -319,9 +329,9 @@ describe('RingRTC', () => {
     await sleep(1000);
 
     if (outgoingWinner) {
-      assert.strictEqual(outgoingCallId, RingRTC.call!.callId);
+      assert.isTrue(outgoingCallId.eq(Long.fromValue(RingRTC.call!.callId)));
     } else {
-      assert.strictEqual(incomingCallId, RingRTC.call!.callId);
+      assert.isTrue(incomingCallId.eq(Long.fromValue(RingRTC.call!.callId)));
     }
 
     // Cleanup.
@@ -332,11 +342,31 @@ describe('RingRTC', () => {
 
   it('converts eras to call IDs', () => {
     const fromHex = callIdFromEra('8877665544332211');
-    assert.strictEqual(fromHex, 0x8877665544332211n);
+    assert.isTrue(
+      Long.fromValue(fromHex).eq(Long.fromString('8877665544332211', true, 16))
+    );
 
     const fromUnusualEra = callIdFromEra('mesozoic');
-    assert.notStrictEqual(fromUnusualEra, fromHex);
-    assert.notStrictEqual(fromUnusualEra, 0n);
+    assert.isFalse(Long.fromValue(fromUnusualEra).eq(Long.fromValue(fromHex)));
+    assert.isFalse(Long.fromValue(fromUnusualEra).isZero());
+  });
+
+  it('converts ring IDs to call IDs', () => {
+    function testConversion(ringIdAsString: string) {
+      const ringId = BigInt(ringIdAsString);
+      const callId = callIdFromRingId(ringId);
+      const expectedCallId = Long.fromValue(ringIdAsString).toUnsigned();
+      assert.isTrue(
+        Long.fromValue(callId).eq(expectedCallId),
+        `${ringId} was converted to ${callId}, should be ${expectedCallId}`
+      );
+    }
+    testConversion('0');
+    testConversion('1');
+    testConversion('-1');
+    testConversion(Long.MAX_VALUE.toString());
+    testConversion((-Long.MAX_VALUE).toString());
+    testConversion(Long.MIN_VALUE.toString());
   });
 
   it('can peek with pending clients', async () => {
