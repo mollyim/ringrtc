@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
   s.name             = "SignalRingRTC"
-  s.version          = "2.65.0"
+  s.version          = "2.65.3"
   s.summary          = "A Swift & Objective-C library used by the Signal iOS app for WebRTC interactions."
 
   s.description      = <<-DESC
@@ -38,6 +38,7 @@ Pod::Spec.new do |s|
     'bin/fetch-artifact.py', # env.sh has extra dependencies, so we go directly to the Python script
     'config/version.sh',
     'config/version.properties',
+    'config/webrtc_artifact_checksums.json',
     'prebuild-checksum',
 
     # controlled by bin/set-up-for-cocoapods
