@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.66.0
+
+- Add opus DRED model 0.0.1 and DRED duration config
+
+- Enable Opus PLC
+
 ## v2.65.4
 
 - Add AssetRegistry to call state, expose addAsset()
