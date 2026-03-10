@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.66.1
+
+- Update BigInt in electron to use native JsBigInt.
+
 ## v2.66.0
 
 - Add opus DRED model 0.0.1 and DRED duration config
