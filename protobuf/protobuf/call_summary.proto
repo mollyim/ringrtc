@@ -30,13 +30,15 @@ message StreamSummary {
   // Only present for received video streams
   optional DistributionSummary freeze_count    = 4;
   optional VideoCodec          video_codec     = 5;
+  // Always present
+  optional uint32              ssrc            = 6;
 }
 
 message StreamSummaries {
-  map<uint32, StreamSummary> audio_send_stream_summaries = 1;
-  map<uint32, StreamSummary> audio_recv_stream_summaries = 2;
-  map<uint32, StreamSummary> video_send_stream_summaries = 3;
-  map<uint32, StreamSummary> video_recv_stream_summaries = 4;
+  repeated StreamSummary audio_send_stream_summaries = 5;
+  repeated StreamSummary audio_recv_stream_summaries = 6;
+  repeated StreamSummary video_send_stream_summaries = 7;
+  repeated StreamSummary video_recv_stream_summaries = 8;
 }
 
 message StreamStats {
