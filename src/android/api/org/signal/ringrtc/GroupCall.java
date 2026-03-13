@@ -197,7 +197,7 @@ public final class GroupCall {
                 adminPasskey,
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
-                dredDuration,
+                dredDurationByte,
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
                 // Returns a borrowed RC.
