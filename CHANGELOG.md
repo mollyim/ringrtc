@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.67.0
+
+- Refactor StreamSummary to avoid a map
+
+- Update to webrtc 7444h
+  - Revert change that skips DTX refresh packet
+  - Android: Make oboe more resilient to errors when starting
+
 ## v2.66.1
 
 - Update BigInt in electron to use native JsBigInt.
