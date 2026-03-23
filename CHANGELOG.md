@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.67.0
+
+- Refactor StreamSummary to avoid a map
+
+- Update to webrtc 7444h
+  - Revert change that skips DTX refresh packet
+  - Android: Make oboe more resilient to errors when starting
+
+## v2.66.1
+
+- Update BigInt in electron to use native JsBigInt.
+
+## v2.66.0
+
+- Add opus DRED model 0.0.1 and DRED duration config
+
+- Enable Opus PLC
+
+## v2.65.4
+
+- Add AssetRegistry to call state, expose addAsset()
+
+- Update to libsignal v0.88.0
+
 ## v2.65.3
 
 - Update to webrtc 7444g

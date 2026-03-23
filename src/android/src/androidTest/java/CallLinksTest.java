@@ -435,7 +435,7 @@ public class CallLinksTest extends CallTestBase {
         CallManager callManager = CallManager.createCallManager(observer);
 
         GroupCall.Observer callObserver = mock();
-        GroupCall call = callManager.createCallLinkCall("sfu.example", null, ENDORSEMENT_PUBLIC_KEY, new byte[] { 1, 2, 3 }, EXAMPLE_KEY, null, new byte[] {}, null, new AudioConfig(), callObserver);
+        GroupCall call = callManager.createCallLinkCall("sfu.example", null, ENDORSEMENT_PUBLIC_KEY, new byte[] { 1, 2, 3 }, EXAMPLE_KEY, null, new byte[] {}, null, null, new AudioConfig(), callObserver);
         assertEquals(call.getKind(), GroupCall.Kind.CALL_LINK);
 
         call.connect();

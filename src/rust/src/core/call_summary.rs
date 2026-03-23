@@ -279,23 +279,23 @@ impl StreamSummaries {
         let audio_send_stream_summaries = self
             .audio_send_stream_summaries
             .iter()
-            .map(|(ssrc, summary)| (*ssrc, summary.into()))
-            .collect::<HashMap<u32, protobuf::call_summary::StreamSummary>>();
+            .map(|v| v.into())
+            .collect::<Vec<_>>();
         let audio_recv_stream_summaries = self
             .audio_recv_stream_summaries
             .iter()
-            .map(|(ssrc, summary)| (*ssrc, summary.into()))
-            .collect::<HashMap<u32, protobuf::call_summary::StreamSummary>>();
+            .map(|v| v.into())
+            .collect::<Vec<_>>();
         let video_send_stream_summaries = self
             .video_send_stream_summaries
             .iter()
-            .map(|(ssrc, summary)| (*ssrc, summary.into()))
-            .collect::<HashMap<u32, protobuf::call_summary::StreamSummary>>();
+            .map(|v| v.into())
+            .collect::<Vec<_>>();
         let video_recv_stream_summaries = self
             .video_recv_stream_summaries
             .iter()
-            .map(|(ssrc, summary)| (*ssrc, summary.into()))
-            .collect::<HashMap<u32, protobuf::call_summary::StreamSummary>>();
+            .map(|v| v.into())
+            .collect::<Vec<_>>();
         protobuf::call_summary::StreamSummaries {
             audio_send_stream_summaries,
             audio_recv_stream_summaries,
@@ -523,8 +523,9 @@ impl DistributionSummary<f32> {
     }
 }
 
-impl From<&StreamSummary> for protobuf::call_summary::StreamSummary {
-    fn from(summary: &StreamSummary) -> Self {
+impl From<(&u32, &StreamSummary)> for protobuf::call_summary::StreamSummary {
+    fn from(value: (&u32, &StreamSummary)) -> Self {
+        let (ssrc, summary) = value;
         Self {
             bitrate: summary.bitrate.to_proto(),
             packet_loss_pct: summary.packet_loss.to_proto(),
@@ -535,6 +536,7 @@ impl From<&StreamSummary> for protobuf::call_summary::StreamSummary {
                 StatsVideoCodecType::Vp9 => Some(VideoCodec::Vp9.into()),
                 StatsVideoCodecType::Invalid => None,
             },
+            ssrc: Some(*ssrc),
         }
     }
 }
@@ -1282,7 +1284,7 @@ impl GroupCallSummaryInner {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use prost::Message;
     use rand::Rng;
@@ -1388,41 +1390,35 @@ mod test {
         stats_sets.to_proto()
     }
 
-    fn create_stream_summaries(
-        count: usize,
-    ) -> HashMap<u32, protobuf::call_summary::StreamSummary> {
+    fn create_stream_summaries(count: usize) -> Vec<protobuf::call_summary::StreamSummary> {
         (0..count as u32)
-            .map(|v| {
-                (
-                    v,
-                    protobuf::call_summary::StreamSummary {
-                        bitrate: Some(protobuf::call_summary::DistributionSummary {
-                            mean: Some(45000.0),
-                            std_dev: Some(45000.0),
-                            min_val: Some(0.0),
-                            max_val: Some(100000.0),
-                            sample_count: Some(50000),
-                        }),
-                        packet_loss_pct: Some(protobuf::call_summary::DistributionSummary {
-                            mean: Some(100.0),
-                            std_dev: Some(0.0),
-                            min_val: Some(100.0),
-                            max_val: Some(100.0),
-                            sample_count: Some(50000),
-                        }),
-                        jitter: Some(protobuf::call_summary::DistributionSummary {
-                            mean: Some(20.0),
-                            std_dev: Some(20.0),
-                            min_val: Some(0.0),
-                            max_val: Some(20.0),
-                            sample_count: Some(50000),
-                        }),
-                        freeze_count: None,
-                        video_codec: None,
-                    },
-                )
+            .map(|v| protobuf::call_summary::StreamSummary {
+                bitrate: Some(protobuf::call_summary::DistributionSummary {
+                    mean: Some(45000.0),
+                    std_dev: Some(45000.0),
+                    min_val: Some(0.0),
+                    max_val: Some(100000.0),
+                    sample_count: Some(50000),
+                }),
+                packet_loss_pct: Some(protobuf::call_summary::DistributionSummary {
+                    mean: Some(100.0),
+                    std_dev: Some(0.0),
+                    min_val: Some(100.0),
+                    max_val: Some(100.0),
+                    sample_count: Some(50000),
+                }),
+                jitter: Some(protobuf::call_summary::DistributionSummary {
+                    mean: Some(20.0),
+                    std_dev: Some(20.0),
+                    min_val: Some(0.0),
+                    max_val: Some(20.0),
+                    sample_count: Some(50000),
+                }),
+                freeze_count: None,
+                video_codec: None,
+                ssrc: Some(v),
             })
-            .collect::<HashMap<u32, protobuf::call_summary::StreamSummary>>()
+            .collect::<Vec<protobuf::call_summary::StreamSummary>>()
     }
 
     struct CreateGroupCallParams {

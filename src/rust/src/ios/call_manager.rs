@@ -51,6 +51,16 @@ pub fn set_self_uuid(call_manager: *mut IosCallManager, uuid: UserId) -> Result<
     call_manager.set_self_uuid(uuid)
 }
 
+/// Adds an asset to the asset manager.
+pub fn add_asset(
+    call_manager: *mut IosCallManager,
+    asset_group: String,
+    handle: crate::core::assets::AssetHandle,
+) -> Result<()> {
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.add_asset(&asset_group, handle)
+}
+
 /// Application notification to start a new call.
 pub fn call(
     call_manager: *mut IosCallManager,
@@ -385,6 +395,7 @@ pub fn create_group_call_client(
     sfu_url: String,
     hkdf_extra_info: Vec<u8>,
     audio_levels_interval: Option<Duration>,
+    dred_duration: u8,
     native_peer_connection_factory: webrtc::ptr::OwnedRc<pcf::RffiPeerConnectionFactoryInterface>,
     native_audio_track: webrtc::ptr::OwnedRc<media::RffiAudioTrack>,
     native_video_track: webrtc::ptr::OwnedRc<media::RffiVideoTrack>,
@@ -411,6 +422,7 @@ pub fn create_group_call_client(
         sfu_url,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
@@ -428,6 +440,7 @@ pub fn create_call_link_call_client(
     admin_passkey: Option<Vec<u8>>,
     hkdf_extra_info: Vec<u8>,
     audio_levels_interval: Option<Duration>,
+    dred_duration: u8,
     native_peer_connection_factory: webrtc::ptr::OwnedRc<pcf::RffiPeerConnectionFactoryInterface>,
     native_audio_track: webrtc::ptr::OwnedRc<media::RffiAudioTrack>,
     native_video_track: webrtc::ptr::OwnedRc<media::RffiVideoTrack>,
@@ -457,6 +470,7 @@ pub fn create_call_link_call_client(
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,

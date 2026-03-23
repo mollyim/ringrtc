@@ -14,7 +14,7 @@ use jni::{
     JNIEnv,
     objects::{JByteArray, JClass, JObject, JString},
     strings::JavaStr,
-    sys::{jboolean, jint, jlong, jobject},
+    sys::{jboolean, jbyte, jint, jlong, jobject},
 };
 
 use crate::{
@@ -113,6 +113,30 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcSetSelfUuid(
 
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcAddAsset(
+    mut env: JNIEnv,
+    _object: JObject,
+    call_manager: jlong,
+    asset_group: JString,
+    file_path: JString,
+    content: JByteArray,
+) {
+    match call_manager::add_asset(
+        &mut env,
+        call_manager as *mut AndroidCallManager,
+        asset_group,
+        file_path,
+        content,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error::throw_error(&mut env, e);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
 pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcCall(
     mut env: JNIEnv,
     _object: JObject,
@@ -145,6 +169,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
     jni_call_context: JObject,
     data_mode: jint,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
 ) {
     let audio_levels_interval = if audio_levels_interval_millis <= 0 {
         None
@@ -157,7 +182,9 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
         call_manager as *mut AndroidCallManager,
         call_id,
         jni_call_context,
-        CallConfig::default().with_data_mode(DataMode::from_i32(data_mode)),
+        CallConfig::default()
+            .with_data_mode(DataMode::from_i32(data_mode))
+            .with_dred_duration(dred_duration as u8),
         audio_levels_interval,
     ) {
         Ok(v) => v,
@@ -786,6 +813,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCal
     jni_proxy_info: JObject,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
     native_peer_connection_factory_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -798,6 +826,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCal
         jni_proxy_info,
         hkdf_extra_info,
         audio_levels_interval_millis,
+        dred_duration,
         native_peer_connection_factory_borrowed_rc,
         native_audio_track_borrowed_rc,
         native_video_track_borrowed_rc,
@@ -824,6 +853,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLink
     admin_passkey: JByteArray,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
     native_peer_connection_factory_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -839,6 +869,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLink
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval_millis,
+        dred_duration,
         native_peer_connection_factory_borrowed_rc,
         native_audio_track_borrowed_rc,
         native_video_track_borrowed_rc,

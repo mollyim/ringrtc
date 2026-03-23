@@ -111,6 +111,7 @@ public class CallManager {
       fieldTrialsWithDefaults.put("RingRTC-PruneTurnPorts", "Enabled");
       fieldTrialsWithDefaults.put("WebRTC-Bwe-ProbingConfiguration", "skip_if_est_larger_than_fraction_of_max:0.99");
       fieldTrialsWithDefaults.put("WebRTC-IncreaseIceCandidatePriorityHostSrflx", "Enabled");
+      fieldTrialsWithDefaults.put("WebRTC-Audio-OpusGeneratePlc", "Enabled");
       fieldTrialsWithDefaults.putAll(fieldTrials);
 
       CallManager.fieldTrials = buildFieldTrialsString(fieldTrialsWithDefaults);
@@ -340,6 +341,44 @@ public class CallManager {
 
   /**
    *
+   * Adds an asset to the asset manager by file path.
+   *
+   * @param assetGroup   The asset identifier
+   * @param filePath  Path to the asset file on disk
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void addAsset(@NonNull String assetGroup, @NonNull String filePath)
+    throws CallException
+  {
+    checkCallManagerExists();
+
+    Log.i(TAG, "addAsset(): by filePath");
+    ringrtcAddAsset(nativeCallManager, assetGroup, filePath, null);
+  }
+
+  /**
+   *
+   * Adds an asset to the asset manager by byte content.
+   *
+   * @param assetGroup  The asset identifier
+   * @param content  The raw asset bytes
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void addAsset(@NonNull String assetGroup, @NonNull byte[] content)
+    throws CallException
+  {
+    checkCallManagerExists();
+
+    Log.i(TAG, "addAsset(): by content");
+    ringrtcAddAsset(nativeCallManager, assetGroup, null, content);
+  }
+
+  /**
+   *
    * Indication from application to start a new outgoing call
    *
    * @param remote         remote side fo the call
@@ -376,6 +415,7 @@ public class CallManager {
    * @param hideIp                 if true hide caller's IP by using a TURN server
    * @param dataMode               desired data mode to start the session with
    * @param audioLevelsIntervalMs  if greater than 0, enable audio levels with this interval (in milliseconds)
+   * @param dredDuration           if provided, client will encode DRED PLC for the period specified
    * @param enableCamera           if true, enable the local camera video track when created
    *
    * @throws CallException for native code failures
@@ -393,6 +433,7 @@ public class CallManager {
                                 boolean                        hideIp,
                                 DataMode                       dataMode,
                       @Nullable Integer                        audioLevelsIntervalMs,
+                      @Nullable Byte                           dredDuration,
                                 boolean                        enableCamera)
     throws CallException
   {
@@ -420,11 +461,13 @@ public class CallManager {
     callContext.setVideoEnabled(enableCamera);
 
     int audioLevelsIntervalMillis = audioLevelsIntervalMs == null ? 0 : audioLevelsIntervalMs.intValue();
+    byte dredDurationByte = dredDuration == null ? 0 : dredDuration.byteValue();
     ringrtcProceed(nativeCallManager,
                    callId.longValue(),
                    callContext,
                    dataMode.ordinal(),
-                   audioLevelsIntervalMillis);
+                   audioLevelsIntervalMillis,
+                   dredDurationByte);
   }
 
   /**
@@ -1212,6 +1255,7 @@ public class CallManager {
    * @param sfuUrl                 the URL to use when accessing the SFU
    * @param hkdfExtraInfo          additional entropy to use for the connection with the SFU (it's okay if this is empty)
    * @param audioLevelsIntervalMs  if provided, the observer will receive audio level callbacks at this interval
+   * @param dredDuration           if provided, client will encode DRED PLC for the period specified
    * @param audioConfig            the audio configuration to use
    * @param observer               the observer that the group call object will use for callback notifications
    *
@@ -1222,6 +1266,7 @@ public class CallManager {
                                    @Nullable ProxyInfo          proxyInfo,
                                    @NonNull  byte[]             hkdfExtraInfo,
                                    @Nullable Integer            audioLevelsIntervalMs,
+                                   @Nullable Byte               dredDuration,
                                    @NonNull  AudioConfig        audioConfig,
                                    @NonNull  GroupCall.Observer observer)
   {
@@ -1236,7 +1281,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, proxyInfo, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, groupId, sfuUrl, proxyInfo, hkdfExtraInfo, audioLevelsIntervalMs, dredDuration, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.
@@ -1259,6 +1304,7 @@ public class CallManager {
    * @param adminPasskey               if present, the opaque passkey authorizing this user as an admin for the call link
    * @param hkdfExtraInfo              additional entropy to use for the connection with the SFU (it's okay if this is empty)
    * @param audioLevelsIntervalMs      if provided, the observer will receive audio level callbacks at this interval
+   * @param dredDuration               if provided, client will encode DRED PLC for the period specified
    * @param audioConfig                the audio configuration to use
    * @param observer                   the observer that the group call object will use for callback notifications
    *
@@ -1274,6 +1320,7 @@ public class CallManager {
                                       @Nullable byte[]                adminPasskey,
                                       @NonNull  byte[]                hkdfExtraInfo,
                                       @Nullable Integer               audioLevelsIntervalMs,
+                                      @Nullable Byte                  dredDuration,
                                       @NonNull  AudioConfig           audioConfig,
                                       @NonNull  GroupCall.Observer    observer)
   {
@@ -1288,7 +1335,7 @@ public class CallManager {
       }
     }
 
-    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, endorsementPublicKey, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, this.groupFactory, observer);
+    GroupCall groupCall = GroupCall.create(nativeCallManager, sfuUrl, proxyInfo, endorsementPublicKey, authCredentialPresentation, linkRootKey, adminPasskey, hkdfExtraInfo, audioLevelsIntervalMs, dredDuration, this.groupFactory, observer);
 
     if (groupCall != null) {
       // Add the groupCall to the map.
@@ -2455,6 +2502,10 @@ public class CallManager {
     throws CallException;
 
   private native
+    void ringrtcAddAsset(long nativeCallManager, String assetGroup, String filePath, byte[] content)
+    throws CallException;
+
+  private native
     long ringrtcCreatePeerConnection(long                            nativePeerConnectionFactory,
                                      long                            nativeConnection,
                                      PeerConnection.RTCConfiguration rtcConfig,
@@ -2470,7 +2521,8 @@ public class CallManager {
                         long        callId,
                         CallContext callContext,
                         int         dataMode,
-                        int         audioLevelsIntervalMillis)
+                        int         audioLevelsIntervalMillis,
+                        byte        dredDuration)
     throws CallException;
 
   private native

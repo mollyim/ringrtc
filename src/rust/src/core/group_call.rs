@@ -35,6 +35,7 @@ use crate::{
         units::DataRate,
     },
     core::{
+        assets::AssetRegistry,
         call_mutex::CallMutex,
         call_summary::{CallSummary, GroupCallSummary},
         crypto::{self as frame_crypto, DecryptionErrorStats},
@@ -1016,6 +1017,9 @@ struct State {
     // Shared state with the CallManager that might change
     busy: Arc<CallMutex<bool>>,
     self_uuid: Arc<CallMutex<Option<UserId>>>,
+    #[allow(dead_code)]
+    /// Registry of large, preloaded assets
+    asset_registry: AssetRegistry,
 
     // State that changes regularly and is sent to the observer
     connection_state: ConnectionState,
@@ -1067,6 +1071,7 @@ struct State {
     // Things for getting audio levels from the PeerConnection
     audio_levels_interval: Option<Duration>,
     next_audio_levels_time: Option<Instant>,
+    dred_duration: u8,
     // Variables to track the start of the current utterance, and how frequently
     // to poll for "is the user speaking?"
     speaking_interval: Duration,
@@ -1237,12 +1242,14 @@ pub struct ClientStartParams {
     pub observer: Box<dyn Observer + Send>,
     pub busy: Arc<CallMutex<bool>>,
     pub self_uuid: Arc<CallMutex<Option<UserId>>>,
+    pub asset_registry: AssetRegistry,
     pub peer_connection_factory: Option<PeerConnectionFactory>,
     pub outgoing_audio_track: AudioTrack,
     pub outgoing_video_track: Option<VideoTrack>,
     pub incoming_video_sink: Option<Box<dyn VideoSink>>,
     pub ring_id: Option<RingId>,
     pub audio_levels_interval: Option<Duration>,
+    pub dred_duration: u8,
     pub obfuscated_resolver: ObfuscatedResolver,
     pub group_send_endorsement_cache: Option<EndorsementsCache>,
 }
@@ -1258,12 +1265,14 @@ impl Client {
             observer,
             busy,
             self_uuid,
+            asset_registry,
             peer_connection_factory,
             outgoing_audio_track,
             outgoing_video_track,
             incoming_video_sink,
             ring_id,
             audio_levels_interval,
+            dred_duration,
             obfuscated_resolver,
             group_send_endorsement_cache,
         } = params;
@@ -1351,6 +1360,7 @@ impl Client {
                     observer,
                     busy,
                     self_uuid,
+                    asset_registry,
                     local_ice_ufrag,
                     local_ice_pwd,
 
@@ -1397,6 +1407,7 @@ impl Client {
 
                     audio_levels_interval,
                     next_audio_levels_time: None,
+                    dred_duration,
 
                     speaking_interval: SPEAKING_POLL_INTERVAL,
                     next_speaking_audio_levels_time: None,
@@ -2912,7 +2923,10 @@ impl Client {
     fn on_client_joined(state: &mut State) {
         state
             .peer_connection
-            .configure_audio_encoders(&AudioEncoderConfig::default());
+            .configure_audio_encoders(&AudioEncoderConfig {
+                dred_duration: state.dred_duration,
+                ..AudioEncoderConfig::default()
+            });
     }
 
     pub fn on_signaling_message_received(
@@ -5335,7 +5349,7 @@ mod tests {
     use super::*;
     use crate::{
         common::time::saturating_epoch_time,
-        core::endorsements::EndorsementUpdateResult,
+        core::{assets::AssetRegistry, endorsements::EndorsementUpdateResult},
         lite::{
             call_links::{CallLinkMemberResolver, CallLinkRootKey},
             sfu::{MemberResolver, PeekDeviceInfo},
@@ -6114,6 +6128,7 @@ mod tests {
             let observer = FakeObserver::new(user_id.clone());
             let fake_busy = Arc::new(CallMutex::new(false, "fake_busy"));
             let fake_self_uuid = Arc::new(CallMutex::new(Some(user_id.clone()), "fake_self_uuid"));
+            let fake_asset_registry = AssetRegistry::default();
             let fake_audio_track = AudioTrack::new(
                 webrtc::Arc::from_owned(unsafe {
                     webrtc::ptr::OwnedRc::from_ptr(&FAKE_AUDIO_TRACK as *const u32)
@@ -6137,11 +6152,13 @@ mod tests {
                 observer: Box::new(observer.clone()),
                 busy: fake_busy,
                 self_uuid: fake_self_uuid,
+                asset_registry: fake_asset_registry,
                 peer_connection_factory: None,
                 outgoing_audio_track: fake_audio_track,
                 outgoing_video_track: None,
                 incoming_video_sink: None,
                 ring_id: None,
+                dred_duration: 0,
                 audio_levels_interval: Some(Duration::from_millis(200)),
                 group_send_endorsement_cache,
             })

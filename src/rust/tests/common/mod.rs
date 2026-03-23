@@ -271,6 +271,7 @@ impl TestContext {
             None, // proxy_info
             vec![],
             None,
+            0,
             None,
             ringrtc::webrtc::media::AudioTrack::new(webrtc::Arc::null(), None),
             ringrtc::webrtc::media::VideoTrack::new(webrtc::Arc::null(), None),

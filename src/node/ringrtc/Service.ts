@@ -18,11 +18,7 @@ const INVALID_CLIENT_ID = 0;
 export const callIdFromEra: (era: string) => CallId = Native.callIdFromEra;
 
 export function callIdFromRingId(ringId: bigint): CallId {
-  return {
-    low: Number(BigInt.asIntN(32, ringId)),
-    high: Number(BigInt.asIntN(32, ringId >> BigInt(32))),
-    unsigned: true,
-  };
+  return ringId;
 }
 
 class Config {
@@ -50,6 +46,7 @@ class NativeCallManager {
         'WebRTC-Bwe-ProbingConfiguration':
           'skip_if_est_larger_than_fraction_of_max:0.99',
         'WebRTC-IncreaseIceCandidatePriorityHostSrflx': 'Enabled',
+        'WebRTC-Audio-OpusGeneratePlc': 'Enabled',
       },
       config.field_trials
     );
@@ -79,6 +76,7 @@ class NativeCallManager {
 // Mirror methods onto NativeCallManager.
 // This is done through direct assignment rather than wrapper methods to avoid indirection.
 (NativeCallManager.prototype as any).setSelfUuid = Native.cm_setSelfUuid;
+(NativeCallManager.prototype as any).addAsset = Native.cm_addAsset;
 (NativeCallManager.prototype as any).createOutgoingCall =
   Native.cm_createOutgoingCall;
 (NativeCallManager.prototype as any).proceed = Native.cm_proceed;
@@ -380,11 +378,7 @@ export class RingRTCType {
   private _callInfoByCallId: Map<string, CallInfo>;
 
   private getCallInfoKey(callId: CallId): string {
-    // CallId is u64 so use a string key instead.
-    // Note that the representation is not padded, so we include a separator.
-    // Otherwise {1, 123} and {11, 23} would have the same key.
-    // (We could use Long.toString as well, but it doesn't matter what the key is.)
-    return `${callId.high} ${callId.low}`;
+    return callId.toString();
   }
 
   // Set by UX
@@ -492,6 +486,16 @@ export class RingRTCType {
   // Called by UX
   setSelfUuid(uuid: Uint8Array): void {
     this.callManager.setSelfUuid(uuid);
+  }
+
+  // Called by UX
+  addAsset(
+    assetGroup: string,
+    asset: { filePath: string } | { content: Uint8Array }
+  ): void {
+    const filePath = 'filePath' in asset ? asset.filePath : null;
+    const content = 'content' in asset ? asset.content : null;
+    this.callManager.addAsset(assetGroup, filePath, content);
   }
 
   // Called by UX
@@ -638,7 +642,8 @@ export class RingRTCType {
         settings.iceServers,
         settings.hideIp,
         settings.dataMode,
-        settings.audioLevelsIntervalMillis || 0
+        settings.audioLevelsIntervalMillis || 0,
+        settings.dredDuration ?? 0
       );
     });
   }
@@ -1177,13 +1182,15 @@ export class RingRTCType {
     sfuUrl: string,
     hkdfExtraInfo: Uint8Array,
     audioLevelsIntervalMillis: number | undefined,
+    dredDuration: number | undefined,
     observer: GroupCallObserver
   ): GroupCall | undefined {
     const clientId = this.callManager.createGroupCallClient(
       groupId,
       sfuUrl,
       hkdfExtraInfo,
-      audioLevelsIntervalMillis || 0
+      audioLevelsIntervalMillis ?? 0,
+      dredDuration ?? 0
     );
     if (clientId === INVALID_CLIENT_ID) {
       // Return undefined since the group call client creation failed.
@@ -1211,6 +1218,7 @@ export class RingRTCType {
     adminPasskey: Uint8Array | undefined,
     hkdfExtraInfo: Uint8Array,
     audioLevelsIntervalMillis: number | undefined,
+    dredDuration: number | undefined,
     observer: GroupCallObserver
   ): GroupCall | undefined {
     const clientId = this.callManager.createCallLinkCallClient(
@@ -1220,7 +1228,8 @@ export class RingRTCType {
       rootKey.bytes,
       adminPasskey,
       hkdfExtraInfo,
-      audioLevelsIntervalMillis || 0
+      audioLevelsIntervalMillis || 0,
+      dredDuration ?? 0
     );
     if (clientId === INVALID_CLIENT_ID) {
       // Return undefined since the call link client creation failed.
@@ -1886,11 +1895,7 @@ export class RingRTCType {
   getCall(callId: CallId): Call | null {
     const call = this.call;
 
-    if (
-      call &&
-      call.callId.high === callId.high &&
-      call.callId.low === callId.low
-    ) {
+    if (call && call.callId === callId) {
       return call;
     }
     return null;
@@ -1954,6 +1959,7 @@ export interface CallSettings {
   hideIp: boolean;
   dataMode: DataMode;
   audioLevelsIntervalMillis?: number;
+  dredDuration?: number;
 }
 
 interface IceServer {
@@ -2836,14 +2842,7 @@ export type UserId = string;
 
 export type DeviceId = number;
 
-// A stripped-down version of Long.
-export type CallId = {
-  high: number;
-  low: number;
-  // RingRTC always treats call IDs as unsigned internally regardless of what this is set to.
-  // Call IDs produced by RingRTC will always set this to `true`.
-  unsigned: boolean;
-};
+export type CallId = bigint;
 
 export class CallingMessage {
   offer?: OfferMessage;
@@ -2940,6 +2939,11 @@ export enum RingCancelReason {
 export interface CallManager {
   setConfig(config: Config): void;
   setSelfUuid(uuid: Uint8Array): void;
+  addAsset(
+    assetGroup: string,
+    filePath: string | null,
+    content: Uint8Array | null
+  ): void;
   createOutgoingCall(
     remoteUserId: UserId,
     isVideoCall: boolean,
@@ -2950,7 +2954,8 @@ export interface CallManager {
     iceServers: Array<IceServer>,
     hideIp: boolean,
     dataMode: DataMode,
-    audioLevelsIntervalMillis: number
+    audioLevelsIntervalMillis: number,
+    dredDuration: number
   ): void;
   accept(callId: CallId): void;
   ignore(callId: CallId): void;
@@ -3036,7 +3041,8 @@ export interface CallManager {
     groupId: GroupId,
     sfuUrl: string,
     hkdfExtraInfo: Uint8Array,
-    audioLevelsIntervalMillis: number
+    audioLevelsIntervalMillis: number,
+    dredDuration: number
   ): GroupCallClientId;
   createCallLinkCallClient(
     sfuUrl: string,
@@ -3045,7 +3051,8 @@ export interface CallManager {
     linkRootKey: Uint8Array,
     adminPasskey: Uint8Array | undefined,
     hkdfExtraInfo: Uint8Array,
-    audioLevelsIntervalMillis: number
+    audioLevelsIntervalMillis: number,
+    dredDuration: number
   ): GroupCallClientId;
   deleteGroupCallClient(clientId: GroupCallClientId): void;
   connect(clientId: GroupCallClientId): void;

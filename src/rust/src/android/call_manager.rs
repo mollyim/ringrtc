@@ -10,7 +10,7 @@ use std::{borrow::Cow, convert::TryFrom, panic, sync::Arc, time::Duration};
 use jni::{
     JNIEnv,
     objects::{GlobalRef, JByteArray, JClass, JObject, JString},
-    sys::{jint, jlong},
+    sys::{jbyte, jint, jlong},
 };
 use log::Level;
 
@@ -167,6 +167,33 @@ pub fn set_self_uuid(
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     call_manager.set_self_uuid(env.convert_byte_array(uuid)?)
+}
+
+/// Adds an asset to the asset manager.
+pub fn add_asset(
+    env: &mut JNIEnv,
+    call_manager: *mut AndroidCallManager,
+    asset_group: JString,
+    file_path: JString,
+    content: JByteArray,
+) -> Result<()> {
+    use crate::core::assets::AssetHandle;
+
+    let asset_group: String = env.get_string(&asset_group)?.into();
+
+    let handle = if !content.is_null() {
+        AssetHandle::Content(env.convert_byte_array(content)?)
+    } else if !file_path.is_null() {
+        let path: String = env.get_string(&file_path)?.into();
+        AssetHandle::FilePath(path)
+    } else {
+        return Err(anyhow::anyhow!(
+            "addAsset requires either a filePath or content"
+        ));
+    };
+
+    let call_manager = unsafe { ptr_as_mut(call_manager)? };
+    call_manager.add_asset(&asset_group, handle)
 }
 
 /// Application notification to start a new call
@@ -837,6 +864,7 @@ pub fn create_group_call_client(
     jni_proxy_info: JObject,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -892,6 +920,7 @@ pub fn create_group_call_client(
         proxy_info,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration as u8,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
@@ -911,6 +940,7 @@ pub fn create_call_link_call_client(
     admin_passkey: JByteArray,
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
+    dred_duration: jbyte,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -977,6 +1007,7 @@ pub fn create_call_link_call_client(
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
+        dred_duration as u8,
         Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,

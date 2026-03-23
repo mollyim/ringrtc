@@ -26,6 +26,7 @@ use strum::IntoDiscriminant;
 use crate::{
     common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result},
     core::{
+        assets::AssetHandle,
         call_manager::CallManager,
         call_summary::{CallSummary, MediaQualityStats, QualityStats},
         group_call::{self, GroupId, SignalingMessageUrgency},
@@ -572,42 +573,13 @@ impl LastFramesVideoSink {
     }
 }
 
-fn js_num_to_u64(num: f64) -> u64 {
-    // Convert safely from signed.
-    num as i32 as u32 as u64
-}
-
-fn u64_to_js_num(val: u64) -> f64 {
-    // Convert safely to signed.
-    val as u32 as i32 as f64
-}
-
 fn get_id_arg(cx: &mut FunctionContext, i: usize) -> u64 {
-    let obj = cx.argument::<JsObject>(i).expect("Get id argument");
-    let high = js_num_to_u64(
-        obj.get::<JsNumber, _, _>(cx, "high")
-            .expect("Get id.high")
-            .value(cx),
-    );
-    let low = js_num_to_u64(
-        obj.get::<JsNumber, _, _>(cx, "low")
-            .expect("Get id.low")
-            .value(cx),
-    );
-    let id = ((high << 32) & 0xFFFFFFFF00000000) | (low & 0xFFFFFFFF);
-    debug!("id: {} converted from (high: {} low: {})", id, high, low);
-    id
+    let obj = cx.argument::<JsBigInt>(i).expect("Get id argument");
+    obj.to_u64(cx).expect("bigint")
 }
 
 fn create_id_arg<'a>(cx: &mut FunctionContext<'a>, id: u64) -> Handle<'a, JsValue> {
-    let high = cx.number(u64_to_js_num((id >> 32) & 0xFFFFFFFF));
-    let low = cx.number(u64_to_js_num(id & 0xFFFFFFFF));
-    let unsigned = cx.boolean(true);
-    let obj = cx.empty_object();
-    obj.set(cx, "high", high).expect("set id.high");
-    obj.set(cx, "low", low).expect("set id.low");
-    obj.set(cx, "unsigned", unsigned).expect("set id.unsigned");
-    obj.upcast()
+    JsBigInt::from_u64(cx, id).as_value(cx)
 }
 
 fn to_js_peek_info<'a>(
@@ -857,6 +829,33 @@ fn setSelfUuid(mut cx: FunctionContext) -> JsResult<JsValue> {
 }
 
 #[allow(non_snake_case)]
+fn addAsset(mut cx: FunctionContext) -> JsResult<JsValue> {
+    debug!("JsCallManager.addAsset()");
+
+    let asset_group = cx.argument::<JsString>(0)?.value(&mut cx);
+    let file_path = cx
+        .argument_opt(1)
+        .and_then(|v| v.downcast::<JsString, _>(&mut cx).ok())
+        .map(|s| s.value(&mut cx));
+    let content = cx
+        .argument_opt(2)
+        .and_then(|v| v.downcast::<JsUint8Array, _>(&mut cx).ok())
+        .map(|buf| buf.as_slice(&cx).to_vec());
+
+    let handle = match (file_path, content) {
+        (_, Some(bytes)) => AssetHandle::Content(bytes),
+        (Some(path), _) => AssetHandle::FilePath(path),
+        _ => return cx.throw_error("addAsset requires either a filePath or content"),
+    };
+
+    with_call_endpoint(&mut cx, |endpoint| {
+        endpoint.call_manager.add_asset(&asset_group, handle)
+    })
+    .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
 fn createOutgoingCall(mut cx: FunctionContext) -> JsResult<JsValue> {
     let peer_id = cx.argument::<JsString>(0)?.value(&mut cx) as PeerId;
     let video_enabled = cx.argument::<JsBoolean>(1)?.value(&mut cx);
@@ -929,6 +928,7 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
     let hide_ip = cx.argument::<JsBoolean>(2)?.value(&mut cx);
     let data_mode = cx.argument::<JsNumber>(3)?.value(&mut cx) as i32;
     let audio_levels_interval_millis = cx.argument::<JsNumber>(4)?.value(&mut cx) as u64;
+    let dred_duration = cx.argument::<JsNumber>(5)?.value(&mut cx) as u8;
 
     info!("proceed(): callId: {}, hideIp: {}", call_id, hide_ip);
     let mut ice_servers = Vec::new();
@@ -983,12 +983,12 @@ fn proceed(mut cx: FunctionContext) -> JsResult<JsValue> {
             MAX_VIDEO_HEIGHT,
             MAX_VIDEO_FPS,
         );
-        endpoint.call_manager.proceed(
-            call_id,
-            call_context,
-            CallConfig::default().with_data_mode(DataMode::from_i32(data_mode)),
-            audio_levels_interval,
-        )?;
+        let call_config = CallConfig::default()
+            .with_data_mode(DataMode::from_i32(data_mode))
+            .with_dred_duration(dred_duration);
+        endpoint
+            .call_manager
+            .proceed(call_id, call_context, call_config, audio_levels_interval)?;
         Ok(())
     })
     .or_else(|err: anyhow::Error| cx.throw_error(format!("{}", err)))?;
@@ -1478,6 +1478,7 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sfu_url = cx.argument::<JsString>(1)?.value(&mut cx);
     let hkdf_extra_info = cx.argument::<JsUint8Array>(2)?.as_slice(&cx).to_vec();
     let audio_levels_interval_millis = cx.argument::<JsNumber>(3)?.value(&mut cx) as u64;
+    let dred_duration = cx.argument::<JsNumber>(4)?.value(&mut cx) as u8;
 
     let mut client_id = group_call::INVALID_CLIENT_ID;
 
@@ -1503,6 +1504,7 @@ fn createGroupCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
             sfu_url,
             hkdf_extra_info,
             audio_levels_interval,
+            dred_duration,
             Some(peer_connection_factory),
             outgoing_audio_track,
             outgoing_video_track,
@@ -1540,6 +1542,7 @@ fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
     let hkdf_extra_info = cx.argument::<JsUint8Array>(5)?.as_slice(&cx).to_vec();
 
     let audio_levels_interval_millis = cx.argument::<JsNumber>(6)?.value(&mut cx) as u64;
+    let dred_duration = cx.argument::<JsNumber>(7)?.value(&mut cx) as u8;
     let audio_levels_interval = if audio_levels_interval_millis == 0 {
         None
     } else {
@@ -1561,6 +1564,7 @@ fn createCallLinkCallClient(mut cx: FunctionContext) -> JsResult<JsValue> {
             admin_passkey,
             hkdf_extra_info,
             audio_levels_interval,
+            dred_duration,
             Some(peer_connection_factory),
             outgoing_audio_track,
             outgoing_video_track,
@@ -3165,6 +3169,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_value("callEndpointPropertyKey", js_property_key)?;
 
     cx.export_function("cm_setSelfUuid", setSelfUuid)?;
+    cx.export_function("cm_addAsset", addAsset)?;
     cx.export_function("cm_createOutgoingCall", createOutgoingCall)?;
     cx.export_function("cm_cancelGroupRing", cancelGroupRing)?;
     cx.export_function("cm_proceed", proceed)?;
