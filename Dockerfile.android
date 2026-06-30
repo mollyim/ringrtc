@@ -1,22 +1,57 @@
-FROM docker.io/eclipse-temurin:17.0.16_8-jdk-noble@sha256:63360a3f1ac5e0acf9c33dabd1ac1d6c5afaa24659536d57910a32ddada41a6c AS builder
-LABEL authors="mollyim"
+FROM docker.io/eclipse-temurin:17.0.19_10-jdk-noble@sha256:6135b2dcc36fc4df1e534fc39113722e412799ffdb9ec0ed914ffce366f235c5 AS base
 
-# Install essential tools
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# Stage 1: base
+# Minimal environment with only system tools. This stage is stable and reusable across merges.
+
+RUN apt-get install -y --no-install-recommends --update \
+      fd-find \
       git \
-      python3 \
-      unzip \
+      ripgrep \
       rustup \
-      xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+      unzip \
+      python3 \
+ && rm -rf /var/lib/apt/lists/*
 
 # Set a default Git identity
-RUN git config --global user.name "builder" && \
-    git config --global user.email "localhost"
+RUN git config --global user.name "builder" \
+ && git config --global user.email "builder@docker.local"
+
+FROM base AS builder
+
+# Stage 2: builder
+# Adds toolchains, project source, and the build entrypoint.
+
+LABEL im.molly.artifacts.m2.path="/root/.m2/repository/"
+
+# Install Android SDK
+ARG ANDROID_SDK_DIST="commandlinetools-linux-13114758_latest.zip"
+ARG ANDROID_SDK_SHA256="7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee"
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
+
+RUN set -eux; \
+    curl -fS "https://dl.google.com/android/repository/$ANDROID_SDK_DIST" -o sdk.zip; \
+    printf '%s  %s\n' "$ANDROID_SDK_SHA256" "sdk.zip" | sha256sum -c; \
+    mkdir -p "$ANDROID_HOME"; \
+    unzip -q sdk.zip -d "$ANDROID_HOME/cmdline-tools/"; \
+    rm sdk.zip; \
+    mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"; \
+    yes | sdkmanager --licenses; \
+    sdkmanager "platform-tools"
+
+ARG NDK_VERSION="28.0.13004108"
+RUN sdkmanager "ndk;$NDK_VERSION"
+
+ENV ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+
+ARG BUILD_TOOLS_VERSION="36.0.0"
+RUN sdkmanager "build-tools;${BUILD_TOOLS_VERSION}"
+
+ARG COMPILE_SDK="android-34"
+RUN sdkmanager "platforms;${COMPILE_SDK}"
 
 # Bootstrap depot_tools
-ARG DEPOT_TOOLS_GIT_HASH="fad3730e80171ce2723a48f4cc08682c6f19d640"
+ARG DEPOT_TOOLS_GIT_HASH="57d50b8656bfed9e42adf8de1d549ba4229cc909"
 ENV DEPOT_TOOLS_UPDATE=0
 ENV PATH="$PATH:/opt/depot_tools"
 RUN set -eux; \
@@ -26,35 +61,25 @@ RUN set -eux; \
     rm -rf .git; \
     ensure_bootstrap
 
-# Install Android SDK
-ARG ANDROID_SDK_DIST="commandlinetools-linux-13114758_latest.zip"
-ARG ANDROID_SDK_SHA256="7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee"
-ENV ANDROID_HOME=/opt/android-sdk
-ENV PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
-RUN set -eux; \
-    curl -fS "https://dl.google.com/android/repository/$ANDROID_SDK_DIST" -o sdk.zip; \
-    echo "$ANDROID_SDK_SHA256" sdk.zip | sha256sum --check; \
-    mkdir -p "$ANDROID_HOME"; \
-    unzip -q -d "$ANDROID_HOME/cmdline-tools/" sdk.zip; \
-    mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"; \
-    rm sdk.zip; \
-    yes | sdkmanager --licenses; \
-    sdkmanager "platform-tools"
-
-# Install Android NDK
-ARG NDK_VERSION="28.0.13004108"
-ENV ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-RUN sdkmanager "ndk;$NDK_VERSION"
+# Install build tools pinned to a fixed timestamp via snapshot service
+ARG APT_SNAPSHOT_ID=20260703T000000Z
+RUN apt-get update --snapshot "$APT_SNAPSHOT_ID" \
+ && apt-get install -y --no-install-recommends \
+      clang \
+      pkg-config \
+      protobuf-compiler \
+      xz-utils \
+ && rm -rf /var/lib/apt/lists/*
 
 ## Cache gradle wrapper
 COPY gradlew /ringrtc/
-COPY gradle /ringrtc/gradle/
+COPY gradle/wrapper /ringrtc/gradle/wrapper
 RUN /ringrtc/gradlew --version
 
 # Set optional read-only Gradle cache (mount at runtime)
 ENV GRADLE_RO_DEP_CACHE=/.gradle-ro-cache
 
-# Install Rust toolchain and Android targets
+# Install Rust toolchain and targets
 COPY rust-toolchain /ringrtc/
 RUN rustup toolchain install "$(cat /ringrtc/rust-toolchain)" --profile minimal \
       --target aarch64-linux-android \
@@ -62,32 +87,51 @@ RUN rustup toolchain install "$(cat /ringrtc/rust-toolchain)" --profile minimal 
       --target x86_64-linux-android \
       --no-self-update
 
-# Copy project files
-COPY . /ringrtc/
-WORKDIR /ringrtc
-RUN git clean -ffdx
-
-# Install compiler and build tools for the library, pinned via snapshot service
-RUN SNAPSHOT_ID=$(git show -s --format=%cd --date=format:%Y%m%dT%H%M%SZ HEAD) && \
-    apt-get update --snapshot "$SNAPSHOT_ID" && \
-    apt-get install -y --no-install-recommends \
-      clang \
-      protobuf-compiler \
-      pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
 # Sync external dependencies
-RUN ./bin/prepare-workspace android
+COPY bin/prepare-workspace bin/env.sh bin/env-android.sh bin/gsync-webrtc /ringrtc/bin/
+COPY config /ringrtc/config
+RUN /ringrtc/bin/prepare-workspace android
 
-# Create build script
-RUN cat <<'EOF' > build.sh
+# Copy project and purge generated files
+COPY --exclude="src/webrtc*" . /ringrtc/
+WORKDIR /ringrtc
+RUN git clean -ffdx -e "src/webrtc*"
+
+# Build entrypoint
+RUN cat <<'EOF' > build.sh && chmod +x build.sh
 #!/bin/sh
 set -eu
 export OVERRIDE_VERSION=$(git describe --tags --always)
-./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "$@"
-EOF
-RUN chmod +x build.sh
 
-# Set entrypoint to the build script
+usage() {
+  echo "Usage: build.sh verify|install|publish|help [args...]"
+}
+
+build_aar() {
+  local mode=$1; shift
+  ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "--$mode-build" "$@"
+}
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  verify)
+    build_aar release "$@"
+    build_aar debug "$@"
+    ;;
+  install)
+    build_aar release --install-local "$@"
+    build_aar debug --install-local "$@"
+    ;;
+  publish)
+    build_aar release --publish "$@"
+    build_aar debug --publish "$@"
+    ;;
+  help|-h|--help) usage ;;
+  *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac
+EOF
+
 ENTRYPOINT ["/ringrtc/build.sh"]
-CMD ["--help"]
+CMD ["help"]

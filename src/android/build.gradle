@@ -22,6 +22,7 @@ ext.asset_dir            = project.hasProperty("assetDir") ? assetDir : "assets"
 android {
     namespace 'org.signal.ringrtc'
 
+    // MOLLY: Keep compileSdk in sync with Dockerfile.android
     compileSdk 34
 
     defaultConfig {
