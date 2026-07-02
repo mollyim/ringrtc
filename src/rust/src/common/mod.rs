@@ -6,7 +6,6 @@
 //! Common types used throughout the library.
 
 pub mod actor;
-pub mod jni_signature;
 pub mod slice;
 pub mod time;
 pub mod units;
@@ -14,10 +13,11 @@ mod versioning;
 
 use std::fmt;
 
+use sha2::{Digest, Sha256};
 pub use versioning::SemanticVersion;
 
 use crate::webrtc::{
-    media::AudioEncoderConfig,
+    media::{AudioDecoderConfig, AudioEncoderConfig},
     peer_connection_factory::{AudioConfig, AudioJitterBufferConfig},
 };
 
@@ -59,6 +59,13 @@ impl CallId {
 
     pub fn format(self, device_id: DeviceId) -> String {
         format!("0x{:x}-{}", self.id, device_id)
+    }
+
+    pub fn call_summary_hash(&self) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"CALL_SUMMARY_CALL_ID");
+        hasher.update(self.id.to_be_bytes());
+        hasher.finalize().to_vec()
     }
 }
 
@@ -842,6 +849,7 @@ pub struct CallConfig {
 
     pub audio_config: AudioConfig,
     pub audio_encoder_config: AudioEncoderConfig,
+    pub audio_decoder_config: AudioDecoderConfig,
     pub enable_tcc_audio: bool,
     pub audio_jitter_buffer_config: AudioJitterBufferConfig,
     pub audio_rtcp_report_interval_ms: i32,
@@ -858,6 +866,7 @@ impl Default for CallConfig {
             call_summary_time_limit_secs: 300,
             audio_config: Default::default(),
             audio_encoder_config: Default::default(),
+            audio_decoder_config: Default::default(),
             enable_tcc_audio: false,
             audio_jitter_buffer_config: Default::default(),
             audio_rtcp_report_interval_ms: 5000,

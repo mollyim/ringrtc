@@ -34,6 +34,9 @@ pub enum ChartDimension {
     AudioReceiveJitter,
     AudioReceiveAudioEnergy,
     AudioReceiveJitterBufferDelay,
+    AudioReceiveJitterBufferTargetDelay,
+    AudioReceiveConcealedSamplesPct,
+    AudioReceiveFecPacketsReceived,
 
     VideoSendPacketsPerSecond,
     VideoSendPacketSize,
@@ -85,6 +88,15 @@ impl ChartDimension {
             ChartDimension::AudioReceiveAudioEnergy => ("Audio Received Energy", "Energy"),
             ChartDimension::AudioReceiveJitterBufferDelay => {
                 ("Audio Received Jitter Buffer Delay", "milliseconds")
+            }
+            ChartDimension::AudioReceiveJitterBufferTargetDelay => {
+                ("Audio Received Jitter Buffer Target Delay", "milliseconds")
+            }
+            ChartDimension::AudioReceiveConcealedSamplesPct => {
+                ("Audio Received Concealed Samples", "%")
+            }
+            ChartDimension::AudioReceiveFecPacketsReceived => {
+                ("Audio Received FEC Packets", "Packets")
             }
             ChartDimension::VideoSendPacketsPerSecond => {
                 ("Video Sent Packet Rate", "Packets/Second")
@@ -138,6 +150,13 @@ impl ChartDimension {
             ChartDimension::AudioReceiveJitter => "audio_receive_jitter",
             ChartDimension::AudioReceiveAudioEnergy => "audio_receive_audio_energy",
             ChartDimension::AudioReceiveJitterBufferDelay => "audio_receive_jitter_buffer_delay",
+            ChartDimension::AudioReceiveJitterBufferTargetDelay => {
+                "audio_receive_jitter_buffer_target_delay"
+            }
+            ChartDimension::AudioReceiveConcealedSamplesPct => {
+                "audio_receive_concealed_samples_pct"
+            }
+            ChartDimension::AudioReceiveFecPacketsReceived => "audio_receive_fec_packets_received",
             ChartDimension::VideoSendPacketsPerSecond => "video_send_pps",
             ChartDimension::VideoSendPacketSize => "video_send_packet_size",
             ChartDimension::VideoSendBitrate => "video_send_bitrate",
@@ -168,6 +187,12 @@ pub struct SummaryReportColumns {
     pub show_plc_mos: bool,
     /// A general flag to control video columns.
     pub show_video: bool,
+    /// Show client send stats columns in the summary.
+    pub show_send_stats: bool,
+    /// Show client receive stats columns in the summary.
+    pub show_receive_stats: bool,
+    /// Show DRED-related stats (concealed samples, concealment rate, FEC packets).
+    pub show_dred_stats: bool,
 }
 
 impl Default for SummaryReportColumns {
@@ -178,6 +203,9 @@ impl Default for SummaryReportColumns {
             show_pesq_mos: false,
             show_plc_mos: false,
             show_video: true,
+            show_send_stats: true,
+            show_receive_stats: true,
+            show_dred_stats: false,
         }
     }
 }
@@ -190,6 +218,9 @@ impl SummaryReportColumns {
             show_pesq_mos: false,
             show_plc_mos: false,
             show_video: false,
+            show_send_stats: true,
+            show_receive_stats: true,
+            show_dred_stats: false,
         }
     }
 }
@@ -404,7 +435,7 @@ pub struct AudioConfig {
     /// The Opus bandwidth value to use (Auto is the default).
     pub bandwidth: AudioBandwidth,
     /// The Opus complexity value to use.
-    pub complexity: i32,
+    pub complexity: u8,
     /// The adaptation method to use. 0 means no adaptation (the default).
     pub adaptation: i32,
     /// Flag to enable the Opus constant bitrate mode.
@@ -413,6 +444,15 @@ pub struct AudioConfig {
     pub enable_dtx: bool,
     /// Flag to enable the Opus in-band FEC.
     pub enable_fec: bool,
+    /// The duration of DRED to use in 10ms units. Set to 0 to disable.
+    pub dred_duration: u8,
+    /// Minimum packet loss percentage reported to the encoder (0-100).
+    pub min_packet_loss_percent: u8,
+    /// None when using NetEq PLC, 0 use Opus PLC, 5 use Opus Deep PLC (if compiled),
+    /// 6 use Opus Deep PLC + LACE (if compiled), 7 use Opus Deep PLC + NoLACE (if compiled).
+    pub decoder_complexity: Option<u8>,
+    /// Path to the Opus DNN weights file.
+    pub dnn_weights_path: String,
     /// Flag to enable transport-wide congestion control for audio.
     pub enable_tcc: bool,
     /// Flag to enable WebRTC's high pass filter.
@@ -475,6 +515,10 @@ impl Default for AudioConfig {
             enable_cbr: true,
             enable_dtx: true,
             enable_fec: true,
+            dred_duration: 0,
+            min_packet_loss_percent: 0,
+            decoder_complexity: Some(0),
+            dnn_weights_path: "".to_string(),
             enable_tcc: false,
             enable_high_pass_filter: true,
             // Default tests now disable AEC in order to prevent random timing delays

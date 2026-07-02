@@ -9,7 +9,7 @@ use std::{
     convert::TryFrom,
     fmt::Formatter,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Once,
         atomic::AtomicBool,
         mpsc::{Receiver, Sender, channel},
     },
@@ -744,6 +744,10 @@ fn to_js_call_summary<'a>(
 ) -> JsResult<'a, JsObject> {
     let summary_object = cx.empty_object();
 
+    if let Some(call_id_hash) = summary.call_id_hash.as_ref() {
+        let call_id_hash = JsUint8Array::from_slice(cx, call_id_hash)?;
+        summary_object.set(cx, "callIdHash", call_id_hash)?;
+    }
     let start_time = cx.number(summary.start_time);
     summary_object.set(cx, "startTime", start_time)?;
     let end_time = cx.number(summary.end_time);
@@ -1376,10 +1380,7 @@ fn setOutgoingVideoIsScreenShare(mut cx: FunctionContext) -> JsResult<JsValue> {
             .adapt_output_format(width, height, fps);
 
         if let Ok(mut active_connection) = endpoint.call_manager.active_connection() {
-            active_connection.update_sender_status(signaling::SenderStatus {
-                sharing_screen: Some(is_screenshare),
-                ..Default::default()
-            })?;
+            active_connection.send_is_screenshare_update(is_screenshare)?;
         }
         Ok(())
     })
@@ -1440,7 +1441,13 @@ fn receive_video_frame<'a>(
 
     if let Some(frame) = frame {
         let frame = frame.apply_rotation();
-        frame.to_rgba(rgba_buffer.as_mut_slice(cx));
+        if !frame.to_rgba(rgba_buffer.as_mut_slice(cx)) {
+            static TO_RGBA_FAILED_ONCE: Once = Once::new();
+            TO_RGBA_FAILED_ONCE.call_once(|| {
+                error!("receive_video_frame(): to_rgba failed, frame is likely not i420");
+            });
+            return Ok(cx.undefined().upcast());
+        }
         let js_width = cx.number(frame.width());
         let js_height = cx.number(frame.height());
         let result = JsArray::new(cx, 2);
@@ -2259,7 +2266,7 @@ fn getAudioInputs(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 #[allow(non_snake_case)]
 fn setAudioInput(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let index = cx.argument::<JsNumber>(0)?.value(&mut cx) as u16;
+    let index = cx.argument::<JsNumber>(0)?.value(&mut cx) as usize;
     match with_call_endpoint(&mut cx, |endpoint| {
         endpoint
             .peer_connection_factory
@@ -2299,7 +2306,7 @@ fn getAudioOutputs(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 #[allow(non_snake_case)]
 fn setAudioOutput(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let index = cx.argument::<JsNumber>(0)?.value(&mut cx) as u16;
+    let index = cx.argument::<JsNumber>(0)?.value(&mut cx) as usize;
     match with_call_endpoint(&mut cx, |endpoint| {
         endpoint
             .peer_connection_factory
@@ -2307,6 +2314,23 @@ fn setAudioOutput(mut cx: FunctionContext) -> JsResult<JsValue> {
     }) {
         Ok(_) => (),
         Err(err) => error!("setAudioOutput failed: {}", err),
+    };
+
+    Ok(cx.undefined().upcast())
+}
+
+#[allow(non_snake_case)]
+fn setVoiceProcessingEnabled(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let enabled = cx.argument::<JsBoolean>(0)?.value(&mut cx);
+    info!("setVoiceProcessingEnabled(): {:?}", enabled);
+
+    match with_call_endpoint(&mut cx, |endpoint| {
+        endpoint
+            .peer_connection_factory
+            .set_input_voice_processing_enabled(enabled)
+    }) {
+        Ok(_) => (),
+        Err(err) => error!("setVoiceProcessingEnabled failed: {}", err),
     };
 
     Ok(cx.undefined().upcast())
@@ -3238,6 +3262,7 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_setAudioInput", setAudioInput)?;
     cx.export_function("cm_getAudioOutputs", getAudioOutputs)?;
     cx.export_function("cm_setAudioOutput", setAudioOutput)?;
+    cx.export_function("cm_setVoiceProcessingEnabled", setVoiceProcessingEnabled)?;
     cx.export_function("cm_setRtcStatsInterval", setRtcStatsInterval)?;
     cx.export_function("cm_processEvents", processEvents)?;
     Ok(())

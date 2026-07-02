@@ -37,7 +37,9 @@ use crate::{
     },
     error::RingRtcError,
     webrtc::{
-        ice_gatherer::IceGatherer, media::MediaStream, peer_connection::AudioLevel,
+        ice_gatherer::IceGatherer,
+        media::{MediaStream, configure_dred_from_assets},
+        peer_connection::AudioLevel,
         peer_connection_observer::NetworkRoute,
     },
 };
@@ -569,7 +571,7 @@ where
     /// - handle the previously stored pending Offer and ICE Candidates
     pub fn proceed(
         &mut self,
-        call_config: CallConfig,
+        mut call_config: CallConfig,
         audio_levels_interval: Option<Duration>,
     ) -> Result<()> {
         info!("proceed():");
@@ -582,6 +584,12 @@ where
         );
 
         let mut call_manager = self.call_manager()?;
+
+        configure_dred_from_assets(
+            &self.asset_registry,
+            &mut call_config.audio_encoder_config,
+            &mut call_config.audio_decoder_config,
+        );
 
         match self.direction {
             // This happens after received_offer and an offer is put in self.pending_call.

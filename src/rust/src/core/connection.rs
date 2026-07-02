@@ -763,6 +763,7 @@ where
             observer.get_result()?;
 
             peer_connection.configure_audio_encoders(&self.call_config.audio_encoder_config);
+            peer_connection.configure_audio_decoders(&self.call_config.audio_decoder_config);
 
             self.apply_bandwidth_controller(&mut bandwidth_controller, &mut webrtc)?;
 
@@ -889,6 +890,7 @@ where
             observer.get_result()?;
 
             peer_connection.configure_audio_encoders(&self.call_config.audio_encoder_config);
+            peer_connection.configure_audio_decoders(&self.call_config.audio_decoder_config);
 
             self.apply_bandwidth_controller(&mut bandwidth_controller, &mut webrtc)?;
 
@@ -966,6 +968,24 @@ where
 
     /// Update the current network route.
     pub fn set_network_route(&self, network_route: NetworkRoute) -> Result<()> {
+        if let Ok(mut webrtc) = self
+            .webrtc
+            .lock()
+            .inspect_err(|e| error!("couldn't get webrtc lock: {}", e))
+            && let Ok(old_network_route) = self.network_route()
+            && (old_network_route.local_relayed != network_route.local_relayed
+                || old_network_route.remote_relayed != network_route.remote_relayed
+                || old_network_route.local_relay_protocol != network_route.local_relay_protocol)
+        {
+            if let Some(observer) = webrtc.stats_observer.as_mut() {
+                observer.set_network_route(network_route);
+            }
+            if let Some(observer) = webrtc.stats_observer.as_ref()
+                && let Ok(peer_connection) = webrtc.peer_connection()
+            {
+                let _ = peer_connection.get_stats(observer);
+            }
+        }
         self.update_bandwidth_controller(move |bandwidth_controller| {
             if bandwidth_controller.network_route == network_route {
                 // Nothing changed
@@ -1604,6 +1624,13 @@ where
 
         let call = self.call()?;
         call.connect_incoming_media(incoming_media)
+    }
+
+    pub fn send_is_screenshare_update(&mut self, is_screenshare: bool) -> Result<()> {
+        self.update_sender_status(signaling::SenderStatus {
+            sharing_screen: Some(is_screenshare),
+            ..Default::default()
+        })
     }
 
     /// Send a ConnectionEvent to the internal FSM.
@@ -2252,6 +2279,10 @@ fn negotiate_srtp_keys(
     .map_err(|_| RingRtcError::InvalidRemoteSrtpKey)?;
 
     let shared_secret = local_secret.diffie_hellman(&remote_public_key);
+    if !shared_secret.was_contributory() {
+        error!("remote secret was non-contributory, rejecting srtp negotiation");
+        return Err(RingRtcError::InvalidRemoteSrtpKey.into());
+    }
 
     let hkdf_salt = vec![0u8; 32];
     let hkdf_info_prefix = "Signal_Calling_20200807_SignallingDH_SRTPKey_KDF";
@@ -2341,5 +2372,21 @@ mod tests {
         assert_eq!(expect(300_000), compute(Low, 1_999_999, true));
         assert_eq!(expect(300_000), compute(Low, 1_000_000, true));
         assert_eq!(expect(300_000), compute(Low, 300_000, true));
+    }
+
+    #[test]
+    fn negotiate_srtp_keys_rejects_low_order_remote_key() {
+        let local_secret = StaticSecret::random_from_rng(OsRng);
+        let low_order_key = [0u8; 32];
+        let result =
+            negotiate_srtp_keys(&local_secret, &low_order_key, b"caller_key", b"callee_key");
+        let err = result
+            .err()
+            .expect("expected an error for a non-contributory remote key");
+        assert!(
+            err.downcast_ref::<RingRtcError>()
+                .is_some_and(|e| matches!(e, RingRtcError::InvalidRemoteSrtpKey)),
+            "expected RingRtcError::InvalidRemoteSrtpKey, got: {err}"
+        );
     }
 }

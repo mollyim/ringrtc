@@ -63,7 +63,8 @@ use crate::{
     webrtc::{
         self,
         media::{
-            AudioEncoderConfig, AudioTrack, VideoFrame, VideoFrameMetadata, VideoSink, VideoTrack,
+            AudioDecoderConfig, AudioEncoderConfig, AudioTrack, VideoFrame, VideoFrameMetadata,
+            VideoSink, VideoTrack, configure_dred_from_assets,
         },
         peer_connection::{AudioLevel, PeerConnection, Protocol, ReceivedAudioLevel, SendRates},
         peer_connection_factory::{
@@ -475,6 +476,9 @@ enum DheState {
     WaitingForServerPublicKey {
         client_secret: EphemeralSecret,
     },
+    FailedToNegotiate {
+        reason: &'static str,
+    },
     Negotiated {
         srtp_keys: SrtpKeys,
     },
@@ -497,21 +501,27 @@ impl DheState {
             }
             DheState::WaitingForServerPublicKey { client_secret } => {
                 let shared_secret = client_secret.diffie_hellman(server_pub_key);
-                let mut master_key_material = [0u8; SrtpKeys::MASTER_KEY_MATERIAL_LEN];
-                Hkdf::<Sha256>::new(Some(&[0u8; 32]), shared_secret.as_bytes())
-                    .expand_multi_info(
-                        &[
-                            b"Signal_Group_Call_20211105_SignallingDH_SRTPKey_KDF",
-                            hkdf_extra_info,
-                        ],
-                        &mut master_key_material,
-                    )
-                    .expect("SRTP master key material expansion");
-                DheState::Negotiated {
-                    srtp_keys: SrtpKeys::from_master_key_material(&master_key_material),
+                if !shared_secret.was_contributory() {
+                    DheState::FailedToNegotiate {
+                        reason: "SFU provided remote secret was non-contributory, rejecting srtp negotiation",
+                    }
+                } else {
+                    let mut master_key_material = [0u8; SrtpKeys::MASTER_KEY_MATERIAL_LEN];
+                    Hkdf::<Sha256>::new(Some(&[0u8; 32]), shared_secret.as_bytes())
+                        .expand_multi_info(
+                            &[
+                                b"Signal_Group_Call_20211105_SignallingDH_SRTPKey_KDF",
+                                hkdf_extra_info,
+                            ],
+                            &mut master_key_material,
+                        )
+                        .expect("SRTP master key material expansion");
+                    DheState::Negotiated {
+                        srtp_keys: SrtpKeys::from_master_key_material(&master_key_material),
+                    }
                 }
             }
-            DheState::Negotiated { .. } => {
+            DheState::Negotiated { .. } | DheState::FailedToNegotiate { .. } => {
                 warn!("Attempting to negotiated SRTP keys a second time.");
                 self
             }
@@ -764,6 +774,10 @@ pub struct RemoteDeviceState {
     pub server_allocated_height: u16,
     pub client_decoded_height: Option<u32>,
     pub is_higher_resolution_pending: bool,
+    // The DemuxIds that we have observed sending a remote mute request to |demux_id|.
+    // Before running a handle_observed_remote_mute callback, verify that we actually saw
+    // the relevant mute request.
+    pub remote_mute_requesters: HashSet<DemuxId>,
 }
 
 fn as_unix_millis(t: Option<SystemTime>) -> u64 {
@@ -794,6 +808,7 @@ impl RemoteDeviceState {
             server_allocated_height: 0,
             client_decoded_height: None,
             is_higher_resolution_pending: false,
+            remote_mute_requesters: HashSet::new(),
         }
     }
 
@@ -872,7 +887,7 @@ const DELAY_FOR_RECOVERED_BWE_CALLBACK: Duration = Duration::from_secs(6);
 // so a receiver may leave immediately after receiving a newly
 // generated key and it will be able to decrypt until after
 // a second rotation is applied.
-const MEDIA_SEND_KEY_ROTATION_DELAY_SECS: u64 = 3;
+const MEDIA_SEND_KEY_ROTATION_DELAY_SECS: u64 = 5;
 
 enum KeyRotationState {
     // A key has been applied.  Nothing is pending.
@@ -2217,6 +2232,13 @@ impl Client {
                         error!("Refusing to send remote mute request to self");
                         return;
                     }
+                    if let Some(remote_state) = state.remote_devices.find_by_demux_id_mut(target)
+                        && !remote_state.heartbeat_state.audio_muted.unwrap_or(true)
+                    {
+                        // if this might have muted them, note that we "saw" the request
+                        // (even though we're the sender)
+                        remote_state.remote_mute_requesters.insert(our_demux_id);
+                    }
                 }
                 _ => {}
             }
@@ -2765,6 +2787,11 @@ impl Client {
                 );
                 let srtp_keys = match &state.dhe_state {
                     DheState::Negotiated { srtp_keys } => srtp_keys,
+                    DheState::FailedToNegotiate { reason } => {
+                        error!("join() failed: {reason}");
+                        Self::end(state, CallEndReason::FailedToNegotiatedSrtpKeys);
+                        return;
+                    }
                     _ => {
                         Self::end(state, CallEndReason::FailedToNegotiatedSrtpKeys);
                         return;
@@ -2922,12 +2949,24 @@ impl Client {
     // Currently, this occurs via on_sfu_client_joined (Joining -> Joined) or
     // or via peek_result_inner (Joining -> Pending -> Joined)
     fn on_client_joined(state: &mut State) {
+        let mut encoder_config = AudioEncoderConfig {
+            dred_duration: state.dred_duration,
+            ..AudioEncoderConfig::default()
+        };
+        let mut decoder_config = AudioDecoderConfig::default();
+
+        configure_dred_from_assets(
+            &state.asset_registry,
+            &mut encoder_config,
+            &mut decoder_config,
+        );
+
         state
             .peer_connection
-            .configure_audio_encoders(&AudioEncoderConfig {
-                dred_duration: state.dred_duration,
-                ..AudioEncoderConfig::default()
-            });
+            .configure_audio_encoders(&encoder_config);
+        state
+            .peer_connection
+            .configure_audio_decoders(&decoder_config);
     }
 
     pub fn on_signaling_message_received(
@@ -2987,7 +3026,7 @@ impl Client {
                     ..
                 } => {
                     if group_id == state.group_id {
-                        Self::handle_leaving_received(state, leaving_demux_id);
+                        Self::handle_leaving_received(state, Some(sender_user_id), leaving_demux_id);
                     }
                 }
                 _ => {
@@ -4329,7 +4368,7 @@ impl Client {
                         }
                         if let Some(_leaving) = msg.leaving {
                             self.actor.send(move |state| {
-                                Self::handle_leaving_received(state, demux_id);
+                                Self::handle_leaving_received(state, None, demux_id);
                             });
                         }
                         if let Some(reaction) = msg.reaction {
@@ -4380,11 +4419,25 @@ impl Client {
                 {
                     Ok(ready_packets) => {
                         for (buffered_header, sfu_to_device) in ready_packets {
-                            Self::handle_sfu_to_device_inner(
-                                &state.actor,
-                                buffered_header,
-                                sfu_to_device,
-                            )
+                            // If content is present, we should not process any other fields on
+                            // this proto because that would allow for nested protos. Nested protos
+                            // cause thrashing, excessive updates, and hard to follow processing
+                            // order.
+                            if let Some(content) = sfu_to_device.content {
+                                match SfuToDevice::decode(content.as_slice()) {
+                                    Ok(msg) => Self::handle_sfu_to_device_inner(&state.actor, buffered_header, msg),
+                                    Err(err) => {
+                                        error!("Failed to decode content buffer in SfuToDevice: {:?}", err);
+                                    }
+                                }
+                                return;
+                            } else {
+                                Self::handle_sfu_to_device_inner(
+                                    &state.actor,
+                                    buffered_header,
+                                    sfu_to_device,
+                                )
+                            }
                         }
                     }
                     err @ Err(MrpReceiveError::ReceiveWindowFull(_)) => {
@@ -4420,20 +4473,9 @@ impl Client {
             removed,
             raised_hands,
             mrp_header: _,
-            content,
+            content: _,
             endorsements,
         } = msg;
-
-        if let Some(content) = content {
-            match SfuToDevice::decode(content.as_slice()) {
-                Ok(msg) => Self::handle_sfu_to_device_inner(actor, header, msg),
-                Err(err) => {
-                    error!("Failed to decode content buffer in SfuToDevice: {:?}", err);
-                }
-            }
-            // ignore all other fields to prevent ordering issues
-            return;
-        }
 
         if let Some(Speaker {
             demux_id: speaker_demux_id,
@@ -4761,6 +4803,13 @@ impl Client {
                             remote_device.recalculate_higher_resolution_pending();
                         }
 
+                        // On unmutes, clear set of seen mute requests
+                        if heartbeat_state.audio_muted == Some(false)
+                            && remote_device.heartbeat_state.audio_muted != Some(false)
+                        {
+                            remote_device.remote_mute_requesters.clear();
+                        }
+
                         // Ignore heartbeats that do not have changes in the state.
                         let new_source = if heartbeat_state.muted_by_demux_id
                             != remote_device.heartbeat_state.muted_by_demux_id
@@ -4773,6 +4822,9 @@ impl Client {
                         if let Some(new_source_demux_id) = new_source
                             && heartbeat_state.audio_muted == Some(true)
                             && remote_device.heartbeat_state.audio_muted == Some(false)
+                            && remote_device
+                                .remote_mute_requesters
+                                .contains(&new_source_demux_id)
                         {
                             state.observer.handle_observed_remote_mute(
                                 state.client_id,
@@ -4799,7 +4851,13 @@ impl Client {
         });
     }
 
-    fn handle_leaving_received(state: &mut State, demux_id: DemuxId) {
+    /// Set state that device is leaving. If expected_user_id is provided, then validate the
+    /// demuxID's related userID against it.
+    fn handle_leaving_received(
+        state: &mut State,
+        expected_user_id: Option<UserId>,
+        demux_id: DemuxId,
+    ) {
         // It's likely we haven't received an update from the SFU about this demux_id leaving.
         debug!(
             "Request devices because we just received a leaving message from demux_id = {}",
@@ -4808,6 +4866,13 @@ impl Client {
         if let Some(device) = state.remote_devices.find_by_demux_id_mut(demux_id)
             && !device.leaving_received
         {
+            if expected_user_id.is_some_and(|expected| expected != device.user_id) {
+                warn!(
+                    "Received Leaving message for demux ID {demux_id} but sender's user ID did not match expected user ID, so ignoring"
+                );
+
+                return;
+            }
             device.leaving_received = true;
             Self::request_remote_devices_as_soon_as_possible(state);
 
@@ -4865,12 +4930,16 @@ impl Client {
 
         self.actor.send(move |state| match state.join_state {
             JoinState::Pending(our_demux_id) | JoinState::Joined(our_demux_id) => {
-                if our_demux_id == target
-                    && state.mute_request.is_none()
-                    && source_demux_id != our_demux_id
+                if our_demux_id == target {
+                    if state.mute_request.is_none() && source_demux_id != our_demux_id {
+                        // Only bother with the first mute request in a tick; more would be redundant.
+                        state.mute_request = Some(source_demux_id);
+                    }
+                } else if let Some(remote_state) = state.remote_devices.find_by_demux_id_mut(target)
+                    && !remote_state.heartbeat_state.audio_muted.unwrap_or(false)
                 {
-                    // Only bother with the first mute request in a tick; more would be redundant.
-                    state.mute_request = Some(source_demux_id);
+                    // if this might have muted them, note that we saw the request
+                    remote_state.remote_mute_requesters.insert(source_demux_id);
                 }
             }
             _ => {}
@@ -5028,7 +5097,8 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                         // ICE failed before we got connected :(
                         Client::end(state, CallEndReason::IceFailedWhileConnecting);
                     }
-                    (ConnectionState::Connecting, IceConnectionState::Checking) => {
+                    (ConnectionState::Connecting, IceConnectionState::Checking) |
+                    (ConnectionState::Reconnecting, IceConnectionState::Checking) => {
                         // Normal.  Not much to report.
                     }
                     (ConnectionState::Connecting, IceConnectionState::Connected) |
@@ -5040,6 +5110,8 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
                     (ConnectionState::Connected, IceConnectionState::Disconnected) => {
                         // Some connectivity problems, hopefully temporary.
                         Client::set_connection_state_and_notify_observer(state, ConnectionState::Reconnecting);
+                        info!("regathering candidates on all networks");
+                        state.peer_connection.regather_on_all_networks();
                     }
                     (ConnectionState::Reconnecting, IceConnectionState::Connected) |
                     (ConnectionState::Reconnecting, IceConnectionState::Completed) => {
@@ -5411,6 +5483,7 @@ mod tests {
         era_id: String,
         response_join_state: Arc<Mutex<JoinState>>,
         joins_remaining: Option<Arc<AtomicI64>>,
+        server_dhe_pub_key: [u8; 32],
     }
 
     #[derive(Default)]
@@ -5432,6 +5505,8 @@ mod tests {
             call_creator: Option<UserId>,
             options: FakeSfuClientOptions,
         ) -> Self {
+            let server_secret = EphemeralSecret::random_from_rng(OsRng);
+            let server_dhe_pub_key = *PublicKey::from(&server_secret).as_bytes();
             Self {
                 sfu_info: SfuInfo {
                     udp_addresses: Vec::new(),
@@ -5449,6 +5524,7 @@ mod tests {
                 joins_remaining: options
                     .max_joins
                     .map(|v| Arc::new(AtomicI64::new(v as i64))),
+                server_dhe_pub_key,
             }
         }
 
@@ -5487,7 +5563,7 @@ mod tests {
             client.on_sfu_client_join_attempt_completed(Ok(Joined {
                 sfu_info: self.sfu_info.clone(),
                 local_demux_id: self.local_demux_id,
-                server_dhe_pub_key: [0u8; 32],
+                server_dhe_pub_key: self.server_dhe_pub_key,
                 hkdf_extra_info: b"hkdf_extra_info".to_vec(),
                 creator: self.call_creator.clone(),
                 era_id: self.era_id.clone(),
@@ -7074,12 +7150,51 @@ mod tests {
         assert_eq!(Some(true), remote_devices2[0].heartbeat_state.audio_muted);
         assert_eq!(None, remote_devices2[0].heartbeat_state.muted_by_demux_id);
 
-        // Unmuted before the request, so should mute and attribute it to the
-        // remote request.
+        // Unmuted before the request, so should mute
         client1.client.set_outgoing_audio_muted(false);
         client1.wait_for_client_to_process();
         client2.wait_for_client_to_process();
 
+        // Claims remote muted by client2, but no such request was seen
+        client1
+            .client
+            .set_outgoing_audio_muted_remotely(client2.demux_id);
+        client1.wait_for_client_to_process();
+        client2.wait_for_client_to_process();
+
+        let remote_devices2 = client2.observer.remote_devices();
+        assert_eq!(1, remote_devices2.len());
+        assert_eq!(client1.demux_id, remote_devices2[0].demux_id);
+        // Should be muted now!
+        assert_eq!(Some(true), remote_devices2[0].heartbeat_state.audio_muted);
+        // Should attribute the mute correctly.
+        assert_eq!(
+            Some(client2.demux_id),
+            remote_devices2[0].heartbeat_state.muted_by_demux_id
+        );
+
+        let client2_observed_mutes = client2
+            .observer
+            .observed_remote_mutes
+            .lock()
+            .unwrap()
+            .clone();
+        // should ignore this, because there was no remote mute request observed
+        assert!(client2_observed_mutes.is_empty());
+
+        // Unmuted before the request, so should mute
+        client1.client.set_outgoing_audio_muted(false);
+        client1.wait_for_client_to_process();
+        client2.wait_for_client_to_process();
+
+        // Cause client2 to observe a remote mute request
+        client2.client.handle_remote_mute_request(
+            client2.demux_id,
+            protobuf::group_call::RemoteMuteRequest {
+                target_demux_id: Some(client1.demux_id),
+            },
+        );
+        client2.wait_for_client_to_process();
         client1
             .client
             .set_outgoing_audio_muted_remotely(client2.demux_id);
@@ -7683,6 +7798,60 @@ mod tests {
                 ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
+        );
+    }
+
+    #[test]
+    fn ignore_leaving_message_from_wrong_sender() {
+        use protobuf::group_call::{DeviceToDevice, device_to_device::Leaving};
+
+        let client1 = TestClient::new(vec![1], 1);
+        client1.connect_join_and_wait_until_joined();
+        let client2 = TestClient::new(vec![2], 2);
+        client2.connect_join_and_wait_until_joined();
+
+        client1.set_remotes_and_wait_until_applied(&[&client2]);
+
+        let fake_group_id = b"fake group ID".to_vec();
+
+        // Use actor task to get state to ensure ordering
+        let get_leaving_received = |client: &TestClient| {
+            let (tx, rx) = mpsc::channel();
+            client.client.actor.send(move |state| {
+                let val = state
+                    .remote_devices
+                    .find_by_demux_id(client2.demux_id)
+                    .map(|d| d.leaving_received)
+                    .unwrap_or(false);
+                tx.send(val).unwrap();
+            });
+            rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        };
+
+        let make_leaving_msg = |group_id: Vec<u8>| DeviceToDevice {
+            group_id: Some(group_id),
+            leaving: Some(Leaving {
+                demux_id: Some(client2.demux_id),
+            }),
+            ..DeviceToDevice::default()
+        };
+
+        let wrong_user_id: UserId = b"wrong_user_id".to_vec();
+        client1
+            .client
+            .on_signaling_message_received(wrong_user_id, make_leaving_msg(fake_group_id.clone()));
+        assert!(
+            !get_leaving_received(&client1),
+            "leaving from wrong sender should be rejected"
+        );
+
+        client1.client.on_signaling_message_received(
+            client2.user_id.clone(),
+            make_leaving_msg(fake_group_id),
+        );
+        assert!(
+            get_leaving_received(&client1),
+            "leaving from correct sender should be accepted"
         );
     }
 
@@ -9467,6 +9636,21 @@ mod remote_devices_tests {
                 SrtpKeys::from_master_key_material(&server_master_key_material);
             assert_eq!(expected_srtp_keys, srtp_keys);
         };
+    }
+
+    #[test]
+    fn dhe_state_fails_to_negotiate_with_low_order_server_key() {
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        let low_order_server_key = PublicKey::from([0u8; 32]);
+
+        let state = DheState::start(client_secret);
+        assert!(matches!(state, DheState::WaitingForServerPublicKey { .. }));
+
+        let state = state.negotiate(&low_order_server_key, b"hkdf_extra_info");
+        assert!(
+            matches!(state, DheState::FailedToNegotiate { .. }),
+            "expected FailedToNegotiate, got a different DheState variant"
+        );
     }
 
     #[test]
