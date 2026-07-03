@@ -841,29 +841,33 @@ pub fn peek_call_link_call(
     Ok(())
 }
 
-fn jni_get_proxy_info(env: &mut JNIEnv, jni_proxy_info: &JObject) -> Result<ProxyInfo> {
-    const STRING_TYPE: &str = jni_signature!(java.lang.String);
-    const INT_TYPE: &str = jni_signature!(int);
-    const PROXYTYPE_TYPE: &str = jni_signature!(org.webrtc.PeerConnection::ProxyType);
-    const HOSTNAME_FIELD: &str = "hostname";
-    const USERNAME_FIELD: &str = "username";
-    const PASSWORD_FIELD: &str = "password";
-    const PORT_FIELD: &str = "port";
-    const TYPE_FIELD: &str = "type";
-    let hostname = jni_get_field(env, jni_proxy_info, HOSTNAME_FIELD, STRING_TYPE)?.l()?;
-    let username = jni_get_field(env, jni_proxy_info, USERNAME_FIELD, STRING_TYPE)?.l()?;
-    let password = jni_get_field(env, jni_proxy_info, PASSWORD_FIELD, STRING_TYPE)?.l()?;
-    let port = jni_get_field(env, jni_proxy_info, PORT_FIELD, INT_TYPE)?.i()? as u16;
-    let proxy_type_enum = jni_get_field(env, jni_proxy_info, TYPE_FIELD, PROXYTYPE_TYPE)?.l()?;
+fn jni_get_proxy_info(env: &mut Env, jni_proxy_info: &JObject) -> Result<ProxyInfo> {
+    const STRING_TYPE: FieldSignature<'static> = jni_sig!(java.lang.String);
+    const INT_TYPE: FieldSignature<'static> = jni_sig!(int);
+    const PROXYTYPE_TYPE: FieldSignature<'static> = jni_sig!(org.webrtc.PeerConnection::ProxyType);
+    let hostname = env
+        .get_field(&jni_proxy_info, jni_str!("hostname"), &STRING_TYPE)?
+        .l()?;
+    let hostname: JString = env.cast_local::<JString>(hostname)?;
+    let username = env
+        .get_field(&jni_proxy_info, jni_str!("username"), &STRING_TYPE)?
+        .l()?;
+    let username: JString = env.cast_local::<JString>(username)?;
+    let password = env
+        .get_field(&jni_proxy_info, jni_str!("password"), &STRING_TYPE)?
+        .l()?;
+    let password: JString = env.cast_local::<JString>(password)?;
+    let port = env.get_field(&jni_proxy_info, jni_str!("port"), &INT_TYPE)?.into_int()? as u16;
+    let proxy_type_enum = env.get_field(&jni_proxy_info, jni_str!("type"), &PROXYTYPE_TYPE)?.l()?;
     let proxy_type = RffiProxyType::from_u8(
-        env.call_method(proxy_type_enum, "ordinal", jni_signature!(() -> int), &[])?
-            .i()? as u8,
+        env.call_method(proxy_type_enum, jni_str!("ordinal"), jni_sig!(() -> int), &[])?
+            .into_int()? as u8,
     );
     Ok(ProxyInfo::new(
         proxy_type,
-        env.get_string(&JString::from(hostname))?.to_str()?,
-        env.get_string(&JString::from(username))?.to_str()?,
-        env.get_string(&JString::from(password))?.to_str()?,
+        &hostname.try_to_string(env)?,
+        &username.try_to_string(env)?,
+        &password.try_to_string(env)?,
         port,
     ))
 }
