@@ -93,9 +93,9 @@ COPY config /ringrtc/config
 RUN /ringrtc/bin/prepare-workspace android
 
 # Copy project and purge generated files
-COPY --exclude="src/webrtc*" . /ringrtc/
+COPY . /ringrtc/
 WORKDIR /ringrtc
-RUN git clean -ffdx -e "src/webrtc*"
+RUN git clean -ffdx -e "out/" -e "src/webrtc*"
 
 # Build entrypoint
 RUN cat <<'EOF' > build.sh && chmod +x build.sh
