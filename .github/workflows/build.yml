@@ -36,14 +36,17 @@ jobs:
     - name: Build Docker image
       run: docker build -f Dockerfile.android -t ringrtc-builder .
 
-    - name: Build release version inside Docker
+    - name: Build library inside Docker
       run: |
+        mkdir -p "$RUNNER_TEMP/m2-repository"
         docker run --rm \
           -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
-          ringrtc-builder --release-build --install-local
+          -v "$RUNNER_TEMP/m2-repository:/root/.m2/repository" \
+          ringrtc-builder install
 
-    - name: Build debug version inside Docker
-      run: |
-        docker run --rm \
-          -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
-          ringrtc-builder --debug-build --install-local
+    - name: Export Maven repo
+      uses: actions/upload-artifact@v7
+      with:
+        name: ringrtc-maven-local
+        path: "${{ runner.temp }}/m2-repository"
+        if-no-files-found: error

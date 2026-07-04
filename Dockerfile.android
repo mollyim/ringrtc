@@ -101,35 +101,36 @@ RUN git clean -ffdx -e "out/" -e "src/webrtc*"
 RUN cat <<'EOF' > build.sh && chmod +x build.sh
 #!/bin/sh
 set -eu
-
 usage() {
-  echo "Usage: build.sh verify|install|publish|help [args...]"
+  echo "Usage: build.sh [test|install|publish]... [-- args...]"
 }
-
 build_aar() {
-  local mode=$1; shift
-  ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "--$mode-build" "$@"
+  ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "$@"
 }
-
-cmd="${1:-help}"
-[ $# -gt 0 ] && shift
-
-case "$cmd" in
-  verify)
-    build_aar release "$@"
-    build_aar debug "$@"
-    ;;
-  install)
-    build_aar release --install-local "$@"
-    build_aar debug --install-local "$@"
-    ;;
-  publish)
-    build_aar release --publish "$@"
-    build_aar debug --publish "$@"
-    ;;
-  help|-h|--help) usage ;;
-  *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
-esac
+cmds=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    test|install|publish) cmds="${cmds:+$cmds }$1" ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ -n "$cmds" ] || { usage; exit 0; }
+for c in $cmds; do
+  case "$c" in
+    test)
+      (cd src/rust && ./scripts/run-tests)
+      ;;
+    install)
+      build_aar --install-local "$@"
+      ;;
+    publish)
+      build_aar --publish "$@"
+      ;;
+  esac
+done
 EOF
 
 ENTRYPOINT ["/ringrtc/build.sh"]
