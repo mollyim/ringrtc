@@ -10,6 +10,8 @@ mod scenario;
 mod util;
 mod video;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use base64::prelude::*;
 use clap::Parser;
@@ -20,7 +22,7 @@ use ringrtc::{
     core::group_call::GroupId,
     lite::sfu::{GroupMember, MembershipProof, UserId},
     webrtc::{
-        media::{AudioBandwidth, AudioEncoderConfig},
+        media::{AudioBandwidth, AudioDecoderConfig, AudioEncoderConfig},
         peer_connection_factory::{AudioConfig, AudioJitterBufferConfig, IceServer},
     },
 };
@@ -95,8 +97,8 @@ struct Args {
     bandwidth: AudioBandwidth,
 
     /// The encoding complexity for audio.
-    #[arg(long, default_value = "9", value_parser = clap::value_parser!(i32).range(0..=10))]
-    complexity: i32,
+    #[arg(long, default_value = "9", value_parser = clap::value_parser!(u8).range(0..=10))]
+    complexity: u8,
 
     /// The size of an audio frame (ptime).
     #[arg(long, default_value = "20", value_parser = clap::builder::PossibleValuesParser::new(["20", "40", "60", "80", "100", "120"]))]
@@ -122,9 +124,25 @@ struct Args {
     #[arg(long, action = clap::ArgAction::Set, default_value = "true")]
     fec: bool,
 
+    /// The duration of dred to use in 10ms units. Set to 0 to disable (default).
+    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u8).range(0..=100))]
+    dred_duration: u8,
+
+    /// Minimum packet loss percentage reported to encoder (0-100).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100))]
+    min_packet_loss_percent: u8,
+
     /// Whether to use adaptation when encoding audio. Set to 0 to disable (default).
     #[arg(long, default_value_t = 0)]
     adaptation: i32,
+
+    /// The decoding complexity for audio.
+    #[arg(long, default_value = None, value_parser = clap::value_parser!(u8).range(0..=10))]
+    decoder_complexity: Option<u8>,
+
+    /// Specifies the path to the Opus DNN weights file.
+    #[arg(long, default_value = "")]
+    dnn_weights_path: String,
 
     /// Whether to enable transport-cc feedback for audio. This will allow the bitrate to vary
     /// between `min_bitrate_bps` and `max_bitrate_bps` when using CBR.
@@ -269,6 +287,19 @@ fn main() -> Result<()> {
         )
     };
 
+    // Load Opus DNN weights model file if specified.
+    let dnn_weights = if !args.dnn_weights_path.is_empty() {
+        if let Ok(data) = std::fs::read(args.dnn_weights_path) {
+            info!("Loaded Opus DNN weights file: {} bytes", data.len());
+            Some(Arc::new(data))
+        } else {
+            error!("Could not load the Opus DNN weights file!");
+            anyhow::bail!("Could not load the Opus DNN weights file!");
+        }
+    } else {
+        None
+    };
+
     // Create a call configuration that should be used for the call.
     let call_config = CallConfig {
         // This configuration is currently the same as `Normal`.
@@ -301,7 +332,13 @@ fn main() -> Result<()> {
             enable_cbr: args.cbr,
             enable_dtx: args.dtx,
             enable_fec: args.fec,
-            dred_duration: 0,
+            dred_duration: args.dred_duration,
+            min_packet_loss_percent: args.min_packet_loss_percent,
+            dnn_weights: dnn_weights.as_ref().map(Arc::clone),
+        },
+        audio_decoder_config: AudioDecoderConfig {
+            complexity: args.decoder_complexity,
+            dnn_weights,
         },
         enable_tcc_audio: args.tcc,
         audio_jitter_buffer_config: AudioJitterBufferConfig {

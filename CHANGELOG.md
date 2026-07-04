@@ -1,5 +1,111 @@
 # Changelog
 
+## v2.69.5
+
+- Update WebRTC version to 7778d
+  - Trigger an ICE regather when reconnecting during group calls
+
+- Desktop: convert ringId to callId as unsigned integer
+
+- Enable iOS isMultitaskingCameraAccessEnabled when available
+
+- Update logging for ice candidates
+
+- CI updates:
+  - Upload attestation for electron artifacts
+  - Update GitHub actions to Node24+
+  - Remove workaround for XDG_RUNTIME_DIR missing on Linux arm64 runner
+
+## v2.69.4
+
+- Update to cubeb 0.35.3
+
+## v2.69.3
+
+- Improve remote mute attribution checks
+
+- Improve stats for packet loss analysis
+
+- Handle badly formatted video frames better
+
+- Update WebRTC version to 7778c
+  - Add stats for improved packet loss analysis
+  - Fix relative arrival delay stat when DRED is enabled
+  - Add checks for DRED buffer operations
+  - Add null checks when rotating i420 video frames
+
+- Desktop: Update NodeJS dependencies
+
+- Add resolution and framerate to call_sim summary
+
+- Update media key rotation delay to 5 seconds in group calls.
+
+## v2.69.2
+
+- Android: Update to jni 0.22.4 and gradle 9.3.1
+
+- Remove dead SDP code
+
+## v2.69.1
+
+- Add audio redundancy statistics to Call Summary
+
+- Add Call ID hash to Call Summary
+
+- Fix is relayed in Call Summary
+
+- Update to webrtc 7778b
+  - Merge m148 from upstream
+  - Always allow packet-type-based packet demuxing
+
+- Call Sim: Add DRED options to baseline
+
+## v2.69.0
+
+- Enable libvpx VP9 for android and expose flag
+
+- ADM: Prevent infinite loop in desktop adm playout callback
+
+- ADM: Add support for toggling AGC/AEC/NS on desktop (macOS)
+
+- Update to webrtc 7680g
+  - Return nonzero length for ADM callback-gone case
+
+- Log webrtc version from version.properties
+
+## v2.68.1
+
+- Integrate Opus DRED
+  - Add more audio receiver stats for jitter buffer
+  - Add opus decoder configuration plumbing
+  - Add fields for dred support to the opus encoder configuration
+  - Add opus dnn weights support and asset registry integration
+  - Enable rtc_opus_support_dred in build scripts
+  - Update to webrtc 7680f
+
+- Speculative fix to device disconnection race
+
+- Simplify ADM device switching APIs
+
+- Asset Registry: Disable DRED support for 32-bit devices
+
+## v2.68.0
+
+- Add Android screenshare support
+
+- ADM: Avoid C++ layer for device enumeration / selection
+
+- Update to webrtc 7680c
+  - ADM: avoid using C++ layer to proxy updates and ignore WebRTC's device selection choices
+
+- Update dependencies
+
+- Fix various validations in Signaling and in SfuToDevice RTP
+
+## v2.67.3
+
+- iOS: Move method calls inside buffer accesses
+
 ## v2.67.2
 
 - Update to webrtc 7680b

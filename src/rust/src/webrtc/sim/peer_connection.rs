@@ -17,7 +17,7 @@ use crate::{
     core::platform::PlatformItem,
     webrtc,
     webrtc::{
-        media::RffiAudioEncoderConfig,
+        media::{RffiAudioDecoderConfig, RffiAudioEncoderConfig},
         network::RffiIpPort,
         peer_connection::{RffiAudioLevel, RffiReceivedAudioLevel},
         rtp,
@@ -356,6 +356,14 @@ pub unsafe fn Rust_configureAudioEncoders(
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_configureAudioDecoders(
+    _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+    _config: webrtc::ptr::Borrowed<RffiAudioDecoderConfig>,
+) {
+    info!("Rust_configureAudioDecoders:");
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
 pub fn Rust_getAudioLevels(
     _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
     mut captured_out: webrtc::ptr::Borrowed<RffiAudioLevel>,
@@ -395,4 +403,11 @@ pub unsafe fn Rust_closePeerConnection(
     _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
 ) {
     info!("Rust_closePeerConnection:");
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_regatherOnAllNetworks(
+    _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+) {
+    info!("Rust_regatherOnAllNetworks:");
 }

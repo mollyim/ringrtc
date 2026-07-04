@@ -111,7 +111,6 @@ public class CallManager {
       fieldTrialsWithDefaults.put("RingRTC-PruneTurnPorts", "Enabled");
       fieldTrialsWithDefaults.put("WebRTC-Bwe-ProbingConfiguration", "skip_if_est_larger_than_fraction_of_max:0.99");
       fieldTrialsWithDefaults.put("WebRTC-IncreaseIceCandidatePriorityHostSrflx", "Enabled");
-      fieldTrialsWithDefaults.put("WebRTC-Audio-OpusGeneratePlc", "Enabled");
       fieldTrialsWithDefaults.putAll(fieldTrials);
 
       CallManager.fieldTrials = buildFieldTrialsString(fieldTrialsWithDefaults);
@@ -402,7 +401,10 @@ public class CallManager {
 
   /**
    *
-   * Indication from application to proceed with call
+   * Indication from application to proceed with call. Defaults call to:
+   * - videoEnabled == false
+   * - audioEnabled == false
+   * - isScreenshare == false
    *
    * @param callId                 callId for the call
    * @param context                Call service context
@@ -416,6 +418,7 @@ public class CallManager {
    * @param dataMode               desired data mode to start the session with
    * @param audioLevelsIntervalMs  if greater than 0, enable audio levels with this interval (in milliseconds)
    * @param dredDuration           if provided, client will encode DRED PLC for the period specified
+   * @param enableVp9              if true, allow use of software VP9 video codec for this call
    * @param enableCamera           if true, enable the local camera video track when created
    *
    * @throws CallException for native code failures
@@ -434,6 +437,7 @@ public class CallManager {
                                 DataMode                       dataMode,
                       @Nullable Integer                        audioLevelsIntervalMs,
                       @Nullable Byte                           dredDuration,
+                                boolean                        enableVp9,
                                 boolean                        enableCamera)
     throws CallException
   {
@@ -467,7 +471,8 @@ public class CallManager {
                    callContext,
                    dataMode.ordinal(),
                    audioLevelsIntervalMillis,
-                   dredDurationByte);
+                   dredDurationByte,
+                   Util.deviceSupportsVp9HardwareEncoder(eglBase) || enableVp9);
   }
 
   /**
@@ -835,15 +840,37 @@ public class CallManager {
    * @throws CallException for native code failures
    *
    */
-  public void setVideoEnable(boolean enable)
+  public void setVideoEnable(boolean enable, boolean isScreenShare)
     throws CallException
   {
     checkCallManagerExists();
 
     CallContext callContext = ringrtcGetActiveCallContext(nativeCallManager);
     callContext.setVideoEnabled(enable);
+    callContext.setOutgoingVideoIsScreenShare(isScreenShare);
 
     ringrtcSetVideoEnable(nativeCallManager, enable);
+  }
+
+  /**
+   *
+   * Notification from application to indicate whether the outgoing video
+   * is a screen share.
+   *
+   * @param isScreenShare  if true, the outgoing video is a screen share
+   *
+   * @throws CallException for native code failures
+   *
+   */
+  public void setOutgoingVideoIsScreenShare(boolean isScreenShare)
+    throws CallException
+  {
+    checkCallManagerExists();
+
+    CallContext callContext = ringrtcGetActiveCallContext(nativeCallManager);
+    callContext.setOutgoingVideoIsScreenShare(isScreenShare);
+
+    ringrtcSetOutgoingVideoIsScreenShare(nativeCallManager, isScreenShare);
   }
 
   /**
@@ -1246,7 +1273,10 @@ public class CallManager {
 
   /**
    *
-   * Creates and returns a GroupCall object.
+   * Creates and returns a GroupCall object. Defaults call to:
+   * - videoEnabled == false
+   * - audioEnabled == false
+   * - isScreenshare == false
    *
    * If there is any error when allocating resources for the object,
    * null is returned.
@@ -1293,7 +1323,11 @@ public class CallManager {
 
   /**
    *
-   * Creates and returns a GroupCall object for a call link call.
+   * Creates and returns a GroupCall object for a call link call. Defaults call to:
+   * - videoEnabled == false
+   * - audioEnabled == false
+   * - isScreenshare == false
+   *
    *
    * If there is any error when allocating resources for the object,
    * null is returned.
@@ -1889,6 +1923,14 @@ public class CallManager {
    */
   static class CallContext {
 
+    public  static final int       CAMERA_MAX_WIDTH    = 1280;
+
+    public  static final int       CAMERA_MAX_HEIGHT   = 720;
+
+    public  static final int       CAMERA_MAX_FPS      = 30;
+
+    public  static final int       SCREENSHARE_MAX_FPS = 30;
+
     @NonNull  private final String TAG = CallManager.CallContext.class.getSimpleName();
     /** CallId */
     @NonNull  public final  CallId                         callId;
@@ -1949,6 +1991,20 @@ public class CallManager {
       if (videoTrack != null) {
         videoTrack.setEnabled(enable);
         cameraControl.setEnabled(enable);
+      }
+    }
+
+    void setOutgoingVideoIsScreenShare(boolean isScreenShare) {
+      if (this.videoSource != null) {
+        this.videoSource.setIsScreencast(isScreenShare);
+
+        if (isScreenShare) {
+          this.videoSource.adaptOutputFormat(VideoSource.AspectRatio.UNDEFINED, null, VideoSource.AspectRatio.UNDEFINED, null, SCREENSHARE_MAX_FPS);
+        } else {
+          this.videoSource.adaptOutputFormat(CAMERA_MAX_WIDTH, CAMERA_MAX_HEIGHT, CAMERA_MAX_FPS);
+        }
+      } else {
+        Log.w(TAG, "setOutgoingVideoIsScreenShare(): tried to set isScreenshare but there is no VideoSource");
       }
     }
 
@@ -2522,7 +2578,8 @@ public class CallManager {
                         CallContext callContext,
                         int         dataMode,
                         int         audioLevelsIntervalMillis,
-                        byte        dredDuration)
+                        byte        dredDuration,
+                        boolean     enableVp9)
     throws CallException;
 
   private native
@@ -2627,6 +2684,10 @@ public class CallManager {
 
   private native
     void ringrtcSetVideoEnable(long nativeCallManager, boolean enable)
+    throws CallException;
+
+  private native
+    void ringrtcSetOutgoingVideoIsScreenShare(long nativeCallManager, boolean isScreenShare)
     throws CallException;
 
   private native

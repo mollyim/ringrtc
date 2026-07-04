@@ -21,7 +21,7 @@ use crate::{
     webrtc,
     webrtc::{
         ice_gatherer::IceGatherer,
-        media::AudioEncoderConfig,
+        media::{AudioDecoderConfig, AudioEncoderConfig},
         network::RffiIpPort,
         peer_connection_factory::RffiPeerConnectionFactoryOwner,
         peer_connection_observer::RffiPeerConnectionObserver,
@@ -376,6 +376,19 @@ impl PeerConnection {
         };
     }
 
+    pub fn configure_audio_decoders(&self, audio_decoder_config: &AudioDecoderConfig) {
+        info!(
+            "PeerConnection.configure_audio_decoders({:?})",
+            audio_decoder_config
+        );
+        unsafe {
+            pc::Rust_configureAudioDecoders(
+                self.rffi.as_borrowed(),
+                webrtc::ptr::Borrowed::from_ptr(&audio_decoder_config.rffi()),
+            )
+        };
+    }
+
     pub fn get_audio_levels(&self) -> (AudioLevel, Vec<RffiReceivedAudioLevel>) {
         let captured_level: RffiAudioLevel = 0;
         let mut received_levels: Vec<RffiReceivedAudioLevel> = Vec::with_capacity(100);
@@ -407,5 +420,11 @@ impl PeerConnection {
 
     pub fn close(&self) {
         unsafe { pc::Rust_closePeerConnection(self.rffi.as_borrowed()) };
+    }
+
+    pub fn regather_on_all_networks(&self) {
+        unsafe {
+            pc::Rust_regatherOnAllNetworks(self.rffi.as_borrowed());
+        };
     }
 }

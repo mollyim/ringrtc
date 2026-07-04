@@ -20,7 +20,8 @@ property() {
 
 # Specify WebRTC version.  This corresponds to the
 # branch or tag of the signalapp/webrtc repository.
-WEBRTC_VERSION=$(property 'webrtc.version')
+WEBRTC_VERSION="$(property 'webrtc.version')"
+export WEBRTC_VERSION
 
 # MOLLY: Range of commits to be rebased on top of the synced "WEBRTC_VERSION".
 # Given that gclient is run with the "no-history" option, use tags references only.

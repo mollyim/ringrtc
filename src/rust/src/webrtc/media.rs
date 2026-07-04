@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::slice;
+use std::{ffi::c_void, slice, sync::Arc};
 
 pub use media::{RffiAudioTrack, RffiMediaStream, RffiVideoFrameBuffer, RffiVideoTrack};
 
@@ -12,7 +12,7 @@ use crate::webrtc::ffi::media;
 pub use crate::webrtc::peer_connection_factory::RffiPeerConnectionFactoryOwner;
 #[cfg(feature = "sim")]
 use crate::webrtc::sim::media;
-use crate::{lite::sfu::DemuxId, webrtc};
+use crate::{core::assets::AssetRegistry, lite::sfu::DemuxId, webrtc};
 
 /// Rust wrapper around WebRTC C++ MediaStream object.
 #[derive(Clone, Debug)]
@@ -150,17 +150,21 @@ impl VideoFrame {
 
     #[must_use]
     pub fn apply_rotation(self) -> Self {
-        if self.metadata.rotation == VideoRotation::None {
+        if self.metadata.rotation == VideoRotation::None || self.rffi_buffer.is_null() {
+            return self;
+        }
+        let rotated = unsafe {
+            media::Rust_copyAndRotateVideoFrameBuffer(
+                self.rffi_buffer.as_borrowed(),
+                self.metadata.rotation,
+            )
+        };
+        if rotated.is_null() {
             return self;
         }
         Self {
             metadata: self.metadata.apply_rotation(),
-            rffi_buffer: webrtc::Arc::from_owned(unsafe {
-                media::Rust_copyAndRotateVideoFrameBuffer(
-                    self.rffi_buffer.as_borrowed(),
-                    self.metadata.rotation,
-                )
-            }),
+            rffi_buffer: webrtc::Arc::from_owned(rotated),
         }
     }
 
@@ -200,7 +204,7 @@ impl VideoFrame {
         Self::from_buffer(metadata, rffi_buffer)
     }
 
-    pub fn to_rgba(&self, rgba_buffer: &mut [u8]) {
+    pub fn to_rgba(&self, rgba_buffer: &mut [u8]) -> bool {
         unsafe {
             media::Rust_convertVideoFrameBufferToRgba(
                 self.rffi_buffer.as_borrowed(),
@@ -367,11 +371,16 @@ pub struct RffiAudioEncoderConfig {
     enable_dtx: bool,
     enable_fec: bool,
 
-    dred_duration: u8,
+    dred_duration: i32,
+
+    min_packet_loss_percent: i32,
+
+    dnn_weights_data: *const c_void,
+    dnn_weights_length: i32,
 }
 
 // A nice form of RffiAudioEncoderConfig
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct AudioEncoderConfig {
     // AKA ptime or frame size
     // Valid sizes: 10, 20, 40, 60, 80, 100, 120
@@ -386,15 +395,47 @@ pub struct AudioEncoderConfig {
 
     // Default is Auto
     pub bandwidth: AudioBandwidth,
+
     // Valid range: 0-10 (10 most complex)
-    pub complexity: i32,
+    pub complexity: u8,
     pub adaptation: i32,
 
     pub enable_cbr: bool,
     pub enable_dtx: bool,
     pub enable_fec: bool,
+
     // Valid range: 0-100
     pub dred_duration: u8,
+
+    // Valid range: 0-100 (Used only for testing)
+    pub min_packet_loss_percent: u8,
+
+    pub dnn_weights: Option<Arc<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for AudioEncoderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioEncoderConfig")
+            .field("initial_packet_size_ms", &self.initial_packet_size_ms)
+            .field("min_packet_size_ms", &self.min_packet_size_ms)
+            .field("max_packet_size_ms", &self.max_packet_size_ms)
+            .field("initial_bitrate_bps", &self.initial_bitrate_bps)
+            .field("min_bitrate_bps", &self.min_bitrate_bps)
+            .field("max_bitrate_bps", &self.max_bitrate_bps)
+            .field("bandwidth", &self.bandwidth)
+            .field("complexity", &self.complexity)
+            .field("adaptation", &self.adaptation)
+            .field("enable_cbr", &self.enable_cbr)
+            .field("enable_dtx", &self.enable_dtx)
+            .field("enable_fec", &self.enable_fec)
+            .field("dred_duration", &self.dred_duration)
+            .field("min_packet_loss_percent", &self.min_packet_loss_percent)
+            .field(
+                "dnn_weights.len",
+                &self.dnn_weights.as_ref().map(|w| w.len()),
+            )
+            .finish()
+    }
 }
 
 impl Default for AudioEncoderConfig {
@@ -417,12 +458,20 @@ impl Default for AudioEncoderConfig {
             enable_fec: true,
 
             dred_duration: 0,
+
+            min_packet_loss_percent: 0,
+
+            dnn_weights: None,
         }
     }
 }
 
 impl AudioEncoderConfig {
     pub fn rffi(&self) -> RffiAudioEncoderConfig {
+        let (dnn_weights_data, dnn_weights_length) = match &self.dnn_weights {
+            Some(w) => (w.as_ptr() as *const c_void, w.len() as i32),
+            None => (std::ptr::null(), 0),
+        };
         RffiAudioEncoderConfig {
             initial_packet_size_ms: self.initial_packet_size_ms,
             min_packet_size_ms: self.min_packet_size_ms,
@@ -431,12 +480,116 @@ impl AudioEncoderConfig {
             min_bitrate_bps: self.min_bitrate_bps,
             max_bitrate_bps: self.max_bitrate_bps,
             bandwidth: self.bandwidth as i32,
-            complexity: self.complexity,
+            complexity: self.complexity as i32,
             adaptation: self.adaptation,
             enable_cbr: self.enable_cbr,
             enable_dtx: self.enable_dtx,
             enable_fec: self.enable_fec,
-            dred_duration: self.dred_duration,
+            dred_duration: self.dred_duration as i32,
+            min_packet_loss_percent: self.min_packet_loss_percent as i32,
+            dnn_weights_data,
+            dnn_weights_length,
         }
     }
+}
+
+// Same as webrtc::AudioDecoder::Config in api/audio_codecs/audio_decoder.h.
+// Very OPUS-specific
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct RffiAudioDecoderConfig {
+    dnn_weights_data: *const c_void,
+    dnn_weights_length: i32,
+    complexity: i32,
+}
+
+// A nice form of RffiAudioDecoderConfig
+#[derive(Clone)]
+pub struct AudioDecoderConfig {
+    pub dnn_weights: Option<Arc<Vec<u8>>>,
+    pub complexity: Option<u8>,
+}
+
+impl Default for AudioDecoderConfig {
+    fn default() -> Self {
+        Self {
+            dnn_weights: None,
+            complexity: Some(0),
+        }
+    }
+}
+
+impl std::fmt::Debug for AudioDecoderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioDecoderConfig")
+            .field(
+                "dnn_weights.len",
+                &self.dnn_weights.as_ref().map(|w| w.len()),
+            )
+            .field("complexity", &self.complexity)
+            .finish()
+    }
+}
+
+impl AudioDecoderConfig {
+    pub fn rffi(&self) -> RffiAudioDecoderConfig {
+        let (dnn_weights_data, dnn_weights_length) = match &self.dnn_weights {
+            Some(w) => (w.as_ptr() as *const c_void, w.len() as i32),
+            None => (std::ptr::null(), 0),
+        };
+        RffiAudioDecoderConfig {
+            dnn_weights_data,
+            dnn_weights_length,
+            // Set to -1 to use the default Opus value (and avoid setting anything).
+            complexity: self.complexity.map(|c| c as i32).unwrap_or(-1),
+        }
+    }
+}
+
+/// If dred_duration > 0, looks up DNN weights from the asset registry
+/// and configures both encoder and decoder for DRED. If no weights are
+/// found, disables DRED by setting dred_duration to 0.
+pub fn configure_dred_from_assets(
+    asset_registry: &AssetRegistry,
+    encoder_config: &mut AudioEncoderConfig,
+    decoder_config: &mut AudioDecoderConfig,
+) {
+    // Don't load assets if we aren't using DRED or building for the Call Simulator.
+    if cfg!(feature = "call_sim") || encoder_config.dred_duration == 0 {
+        return;
+    }
+
+    info!("assets: Checking for opus-dred assets in the registry...");
+    if let Some(versions) = asset_registry.get_options_for("opus-dred") {
+        info!(
+            "assets: There are {} opus-dred asset versions available",
+            versions.len()
+        );
+        if let Some(version) = versions.first() {
+            if let Some(asset) = asset_registry.get_asset("opus-dred", *version) {
+                info!("assets: opus-dred asset version {version} found");
+
+                // Set the weights on both the encoder and decoder.
+                // Lifetime: Each clone of the Arc<asset_content> will be held by
+                // a connection or group call object which lives as long as the
+                // PeerConnection in WebRTC.
+                encoder_config.dnn_weights = Some(Arc::clone(&asset.content));
+                decoder_config.dnn_weights = Some(asset.content);
+
+                // Disable FEC when using DRED.
+                encoder_config.enable_fec = false;
+
+                return;
+            } else {
+                warn!("assets: Failed to get opus-dred asset version {version}!");
+            }
+        } else {
+            warn!("assets: No versions found for opus-dred!");
+        }
+    } else {
+        warn!("assets: No opus-dred assets found!");
+    }
+
+    warn!("assets: Disabling DRED since no dnn weights were found!");
+    encoder_config.dred_duration = 0;
 }

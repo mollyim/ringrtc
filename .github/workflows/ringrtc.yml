@@ -16,7 +16,7 @@ jobs:
     name: Code Formatting
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: rustup toolchain install nightly --profile minimal --component rustfmt
     - name: Check rust format
       run: cargo +nightly fmt -- --check
@@ -43,9 +43,9 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpulse-dev
     - name: Install Python tools
       run: pip3 install flake8 mypy
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Cargo Cache
-      uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
         cache-targets: "false"
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component clippy --target aarch64-linux-android,aarch64-apple-ios
@@ -87,7 +87,7 @@ jobs:
       run: npm ci
       working-directory: src/node
     - name: Check typescript
-      run: npm run eslint
+      run: npm run oxlint
       working-directory: src/node
     - name: Check package.json for prebuildChecksum
       run: >-
@@ -109,7 +109,7 @@ jobs:
     steps:
     - name: Install deps
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpulse-dev
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
     - name: Run rust tests
       run: cd src/rust && ./scripts/run-tests
@@ -120,15 +120,15 @@ jobs:
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
       - name: set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
       - run: bin/fetch-artifact -p android
       - run: bin/build-aar --release --ringrtc-only
         continue-on-error: true

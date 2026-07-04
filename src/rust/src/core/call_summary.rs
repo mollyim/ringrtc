@@ -5,14 +5,15 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fmt::Debug,
+    fmt::{self, Debug, Display},
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign},
     sync::{Arc, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::anyhow;
 use prost::Message;
+use serde_json::json;
 use sketches_ddsketch::{Config, DDSketch};
 
 use crate::{
@@ -37,6 +38,7 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub struct CallSummary {
+    pub call_id_hash: Option<Vec<u8>>,
     pub start_time: Timestamp,
     pub end_time: Timestamp,
     pub quality_stats: QualityStats,
@@ -102,6 +104,64 @@ impl Timestamp {
         time.duration_since(UNIX_EPOCH)
             .map(|v| Self(v.as_millis() as u64))
             .ok()
+    }
+}
+
+impl Display for CallSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let call_id_hash_hex = self.call_id_hash.as_ref().map(|hash| {
+            hash.iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        });
+
+        let raw_stats_text_json = self.raw_stats_text.as_ref().and_then(|text| {
+            match serde_json::from_str::<serde_json::Value>(text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    error!("Failed to parse raw_stats_text as JSON: {}", e);
+                    None
+                }
+            }
+        });
+
+        let summary_json = json!({
+            "CallSummary": {
+                "call_id_hash": call_id_hash_hex,
+                "start_time": u64::from(self.start_time),
+                "end_time": u64::from(self.end_time),
+                "is_survey_candidate": self.is_survey_candidate,
+                "call_end_reason_text": &self.call_end_reason_text,
+                "quality_stats": {
+                    "rtt_median_connection": self.quality_stats.rtt_median_connection,
+                    "audio_stats": {
+                        "rtt_median": self.quality_stats.audio_stats.rtt_median,
+                        "jitter_median_send": self.quality_stats.audio_stats.jitter_median_send,
+                        "jitter_median_recv": self.quality_stats.audio_stats.jitter_median_recv,
+                        "packet_loss_fraction_send": self.quality_stats.audio_stats.packet_loss_fraction_send,
+                        "packet_loss_fraction_recv": self.quality_stats.audio_stats.packet_loss_fraction_recv
+                    },
+                    "video_stats": {
+                        "rtt_median": self.quality_stats.video_stats.rtt_median,
+                        "jitter_median_send": self.quality_stats.video_stats.jitter_median_send,
+                        "jitter_median_recv": self.quality_stats.video_stats.jitter_median_recv,
+                        "packet_loss_fraction_send": self.quality_stats.video_stats.packet_loss_fraction_send,
+                        "packet_loss_fraction_recv": self.quality_stats.video_stats.packet_loss_fraction_recv
+                    }
+                },
+                // Just showing the length for the blob rather than a byte array.
+                "raw_stats": self.raw_stats.as_ref().map(|blob| blob.len()),
+                // We show the telemetry/stats blob json string inline.
+                "raw_stats_text": raw_stats_text_json,
+            }
+        });
+
+        let summary = serde_json::to_string_pretty(&summary_json).map_err(|e| {
+            error!("Failed to serialize CallSummary JSON: {}", e);
+            fmt::Error
+        })?;
+
+        f.write_str(&summary)
     }
 }
 
@@ -215,6 +275,11 @@ struct StreamSummary {
     freeze_count: DistributionSummary<f32>,
     video_codec: StatsVideoCodecType,
     codec_implementation: Option<String>,
+    // The most recent audio receive stream redundancy statistics.
+    audio_concealed_samples: DistributionSummary<f32>,
+    audio_redundant_packets: Option<u64>,
+    audio_jitter_buffer_flushes: Option<u64>,
+    audio_relative_arrival_delay: DistributionSummary<f32>,
 }
 
 /// `StreamSummaries` is converted into `protobuf::call_summary::StreamSummaries`
@@ -397,6 +462,12 @@ impl StatsSets {
         self.stats_sets[last].rtt_stun.push(rtt);
     }
 
+    fn set_relayed(&mut self, relayed: bool) {
+        if let Some(last) = self.stats_sets.back_mut() {
+            last.relayed = Some(relayed);
+        }
+    }
+
     fn to_proto(&self) -> Vec<protobuf::call_summary::StatsSet> {
         Vec::from(self.stats_sets.clone())
     }
@@ -539,6 +610,10 @@ impl From<(&u32, &StreamSummary)> for protobuf::call_summary::StreamSummary {
             },
             codec_implementation: summary.codec_implementation.clone(),
             ssrc: Some(*ssrc),
+            audio_concealment_pct: summary.audio_concealed_samples.to_proto(),
+            audio_redundant_packets: summary.audio_redundant_packets,
+            audio_jitter_buffer_flushes: summary.audio_jitter_buffer_flushes,
+            audio_relative_arrival_delay: summary.audio_relative_arrival_delay.to_proto(),
         }
     }
 }
@@ -697,6 +772,11 @@ impl CallInfo {
                     .add(snapshot.current_round_trip_time);
                 self.stats_sets
                     .push_stun_rtt(snapshot.current_round_trip_time as f32);
+                self.stats_sets.set_relayed(
+                    snapshot
+                        .network_route
+                        .is_some_and(|network| network.local_relayed || network.remote_relayed),
+                )
             }
             StatsSnapshot::AudioSender(snapshot) => {
                 self.quality_stats_sketches
@@ -734,6 +814,16 @@ impl CallInfo {
                         summary.bitrate.push(snapshot.bitrate);
                         summary.packet_loss.push(snapshot.packets_lost_pct);
                         summary.jitter.push(snapshot.jitter as f32);
+                        summary
+                            .audio_concealed_samples
+                            .push(snapshot.concealed_samples_pct);
+                        *summary.audio_redundant_packets.get_or_insert(0) +=
+                            snapshot.fec_packets_received;
+                        *summary.audio_jitter_buffer_flushes.get_or_insert(0) +=
+                            snapshot.jitter_buffer_flushes;
+                        summary
+                            .audio_relative_arrival_delay
+                            .push(snapshot.relative_arrival_delay_per_packet as f32);
                     });
                 self.stats_sets
                     .push_audio_recv_stream_stats(snapshot.into());
@@ -865,9 +955,13 @@ impl DirectCallSummary {
         }
     }
 
-    pub fn build_call_summary(&self, reason: CallEndReason) -> CallSummary {
+    pub fn build_call_summary(
+        &self,
+        call_id_hash: Option<Vec<u8>>,
+        reason: CallEndReason,
+    ) -> CallSummary {
         match self.lock() {
-            Ok(guard) => guard.build_call_summary(reason),
+            Ok(guard) => guard.build_call_summary(call_id_hash, reason),
             Err(error) => {
                 error!("Failed to build call summary: {:?}", error);
                 CallSummary::default()
@@ -902,6 +996,12 @@ impl StatsSnapshotConsumer for DirectCallStatsSnapshotConsumer {
     }
 }
 
+// Normally, report a call as "relayed" if at least 1 / MIN_RELAYED_FRACTION of it is on a relay.
+// However, if a call is less than MIN_CALL_TIME_IGNORE_RELAY_FRACTION and relay was used at all,
+// report the call as relayed.
+const MIN_RELAYED_FRACTION: u128 = 8;
+const MIN_CALL_TIME_IGNORE_RELAY_FRACTION: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Default)]
 struct DirectCallSummaryInner {
     call_info: CallInfo,
@@ -916,6 +1016,8 @@ struct DirectCallSummaryInner {
     answer_received_time: Option<Timestamp>,
     /// The time when the first connection object achieves an ICE connection.
     ice_connected_time: Option<Timestamp>,
+    relayed_time_this_call: Duration,
+    last_relay_start_time: Option<Instant>,
 }
 
 impl DirectCallSummaryInner {
@@ -925,7 +1027,11 @@ impl DirectCallSummaryInner {
             .update_limits(time_limit, stats_period)
     }
 
-    fn build_call_summary(&self, reason: CallEndReason) -> CallSummary {
+    fn build_call_summary(
+        &self,
+        call_id_hash: Option<Vec<u8>>,
+        reason: CallEndReason,
+    ) -> CallSummary {
         let connect_time = self
             .call_info
             .connect_time
@@ -946,6 +1052,12 @@ impl DirectCallSummaryInner {
             Timestamp(0)
         });
 
+        let call_length_ms: u128 =
+            (Into::<u64>::into(end_time) - Into::<u64>::into(start_time)).into();
+        let relayed_time_ms = self.relayed_time_this_call.as_millis();
+        let relayed = (relayed_time_ms > call_length_ms / MIN_RELAYED_FRACTION)
+            || (relayed_time_ms > 0
+                && call_length_ms <= MIN_CALL_TIME_IGNORE_RELAY_FRACTION.as_millis());
         let mut telemetry = CallTelemetry {
             version: CALL_TELEMETRY_VERSION,
             start_time: start_time.into(),
@@ -956,7 +1068,7 @@ impl DirectCallSummaryInner {
                 stream_summaries: Some(self.call_info.stream_summaries.to_proto()),
                 ice_candidate_switch_count: Some(self.ice_candidate_switch_count),
                 ice_reconnect_count: Some(self.ice_reconnect_count),
-                relayed: Some(self.relayed),
+                relayed: Some(relayed),
                 offer_sent_time: self.offer_sent_time.map(Into::into),
                 answer_sent_time: self.answer_sent_time.map(Into::into),
                 answer_received_time: self.answer_received_time.map(Into::into),
@@ -986,6 +1098,7 @@ impl DirectCallSummaryInner {
             && reason != CallEndReason::RemoteReCall;
 
         CallSummary {
+            call_id_hash,
             start_time,
             end_time,
             quality_stats,
@@ -1007,9 +1120,24 @@ impl DirectCallSummaryInner {
             ConnectionObserverEvent::IceNetworkRouteChanged(route) => {
                 self.call_info.on_event(Event::IceNetworkRouteChanged);
                 self.ice_candidate_switch_count += 1;
-                if !self.relayed && (route.local_relayed || route.remote_relayed) {
-                    self.relayed = true;
+                let now = Instant::now();
+
+                let relayed_now = route.local_relayed || route.remote_relayed;
+                if !relayed_now && self.relayed {
+                    // Switching off relay; add time elapsed
+                    if let Some(last) = self.last_relay_start_time {
+                        self.relayed_time_this_call += now.duration_since(last);
+                    } else {
+                        error!("Expected to have a last_relay_start_time but was None");
+                    }
                 }
+                // Update the start time if we're newly switching to relay OR we are on relay
+                // and haven't set it before (e.g., we started the call on relay).
+                if relayed_now && (!self.relayed || self.last_relay_start_time.is_none()) {
+                    self.last_relay_start_time = Some(now);
+                }
+
+                self.relayed = relayed_now;
                 if !self.call_info.cellular && route.local_adapter_type.is_cellular() {
                     self.call_info.cellular = true;
                 }
@@ -1245,6 +1373,7 @@ impl GroupCallSummaryInner {
             && self.remote_device_count_max > 0;
 
         CallSummary {
+            call_id_hash: None,
             start_time,
             end_time,
             quality_stats,
@@ -1422,8 +1551,18 @@ mod test {
                 }),
                 freeze_count: None,
                 video_codec: None,
-                codec_implementation: None,
                 ssrc: Some(v),
+                codec_implementation: None,
+                audio_concealment_pct: Some(protobuf::call_summary::DistributionSummary {
+                    mean: Some(100.0),
+                    std_dev: Some(0.0),
+                    min_val: Some(100.0),
+                    max_val: Some(100.0),
+                    sample_count: Some(50000),
+                }),
+                audio_redundant_packets: None,
+                audio_jitter_buffer_flushes: None,
+                audio_relative_arrival_delay: None,
             })
             .collect::<Vec<protobuf::call_summary::StreamSummary>>()
     }

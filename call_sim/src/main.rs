@@ -60,6 +60,11 @@ struct Args {
     #[arg(long, default_value = "call_sim/media")]
     media_dir: String,
 
+    /// If set, specifies the directory where misc data can be found, relative to the
+    /// root directory. Otherwise the `call_sim/data` directory will be assumed.
+    #[arg(long, default_value = "call_sim/data")]
+    data_dir: String,
+
     /// Builds all dependent docker images.
     #[arg(short, long)]
     build: bool,
@@ -132,7 +137,7 @@ async fn run_minimal_example(test: &mut Test) -> Result<()> {
 
 /// This is a test set to test the "normal phrasing" audio (and video) over various network
 /// profiles. This sets packet time to 60ms to align with our production configuration.
-async fn run_baseline(test: &mut Test, with_video: bool) -> Result<()> {
+async fn run_baseline(test: &mut Test, with_video: bool, with_dred: bool) -> Result<()> {
     let video = if with_video {
         VideoConfig {
             input_name: Some("ConferenceMotion_50fps@1280x720".to_string()),
@@ -144,10 +149,11 @@ async fn run_baseline(test: &mut Test, with_video: bool) -> Result<()> {
 
     test.run(
         GroupConfig {
-            group_name: if !with_video {
-                "baseline".to_string()
-            } else {
-                "baseline_with_video".to_string()
+            group_name: match (with_video, with_dred) {
+                (false, false) => "baseline".to_string(),
+                (true, false) => "baseline_with_video".to_string(),
+                (false, true) => "baseline_with_dred".to_string(),
+                (true, true) => "baseline_with_video_and_dred".to_string(),
             },
             // Show all the different measurements in the summary columns. Hide video.
             summary_report_columns: SummaryReportColumns {
@@ -156,6 +162,9 @@ async fn run_baseline(test: &mut Test, with_video: bool) -> Result<()> {
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: with_video,
+                show_send_stats: !with_dred,
+                show_dred_stats: with_dred,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -168,6 +177,13 @@ async fn run_baseline(test: &mut Test, with_video: bool) -> Result<()> {
                     // We don't look at analysis from client_a's point of view, so there
                     // is no need to generate anything for it.
                     generate_spectrogram: false,
+                    enable_fec: !with_dred,
+                    dred_duration: if with_dred { 100 } else { 0 },
+                    dnn_weights_path: if with_dred {
+                        "/data/deep_plc-dred-weights.bin".to_string()
+                    } else {
+                        "".to_string()
+                    },
                     ..Default::default()
                 },
                 video: video.clone(),
@@ -182,6 +198,13 @@ async fn run_baseline(test: &mut Test, with_video: bool) -> Result<()> {
                     visqol_audio_analysis: true,
                     pesq_speech_analysis: true,
                     plc_speech_analysis: true,
+                    enable_fec: !with_dred,
+                    dred_duration: if with_dred { 100 } else { 0 },
+                    dnn_weights_path: if with_dred {
+                        "/data/deep_plc-dred-weights.bin".to_string()
+                    } else {
+                        "".to_string()
+                    },
                     ..Default::default()
                 },
                 video,
@@ -214,7 +237,7 @@ async fn run_baseline(test: &mut Test, with_video: bool) -> Result<()> {
 }
 
 /// Test 60ms ptime over a range of loss using various bursty loss profiles.
-async fn run_bursty_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
+async fn run_bursty_loss_test(test: &mut Test, with_video: bool, with_dred: bool) -> Result<()> {
     let video = if with_video {
         VideoConfig {
             input_name: Some("ConferenceMotion_50fps@1280x720".to_string()),
@@ -226,10 +249,11 @@ async fn run_bursty_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
 
     test.run(
         GroupConfig {
-            group_name: if !with_video {
-                "bursty_loss_test".to_string()
-            } else {
-                "bursty_loss_test_with_video".to_string()
+            group_name: match (with_video, with_dred) {
+                (false, false) => "bursty_loss_test".to_string(),
+                (true, false) => "bursty_loss_test_with_video".to_string(),
+                (false, true) => "bursty_loss_test_with_dred".to_string(),
+                (true, true) => "bursty_loss_test_with_video_and_dred".to_string(),
             },
             // Show all the different measurements in the summary columns. Hide video.
             summary_report_columns: SummaryReportColumns {
@@ -238,6 +262,9 @@ async fn run_bursty_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: with_video,
+                show_send_stats: !with_dred,
+                show_dred_stats: with_dred,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -250,6 +277,13 @@ async fn run_bursty_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
                     // We don't look at analysis from client_a's point of view, so there
                     // is no need to generate anything for it.
                     generate_spectrogram: false,
+                    enable_fec: !with_dred,
+                    dred_duration: if with_dred { 100 } else { 0 },
+                    dnn_weights_path: if with_dred {
+                        "/data/deep_plc-dred-weights.bin".to_string()
+                    } else {
+                        "".to_string()
+                    },
                     ..Default::default()
                 },
                 video: video.clone(),
@@ -264,6 +298,13 @@ async fn run_bursty_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
                     visqol_audio_analysis: true,
                     pesq_speech_analysis: true,
                     plc_speech_analysis: true,
+                    enable_fec: !with_dred,
+                    dred_duration: if with_dred { 100 } else { 0 },
+                    dnn_weights_path: if with_dred {
+                        "/data/deep_plc-dred-weights.bin".to_string()
+                    } else {
+                        "".to_string()
+                    },
                     ..Default::default()
                 },
                 video,
@@ -303,7 +344,11 @@ async fn run_bursty_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
 /// Test 20ms and 60ms ptime over a range of deterministic loss, with and without dtx.
 /// Note that deterministic loss is better than the SimpleLoss network profile, but
 /// it is still not completely reliable.
-async fn run_deterministic_loss_test(test: &mut Test, with_video: bool) -> Result<()> {
+async fn run_deterministic_loss_test(
+    test: &mut Test,
+    with_video: bool,
+    with_dred: bool,
+) -> Result<()> {
     let video = if with_video {
         VideoConfig {
             input_name: Some("ConferenceMotion_50fps@1280x720".to_string()),
@@ -327,6 +372,13 @@ async fn run_deterministic_loss_test(test: &mut Test, with_video: bool) -> Resul
                         initial_packet_size_ms,
                         enable_dtx,
                         generate_spectrogram: false,
+                        enable_fec: !with_dred,
+                        dred_duration: if with_dred { 100 } else { 0 },
+                        dnn_weights_path: if with_dred {
+                            "/data/deep_plc-dred-weights.bin".to_string()
+                        } else {
+                            "".to_string()
+                        },
                         ..Default::default()
                     },
                     video: video.clone(),
@@ -342,6 +394,13 @@ async fn run_deterministic_loss_test(test: &mut Test, with_video: bool) -> Resul
                         visqol_audio_analysis: true,
                         pesq_speech_analysis: true,
                         plc_speech_analysis: true,
+                        enable_fec: !with_dred,
+                        dred_duration: if with_dred { 100 } else { 0 },
+                        dnn_weights_path: if with_dred {
+                            "/data/deep_plc-dred-weights.bin".to_string()
+                        } else {
+                            "".to_string()
+                        },
                         ..Default::default()
                     },
                     video: video.clone(),
@@ -356,10 +415,11 @@ async fn run_deterministic_loss_test(test: &mut Test, with_video: bool) -> Resul
 
     test.run(
         GroupConfig {
-            group_name: if !with_video {
-                "deterministic_loss_test".to_string()
-            } else {
-                "deterministic_loss_test_with_video".to_string()
+            group_name: match (with_video, with_dred) {
+                (false, false) => "deterministic_loss_test".to_string(),
+                (true, false) => "deterministic_loss_test_with_video".to_string(),
+                (false, true) => "deterministic_loss_test_with_dred".to_string(),
+                (true, true) => "deterministic_loss_test_with_video_and_dred".to_string(),
             },
             summary_report_columns: SummaryReportColumns {
                 show_visqol_mos_speech: true,
@@ -367,6 +427,9 @@ async fn run_deterministic_loss_test(test: &mut Test, with_video: bool) -> Resul
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: with_video,
+                show_send_stats: !with_dred,
+                show_dred_stats: with_dred,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -738,7 +801,7 @@ async fn run_video_compare_vp8_vs_vp9(test: &mut Test, bitrate_values: &Vec<u16>
 ///
 /// Uses a 12-second reference audio file so that the resulting 240-second session recording
 /// can be chopped evenly and MOS calculated for each 12-second audio segment.
-async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
+async fn run_changing_bandwidth_audio_test(test: &mut Test, with_dred: bool) -> Result<()> {
     let test_cases = [20, 60, 120].map(|initial_packet_size_ms| TestCaseConfig {
         test_case_name: format!("ptime_{initial_packet_size_ms}"),
         length_seconds: 240,
@@ -747,6 +810,13 @@ async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
                 input_name: "normal_12s".to_string(),
                 initial_packet_size_ms,
                 generate_spectrogram: false,
+                enable_fec: !with_dred,
+                dred_duration: if with_dred { 100 } else { 0 },
+                dnn_weights_path: if with_dred {
+                    "/data/deep_plc-dred-weights.bin".to_string()
+                } else {
+                    "".to_string()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -761,6 +831,13 @@ async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
                 visqol_audio_analysis: true,
                 pesq_speech_analysis: true,
                 plc_speech_analysis: true,
+                enable_fec: !with_dred,
+                dred_duration: if with_dred { 100 } else { 0 },
+                dnn_weights_path: if with_dred {
+                    "/data/deep_plc-dred-weights.bin".to_string()
+                } else {
+                    "".to_string()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -770,13 +847,19 @@ async fn run_changing_bandwidth_audio_test(test: &mut Test) -> Result<()> {
 
     test.run(
         GroupConfig {
-            group_name: "changing_bandwidth_audio_test".to_string(),
+            group_name: match with_dred {
+                false => "changing_bandwidth_audio_test".to_string(),
+                true => "changing_bandwidth_audio_test_with_dred".to_string(),
+            },
             summary_report_columns: SummaryReportColumns {
                 show_visqol_mos_speech: true,
                 show_visqol_mos_audio: true,
                 show_pesq_mos: true,
                 show_plc_mos: true,
                 show_video: false,
+                show_send_stats: !with_dred,
+                show_dred_stats: with_dred,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -829,6 +912,7 @@ async fn run_perf_test(test: &mut Test) -> Result<()> {
                 show_pesq_mos: false,
                 show_plc_mos: false,
                 show_video: false,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -919,6 +1003,163 @@ async fn run_perf_test(test: &mut Test) -> Result<()> {
     Ok(())
 }
 
+/// Test the different PLC modes: NetEq, Opus, Opus Deep.
+async fn run_plc_tests(test: &mut Test) -> Result<()> {
+    let test_cases = [None, Some(0), Some(5)].map(|decoder_complexity| TestCaseConfig {
+        test_case_name: format!(
+            "plc_{}",
+            decoder_complexity.map_or("None".to_string(), |c| c.to_string())
+        ),
+        client_a_config: CallConfig {
+            audio: AudioConfig {
+                input_name: "normal_phrasing".to_string(),
+                generate_spectrogram: false,
+                decoder_complexity,
+                // Only used for Deep PLC (decoder complexity 5) tests.
+                dnn_weights_path: "/data/deep_plc-dred-weights.bin".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        client_b_config: CallConfig {
+            audio: AudioConfig {
+                input_name: "normal_phrasing".to_string(),
+                visqol_speech_analysis: true,
+                visqol_audio_analysis: true,
+                pesq_speech_analysis: true,
+                plc_speech_analysis: true,
+                decoder_complexity,
+                // Only used for Deep PLC (decoder complexity 5) tests.
+                dnn_weights_path: "/data/deep_plc-dred-weights.bin".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        iterations: 1,
+        ..Default::default()
+    });
+
+    test.run(
+        GroupConfig {
+            group_name: "plc_tests".to_string(),
+            summary_report_columns: SummaryReportColumns {
+                show_visqol_mos_speech: true,
+                show_visqol_mos_audio: true,
+                show_pesq_mos: true,
+                show_plc_mos: true,
+                show_video: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        test_cases.into(),
+        vec![
+            NetworkProfile::None,
+            NetworkProfile::SimpleLoss(10),
+            NetworkProfile::SimpleLoss(20),
+            NetworkProfile::SimpleLoss(30),
+            NetworkProfile::SimpleLoss(40),
+            NetworkProfile::SimpleLoss(50),
+        ],
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn run_dred_tests(test: &mut Test) -> Result<()> {
+    let configs = [
+        (60, true, 0, Some(0)),    // Before DRED with FEC and Opus PLC
+        (60, false, 6, Some(5)),   // DRED 60ms
+        (60, false, 12, Some(5)),  // DRED 120ms
+        (60, false, 25, Some(5)),  // DRED 250ms
+        (60, false, 50, Some(5)),  // DRED 500ms
+        (60, false, 100, Some(5)), // DRED 1s
+    ];
+
+    let losses = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50];
+
+    let test_cases: Vec<_> = configs
+        .iter()
+        .flat_map(|&(initial_packet_size_ms, enable_fec, dred_duration, decoder_complexity)| {
+            losses.iter().map(move |&loss| TestCaseConfig {
+                test_case_name: format!(
+                    "ptime_{initial_packet_size_ms}-fec_{enable_fec}-dred_duration_{dred_duration}-plc_{}-loss_{loss}",
+                    decoder_complexity.map_or("None".to_string(), |c| c.to_string())
+                ),
+                length_seconds: 30,
+                client_a_config: CallConfig {
+                    audio: AudioConfig {
+                        input_name: "normal_phrasing".to_string(),
+                        generate_spectrogram: false,
+                        visqol_speech_analysis: false,
+                        visqol_audio_analysis: false,
+                        pesq_speech_analysis: false,
+                        plc_speech_analysis: false,
+                        complexity: 9,
+                        initial_packet_size_ms,
+                        enable_fec,
+                        dred_duration,
+                        decoder_complexity,
+                        // Force DRED to be encoded with the expected loss rate.
+                        min_packet_loss_percent: if dred_duration > 0 { loss } else { 0 },
+                        // Only used for Deep PLC (decoder complexity 5) or DRED tests.
+                        dnn_weights_path: "/data/deep_plc-dred-weights.bin".to_string(),
+                        ..Default::default()
+                    },
+                    profile: DeterministicLoss(loss),
+                    ..Default::default()
+                },
+                client_b_config: CallConfig {
+                    audio: AudioConfig {
+                        input_name: "normal_phrasing".to_string(),
+                        visqol_speech_analysis: true,
+                        visqol_audio_analysis: true,
+                        pesq_speech_analysis: true,
+                        plc_speech_analysis: true,
+                        complexity: 9,
+                        initial_packet_size_ms,
+                        enable_fec,
+                        dred_duration,
+                        decoder_complexity,
+                        // Force DRED to be encoded with the expected loss rate.
+                        min_packet_loss_percent: if dred_duration > 0 { loss } else { 0 },
+                        // Only used for Deep PLC (decoder complexity 5) or DRED tests.
+                        dnn_weights_path: "/data/deep_plc-dred-weights.bin".to_string(),
+                        ..Default::default()
+                    },
+                    profile: DeterministicLoss(loss),
+                    ..Default::default()
+                },
+                iterations: 3,
+                ..Default::default()
+            })
+        })
+        .collect();
+
+    test.run(
+        GroupConfig {
+            group_name: "dred_tests".to_string(),
+            summary_report_columns: SummaryReportColumns {
+                show_visqol_mos_speech: true,
+                show_visqol_mos_audio: true,
+                show_pesq_mos: true,
+                show_plc_mos: true,
+                show_video: false,
+                show_send_stats: false,
+                show_dred_stats: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        test_cases,
+        vec![NetworkProfile::None],
+    )
+    .await?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -957,7 +1198,7 @@ async fn main() -> Result<()> {
     let mut test_sets = args.test_sets;
     if test_sets.is_empty() {
         // For quick testing, change this to the name of your test case.
-        test_sets.push("baseline".to_string());
+        test_sets.push("baseline_with_dred".to_string());
     }
 
     let direct_call_config = CallTypeConfig::Direct;
@@ -981,6 +1222,7 @@ async fn main() -> Result<()> {
             &root_path,
             &args.output_dir,
             &args.media_dir,
+            &args.data_dir,
             &test_set_name,
             client_profiles.clone(),
             call_type_config,
@@ -988,20 +1230,34 @@ async fn main() -> Result<()> {
         )?;
         match test_set_name.as_str() {
             "minimal_example" => run_minimal_example(test).await?,
-            "baseline" => run_baseline(test, false).await?,
-            "baseline_with_video" => run_baseline(test, true).await?,
-            "bursty_loss_test" => run_bursty_loss_test(test, false).await?,
-            "bursty_loss_test_with_video" => run_bursty_loss_test(test, true).await?,
-            "deterministic_loss_test" => run_deterministic_loss_test(test, false).await?,
-            "deterministic_loss_test_with_video" => run_deterministic_loss_test(test, true).await?,
+            "baseline" => run_baseline(test, false, false).await?,
+            "baseline_with_dred" => run_baseline(test, false, true).await?,
+            "baseline_with_video" => run_baseline(test, true, false).await?,
+            "bursty_loss_test" => run_bursty_loss_test(test, false, false).await?,
+            "bursty_loss_test_with_dred" => run_bursty_loss_test(test, false, true).await?,
+            "bursty_loss_test_with_video" => run_bursty_loss_test(test, true, false).await?,
+            "deterministic_loss_test" => run_deterministic_loss_test(test, false, false).await?,
+            "deterministic_loss_test_with_dred" => {
+                run_deterministic_loss_test(test, false, true).await?
+            }
+            "deterministic_loss_test_with_video" => {
+                run_deterministic_loss_test(test, true, false).await?
+            }
             "relay_tests" => run_relay_tests(test).await?,
             "turn_long_tests" => run_turn_long_tests(test).await?,
             "video_send_over_bandwidth" => run_video_send_over_bandwidth(test).await?,
             "video_compare_vp8_vs_vp9" => {
                 run_video_compare_vp8_vs_vp9(test, &vec![1000, 2000]).await?
             }
-            "changing_bandwidth_audio_test" => run_changing_bandwidth_audio_test(test).await?,
+            "changing_bandwidth_audio_test" => {
+                run_changing_bandwidth_audio_test(test, false).await?
+            }
+            "changing_bandwidth_audio_test_with_dred" => {
+                run_changing_bandwidth_audio_test(test, true).await?
+            }
             "profiling_suite" => run_perf_test(test).await?,
+            "plc_tests" => run_plc_tests(test).await?,
+            "dred_tests" => run_dred_tests(test).await?,
             _ => panic!("unknown test set \"{test_set_name}\""),
         }
         test.report().await?;

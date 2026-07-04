@@ -25,7 +25,11 @@ pub use crate::webrtc::ffi::stats_observer::RffiStatsObserver;
 use crate::webrtc::sim::stats_observer as stats;
 #[cfg(feature = "sim")]
 pub use crate::webrtc::sim::stats_observer::RffiStatsObserver;
-use crate::{common::CallId, webrtc};
+use crate::{
+    common::CallId,
+    webrtc,
+    webrtc::peer_connection_observer::{NetworkRoute, TransportProtocol},
+};
 
 /// How often to clean up old stats.
 const CLEAN_UP_STATS_TICKS: u32 = 60;
@@ -92,6 +96,20 @@ where
 macro_rules! delta {
     ($lhs:tt, $rhs:tt, $field:tt) => {
         delta_fn($lhs, $rhs, |stats| stats.$field)
+    };
+}
+
+fn signed_delta_fn<T, F, V>(lhs: &T, rhs: &T, extract: F) -> V
+where
+    F: Fn(&T) -> V,
+    V: Sub<Output = V>,
+{
+    extract(lhs) - extract(rhs)
+}
+
+macro_rules! signed_delta {
+    ($lhs:tt, $rhs:tt, $field:tt) => {
+        signed_delta_fn($lhs, $rhs, |stats| stats.$field)
     };
 }
 
@@ -275,7 +293,12 @@ pub struct AudioReceiverStatsSnapshot {
     pub bitrate: f32,
     pub jitter: f64,
     pub jitter_buffer_delay: f64,
+    pub jitter_buffer_target_delay: f64,
+    pub jitter_buffer_flushes: u64,
     pub audio_energy: f64,
+    pub concealed_samples_pct: f32,
+    pub fec_packets_received: u64,
+    pub relative_arrival_delay_per_packet: f64,
 }
 
 impl Display for AudioReceiverStatsSnapshot {
@@ -287,18 +310,28 @@ impl Display for AudioReceiverStatsSnapshot {
             bitrate,
             jitter,
             jitter_buffer_delay,
+            jitter_buffer_target_delay,
+            jitter_buffer_flushes,
             audio_energy,
+            concealed_samples_pct,
+            fec_packets_received,
+            relative_arrival_delay_per_packet,
         } = self;
         write!(
             f,
             "{},\
             {ssrc},\
             {packets_per_second:.1},\
-            {packets_lost_pct:.1}%,\
+            {packets_lost_pct:.2}%,\
             {bitrate:.1}bps,\
             {jitter:.0}ms,\
             {audio_energy:.3},\
-            {jitter_buffer_delay:.0}ms",
+            {jitter_buffer_delay:.0}ms,\
+            {jitter_buffer_target_delay:.0}ms,\
+            {jitter_buffer_flushes},\
+            {concealed_samples_pct:.2}%,\
+            {fec_packets_received},\
+            {relative_arrival_delay_per_packet:.0}ms",
             Self::LOG_MARKER
         )
     }
@@ -313,33 +346,64 @@ impl AudioReceiverStatsSnapshot {
         bitrate,\
         jitter,\
         audio_energy,\
-        jitter_buffer_delay";
+        jitter_buffer_delay,\
+        jitter_buffer_target_delay,\
+        jitter_buffer_flushes,\
+        concealed_samples_pct,\
+        fec_packets_received,\
+        relative_arrival_delay_per_packet";
 
     fn derive(
         curr_stats: &AudioReceiverStatistics,
         prev_stats: &AudioReceiverStatistics,
         seconds_elapsed: f32,
+        prev_jitter_buffer_delay: f64,
+        prev_jitter_buffer_target_delay: f64,
     ) -> Self {
-        let packets_lost_delta = delta!(curr_stats, prev_stats, packets_lost);
+        let signed_packets_lost_delta = signed_delta!(curr_stats, prev_stats, packets_lost);
         let packets_received_delta = delta!(curr_stats, prev_stats, packets_received);
         let jitter_buffer_delay_delta = delta!(curr_stats, prev_stats, jitter_buffer_delay);
+        let jitter_buffer_target_delay_delta =
+            delta!(curr_stats, prev_stats, jitter_buffer_target_delay);
         let jitter_buffer_emitted_delta =
             delta!(curr_stats, prev_stats, jitter_buffer_emitted_count);
         let bytes_received_delta = delta!(curr_stats, prev_stats, bytes_received);
         let audio_energy_delta = delta!(curr_stats, prev_stats, total_audio_energy);
+        let total_samples_received_delta = delta!(curr_stats, prev_stats, total_samples_received);
+        let concealed_samples_delta = delta!(curr_stats, prev_stats, concealed_samples);
+        let silent_concealed_samples_delta =
+            delta!(curr_stats, prev_stats, silent_concealed_samples);
+        let fec_packets_received_delta = delta!(curr_stats, prev_stats, fec_packets_received);
+        let jitter_buffer_flushes_delta = delta!(curr_stats, prev_stats, jitter_buffer_flushes);
+        let packets_discarded_delta = delta!(curr_stats, prev_stats, packets_discarded);
+        let relative_packet_arrival_delay_delta =
+            delta!(curr_stats, prev_stats, relative_packet_arrival_delay);
 
         let packets_per_second =
             compute_packets_per_second(packets_received_delta, seconds_elapsed);
-        let packets_lost = packets_lost_delta.max(0) as u32;
-        let packets_lost_pct =
-            compute_packets_lost_pct(packets_lost, packets_received_delta + packets_lost);
+        let packets_lost_pct = {
+            let numerator = signed_packets_lost_delta + packets_discarded_delta as i32;
+            let denominator = packets_received_delta as i32 + signed_packets_lost_delta;
+            if denominator > 0 {
+                ((numerator as f32 * 100.0) / denominator as f32).max(0.0)
+            } else {
+                0.0
+            }
+        };
         let bitrate = compute_bitrate(bytes_received_delta, seconds_elapsed);
 
         let jitter = 1000.0 * curr_stats.jitter;
-        let jitter_buffer_delay = 1000.0
-            * jitter_buffer_delay_delta
-                .naive_checked_div(jitter_buffer_emitted_delta as f64)
-                .unwrap_or(0.0);
+
+        // For jitter buffer delay stats, use the previous value if there was no change during
+        // the measurement period. This avoids showing zero values when charting.
+        let jitter_buffer_delay = jitter_buffer_delay_delta
+            .naive_checked_div(jitter_buffer_emitted_delta as f64)
+            .map(|ratio| ratio * 1000.0)
+            .unwrap_or(prev_jitter_buffer_delay);
+        let jitter_buffer_target_delay = jitter_buffer_target_delay_delta
+            .naive_checked_div(jitter_buffer_emitted_delta as f64)
+            .map(|ratio| ratio * 1000.0)
+            .unwrap_or(prev_jitter_buffer_target_delay);
 
         Self {
             ssrc: curr_stats.ssrc,
@@ -348,7 +412,19 @@ impl AudioReceiverStatsSnapshot {
             bitrate,
             jitter,
             jitter_buffer_delay,
+            jitter_buffer_target_delay,
+            jitter_buffer_flushes: jitter_buffer_flushes_delta,
             audio_energy: audio_energy_delta,
+            concealed_samples_pct: (concealed_samples_delta
+                .saturating_sub(silent_concealed_samples_delta)
+                as f32
+                * 100.0)
+                .naive_checked_div(total_samples_received_delta as f32)
+                .unwrap_or(0.0),
+            fec_packets_received: fec_packets_received_delta,
+            relative_arrival_delay_per_packet: (1000.0 * relative_packet_arrival_delay_delta)
+                .naive_checked_div(packets_received_delta as f64)
+                .unwrap_or(0.0),
         }
     }
 }
@@ -681,6 +757,7 @@ pub struct ConnectionStatsSnapshot {
     pub responses_received: u64,
     pub requests_received: u64,
     pub responses_sent: u64,
+    pub network_route: Option<NetworkRoute>,
 }
 
 impl ConnectionStatsSnapshot {
@@ -694,9 +771,17 @@ impl ConnectionStatsSnapshot {
         requests_sent,\
         responses_received,\
         requests_received,\
-        responses_sent";
+        responses_sent,\
+        local_relay,\
+        local_protocol,\
+        remote_relay";
 
-    fn derive(call_id: CallId, timestamp_us: i64, stats: &ConnectionStatistics) -> Self {
+    fn derive(
+        call_id: CallId,
+        timestamp_us: i64,
+        stats: &ConnectionStatistics,
+        network_route: Option<NetworkRoute>,
+    ) -> Self {
         Self {
             call_id,
             timestamp_us,
@@ -706,6 +791,7 @@ impl ConnectionStatsSnapshot {
             responses_received: stats.responses_received,
             requests_received: stats.requests_received,
             responses_sent: stats.responses_sent,
+            network_route,
         }
     }
 }
@@ -721,7 +807,28 @@ impl Display for ConnectionStatsSnapshot {
             responses_received,
             requests_received,
             responses_sent,
+            network_route,
         } = self;
+        let local_relay = network_route.map(|route| {
+            if route.local_relayed {
+                "relay"
+            } else {
+                "direct"
+            }
+        });
+        let local_protocol = network_route.map(|route| match route.local_relay_protocol {
+            TransportProtocol::Udp => "Udp",
+            TransportProtocol::Tcp => "Tcp",
+            TransportProtocol::Tls => "Tls",
+            TransportProtocol::Unknown => "Unknown",
+        });
+        let remote_relay = network_route.map(|route| {
+            if route.remote_relayed {
+                "relay"
+            } else {
+                "direct"
+            }
+        });
         write!(
             f,
             "{},\
@@ -732,7 +839,10 @@ impl Display for ConnectionStatsSnapshot {
             {requests_sent},\
             {responses_received},\
             {requests_received},\
-            {responses_sent}",
+            {responses_sent},\
+            {local_relay:?},\
+            {local_protocol:?},\
+            {remote_relay:?}",
             Self::LOG_MARKER
         )
     }
@@ -781,7 +891,7 @@ struct Stats {
     // be okay.
     audio_send: HashMap<u32, AudioSenderStatistics>,
     video_send: HashMap<u32, VideoSenderStatistics>,
-    audio_recv: HashMap<u32, (Instant, AudioReceiverStatistics)>,
+    audio_recv: HashMap<u32, (Instant, AudioReceiverStatistics, f64, f64)>,
     video_recv: HashMap<u32, (Instant, VideoReceiverStatistics)>,
     connections: HashMap<String, (Instant, ConnectionStatistics)>,
     report_json: Mutex<String>,
@@ -797,6 +907,8 @@ pub struct StatsObserver {
     stats_snapshot_consumer: Box<dyn StatsSnapshotConsumer>,
     #[cfg(not(target_os = "android"))]
     system_stats: sysinfo::System,
+    to_report_network_route: Option<NetworkRoute>,
+    next_network_route: Option<NetworkRoute>,
 }
 
 impl StatsObserver {
@@ -833,7 +945,13 @@ impl StatsObserver {
             stats_snapshot_consumer,
             #[cfg(not(target_os = "android"))]
             system_stats,
+            to_report_network_route: None,
+            next_network_route: None,
         }
+    }
+
+    pub fn set_network_route(&mut self, route: NetworkRoute) {
+        self.next_network_route = Some(route);
     }
 
     /// Invoked when statistics are received via the stats observer callback.
@@ -865,11 +983,18 @@ impl StatsObserver {
 
         // Connection
 
+        if self.to_report_network_route.is_none() {
+            self.to_report_network_route = self.next_network_route;
+        }
+
         let connection_stats_snapshot = ConnectionStatsSnapshot::derive(
             self.call_id,
             media_statistics.timestamp_us,
             &media_statistics.nominated_connection_statistics,
+            self.to_report_network_route,
         );
+        self.to_report_network_route = self.next_network_route;
+
         info!("{connection_stats_snapshot}");
         self.stats_snapshot_consumer
             .on_stats_snapshot_ready(&connection_stats_snapshot.into());
@@ -910,17 +1035,21 @@ impl StatsObserver {
         // Audio receivers
 
         for audio_receiver in media_statistics.get_audio_receiver_statistics() {
-            let (updated_at, prev_audio_recv_stats) = self
+            let (updated_at, prev_audio_recv_stats, prev_jb_delay, prev_jb_target_delay) = self
                 .stats
                 .audio_recv
                 .entry(audio_receiver.ssrc)
-                .or_insert_with(|| (Instant::now(), Default::default()));
+                .or_insert_with(|| (Instant::now(), Default::default(), 0.0, 0.0));
             let audio_receiver_stats_snapshot = AudioReceiverStatsSnapshot::derive(
                 audio_receiver,
                 prev_audio_recv_stats,
                 seconds_elapsed,
+                *prev_jb_delay,
+                *prev_jb_target_delay,
             );
             info!("{audio_receiver_stats_snapshot}");
+            *prev_jb_delay = audio_receiver_stats_snapshot.jitter_buffer_delay;
+            *prev_jb_target_delay = audio_receiver_stats_snapshot.jitter_buffer_target_delay;
             self.stats_snapshot_consumer
                 .on_stats_snapshot_ready(&audio_receiver_stats_snapshot.into());
             *updated_at = Instant::now();
@@ -975,7 +1104,7 @@ impl StatsObserver {
     fn remove_old_stats(&mut self) {
         self.stats
             .audio_recv
-            .retain(|_, (ts, _)| ts.elapsed() < MAX_STATS_AGE);
+            .retain(|_, (ts, _, _, _)| ts.elapsed() < MAX_STATS_AGE);
 
         self.stats
             .video_recv
@@ -1113,9 +1242,16 @@ pub struct AudioReceiverStatistics {
     pub jitter: f64,
     pub total_audio_energy: f64,
     pub jitter_buffer_delay: f64,
+    pub jitter_buffer_target_delay: f64,
     pub jitter_buffer_emitted_count: u64,
     pub jitter_buffer_flushes: u64,
     pub estimated_playout_timestamp: f64,
+    pub total_samples_received: u64,
+    pub concealed_samples: u64,
+    pub silent_concealed_samples: u64,
+    pub fec_packets_received: u64,
+    pub packets_discarded: u64,
+    pub relative_packet_arrival_delay: f64,
 }
 
 #[repr(C)]
