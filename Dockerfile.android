@@ -6,6 +6,7 @@ FROM docker.io/eclipse-temurin:17.0.19_10-jdk-noble@sha256:6135b2dcc36fc4df1e534
 RUN apt-get install -y --no-install-recommends --update \
       fd-find \
       git \
+      make \
       ripgrep \
       rustup \
       unzip \
@@ -97,41 +98,6 @@ COPY . /ringrtc/
 WORKDIR /ringrtc
 RUN git clean -ffdx -e "out/" -e "src/webrtc*"
 
-# Build entrypoint
-RUN cat <<'EOF' > build.sh && chmod +x build.sh
-#!/bin/sh
-set -eu
-usage() {
-  echo "Usage: build.sh [assemble|test|publish]... [-- args...]"
-}
-build_aar() {
-  ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "$@"
-}
-cmds=
-while [ $# -gt 0 ]; do
-  case "$1" in
-    assemble|test|publish) cmds="${cmds:+$cmds }$1" ;;
-    -h|--help) usage; exit 0 ;;
-    --) shift; break ;;
-    *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
-  esac
-  shift
-done
-[ -n "$cmds" ] || { usage; exit 0; }
-for c in $cmds; do
-  case "$c" in
-    assemble)
-      build_aar --install-local "$@"
-      ;;
-    test)
-      (cd src/rust && ./scripts/run-tests)
-      ;;
-    publish)
-      build_aar --publish "$@"
-      ;;
-  esac
-done
-EOF
-
-ENTRYPOINT ["/ringrtc/build.sh"]
+# Use Make as the builder entrypoint
+ENTRYPOINT ["make"]
 CMD ["help"]
