@@ -102,7 +102,7 @@ RUN cat <<'EOF' > build.sh && chmod +x build.sh
 #!/bin/sh
 set -eu
 usage() {
-  echo "Usage: build.sh [test|install|publish]... [-- args...]"
+  echo "Usage: build.sh [assemble|test|publish]... [-- args...]"
 }
 build_aar() {
   ./bin/build-aar --arch arm arm64 x64 --jobs "$(nproc)" "$@"
@@ -110,7 +110,7 @@ build_aar() {
 cmds=
 while [ $# -gt 0 ]; do
   case "$1" in
-    test|install|publish) cmds="${cmds:+$cmds }$1" ;;
+    assemble|test|publish) cmds="${cmds:+$cmds }$1" ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
@@ -120,11 +120,11 @@ done
 [ -n "$cmds" ] || { usage; exit 0; }
 for c in $cmds; do
   case "$c" in
+    assemble)
+      build_aar --install-local "$@"
+      ;;
     test)
       (cd src/rust && ./scripts/run-tests)
-      ;;
-    install)
-      build_aar --install-local "$@"
       ;;
     publish)
       build_aar --publish "$@"
