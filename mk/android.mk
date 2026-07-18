@@ -14,5 +14,5 @@ BUILD_AAR := ./bin/build-aar
 
 do_assemble = $(strip $(BUILD_AAR) --arch $(ARCHS) --jobs $(JOBS) --install-local $(BUILD_AAR_ARGS))
 do_test     = cd src/rust && ./scripts/run-tests
-do_publish  = $(strip $(BUILD_AAR) --arch $(ARCHS) --jobs $(JOBS) --publish $(BUILD_AAR_ARGS))
+do_stage    = $(strip $(BUILD_AAR) --arch $(ARCHS) --jobs $(JOBS) --publish $(BUILD_AAR_ARGS))
 do_clean    = $(BUILD_AAR) --clean

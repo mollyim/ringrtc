@@ -22,7 +22,8 @@ FROM base AS builder
 # Stage 2: builder
 # Adds toolchains, project source, and the build entrypoint.
 
-LABEL im.molly.artifacts.m2.path="/root/.m2/repository/"
+LABEL im.molly.artifacts.maven.path="/root/.m2/repository/"
+LABEL im.molly.staging.maven.url="https://maven.cloudsmith.io/mollyim/ringrtc/"
 
 # Install Android SDK
 ARG ANDROID_SDK_DIST="commandlinetools-linux-13114758_latest.zip"

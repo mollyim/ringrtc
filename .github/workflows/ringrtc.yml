@@ -3,9 +3,7 @@ name: Test
 on:
   push: # all target branches
     paths-ignore:
-      - '**/README*.md'
-      - '.github/FUNDING.yml'
-      - '.github/ISSUE_TEMPLATE/**'
+      - '**/*.md'
   pull_request: # all target branches
 
 permissions:
