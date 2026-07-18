@@ -1,10 +1,14 @@
 name: Test
 
 on:
-  push: # all target branches
+  pull_request: # all target branches
+  push:
+    branches:
+      - '**'
     paths-ignore:
       - '**/*.md'
-  pull_request: # all target branches
+    tags-ignore:
+      - '**'
 
 permissions:
   contents: read
