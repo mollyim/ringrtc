@@ -1,4 +1,4 @@
-FROM docker.io/eclipse-temurin:17.0.19_10-jdk-noble@sha256:6135b2dcc36fc4df1e534fc39113722e412799ffdb9ec0ed914ffce366f235c5 AS base
+FROM docker.io/eclipse-temurin:21.0.11_10-jdk-noble@sha256:15ec53e5373fbede42fb2c1ec5b7e3ccbe1b0c9ad232ed67a16ed1b8b47070b6 AS base
 
 # Stage 1: base
 # Minimal environment with only system tools. This stage is stable and reusable across merges.

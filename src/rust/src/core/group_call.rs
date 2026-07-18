@@ -5623,8 +5623,17 @@ mod tests {
             self.waitable.set(());
         }
 
+        /// returns whether the waitable changed within time
         fn wait(&self, timeout: Duration) -> bool {
             self.waitable.wait(timeout).is_some()
+        }
+
+        /// asserts the waitable completes before timeout
+        fn wait_or_throw(&self, timeout: Duration) {
+            assert!(
+                self.wait(timeout),
+                "Expected waitable to complete before timeout"
+            )
         }
     }
 
@@ -6264,7 +6273,7 @@ mod tests {
             self.client.join();
             self.client
                 .set_peek_result(Ok(self.default_peek_info.clone()));
-            assert!(self.observer.joined.wait(Duration::from_secs(5)));
+            self.observer.joined.wait_or_throw(Duration::from_secs(5));
         }
 
         fn set_up_rtp_with_remotes(&self, clients: Vec<TestClient>) {
@@ -6338,7 +6347,7 @@ mod tests {
             self.client.actor.send(move |_state| {
                 cloned.set();
             });
-            event.wait(Duration::from_secs(5));
+            event.wait_or_throw(Duration::from_secs(5));
         }
 
         fn wait_for_client_to_process_and_tick(&self) {
@@ -6349,7 +6358,7 @@ mod tests {
                 .send_delayed(TICK_INTERVAL * 2, move |_state| {
                     cloned.set();
                 });
-            event.wait(Duration::from_secs(5));
+            event.wait_or_throw(Duration::from_secs(5));
         }
 
         fn encrypt_media(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -7278,12 +7287,11 @@ mod tests {
         let value = "hello".to_string();
 
         client1.client.react(value.clone());
-        assert!(
-            client2
-                .observer
-                .reactions_called
-                .wait(Duration::from_secs(5))
-        );
+
+        client2
+            .observer
+            .reactions_called
+            .wait_or_throw(Duration::from_secs(5));
         assert_eq!(1, client2.observer.handle_reactions_invocation_count());
         assert_eq!(1, client2.observer.reactions_count());
         assert_eq!(1, client2.observer.reactions().len());
@@ -7332,7 +7340,10 @@ mod tests {
         client.client.connect();
         client.client.set_peek_result(Ok(PeekInfo::default()));
 
-        assert!(client.observer.peek_changed.wait(Duration::from_secs(5)));
+        client
+            .observer
+            .peek_changed
+            .wait_or_throw(Duration::from_secs(5));
 
         client.client.join();
         client.client.set_peek_result(Ok(PeekInfo {
@@ -7348,12 +7359,10 @@ mod tests {
             call_link_state: None,
         }));
 
-        assert!(
-            client
-                .observer
-                .remote_devices_changed
-                .wait(Duration::from_secs(5))
-        );
+        client
+            .observer
+            .remote_devices_changed
+            .wait_or_throw(Duration::from_secs(5));
 
         assert_eq!(1, client.observer.peek_state().device_count);
     }
@@ -7460,12 +7469,10 @@ mod tests {
         let joiner2 = TestClient::new(vec![2], 2);
 
         peeker.set_pending_clients_and_wait_until_applied(&[&joiner1]);
-        assert!(
-            peeker
-                .observer
-                .peek_changed
-                .wait(Duration::from_millis(200))
-        );
+        peeker
+            .observer
+            .peek_changed
+            .wait_or_throw(Duration::from_millis(200));
 
         peeker.set_pending_clients_and_wait_until_applied(&[&joiner1, &joiner2]);
         assert!(
@@ -7484,12 +7491,10 @@ mod tests {
         );
 
         peeker.set_pending_clients_and_wait_until_applied(&[&joiner1]);
-        assert!(
-            peeker
-                .observer
-                .peek_changed
-                .wait(Duration::from_millis(200))
-        );
+        peeker
+            .observer
+            .peek_changed
+            .wait_or_throw(Duration::from_millis(200));
 
         peeker.disconnect_and_wait_until_ended();
     }
@@ -7514,7 +7519,10 @@ mod tests {
         // And when we join(), but only if it's been a while.
         // since we asked before.
         client1.client.join();
-        client1.observer.joined.wait(Duration::from_secs(5));
+        client1
+            .observer
+            .joined
+            .wait_or_throw(Duration::from_secs(5));
         assert_eq!(1, client1.sfu_client.request_count());
         client1.client.leave();
         std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -8161,7 +8169,10 @@ mod tests {
         );
 
         client1.client.join();
-        client1.observer.joined.wait(Duration::from_secs(5));
+        client1
+            .observer
+            .joined
+            .wait_or_throw(Duration::from_secs(5));
         client1.wait_for_client_to_process();
         let remote_devices = client1.observer.remote_devices();
         assert_eq!(2, remote_devices.len());
@@ -8246,12 +8257,18 @@ mod tests {
         let client1 = TestClient::with_sfu_client(vec![1], 1, sfu_client.clone());
         client1.client.connect();
         client1.client.join();
-        assert!(client1.observer.joined.wait(Duration::from_secs(5)));
+        client1
+            .observer
+            .joined
+            .wait_or_throw(Duration::from_secs(5));
 
         let client2 = TestClient::with_sfu_client(vec![2], 1, sfu_client.clone());
         client2.client.connect();
         client2.client.join();
-        assert!(client2.observer.joined.wait(Duration::from_secs(5)));
+        client2
+            .observer
+            .joined
+            .wait_or_throw(Duration::from_secs(5));
 
         let client3 = TestClient::with_sfu_client(vec![3], 1, sfu_client);
         client3.client.connect();
@@ -9296,7 +9313,7 @@ mod tests {
             client1
                 .observer
                 .endorsement_update_event
-                .wait(Duration::from_secs(5));
+                .wait_or_throw(Duration::from_secs(5));
             let update = client1
                 .observer
                 .endorsement_update
@@ -9321,7 +9338,7 @@ mod tests {
             client1
                 .observer
                 .endorsement_update_event
-                .wait(Duration::from_secs(5));
+                .wait_or_throw(Duration::from_secs(5));
             let update = client1
                 .observer
                 .endorsement_update
@@ -9346,7 +9363,7 @@ mod tests {
             client1
                 .observer
                 .endorsement_update_event
-                .wait(Duration::from_secs(5));
+                .wait_or_throw(Duration::from_secs(5));
             let update = client1
                 .observer
                 .endorsement_update
@@ -9374,7 +9391,7 @@ mod tests {
             client1
                 .observer
                 .endorsement_update_event
-                .wait(Duration::from_secs(5));
+                .wait_or_throw(Duration::from_secs(5));
             let update = client1
                 .observer
                 .endorsement_update
@@ -9405,7 +9422,7 @@ mod tests {
             client1
                 .observer
                 .endorsement_update_event
-                .wait(Duration::from_secs(5));
+                .wait_or_throw(Duration::from_secs(5));
             let update = client1
                 .observer
                 .endorsement_update
@@ -9430,7 +9447,7 @@ mod tests {
             client1
                 .observer
                 .endorsement_update_event
-                .wait(Duration::from_secs(5));
+                .wait_or_throw(Duration::from_secs(5));
             let update = client1
                 .observer
                 .endorsement_update
