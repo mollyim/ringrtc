@@ -137,8 +137,10 @@ case "${BINARY_OR_LIB}" in
       fi
       ;;
     *)
-      echo "Unsupported BINARY_OR_LIB: ${BINARY_OR_LIB}"
-      exit 1
+      if [ "${BUILD_WHAT}" != "webrtc" ]; then
+        echo "Unsupported BINARY_OR_LIB: ${BINARY_OR_LIB}"
+        exit 1
+      fi
       ;;
 esac
 

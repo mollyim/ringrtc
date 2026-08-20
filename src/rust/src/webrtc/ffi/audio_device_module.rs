@@ -11,6 +11,7 @@ use libc::size_t;
 
 unsafe extern "C" {
     pub fn Rust_recordedDataIsAvailable(
+        audio_callback_ptr_ptr: usize,
         audio_samples: *const c_void,
         n_samples: size_t,
         n_bytes_per_sample: size_t,
@@ -25,6 +26,7 @@ unsafe extern "C" {
     ) -> i32;
 
     pub fn Rust_needMorePlayData(
+        audio_callback_ptr_ptr: usize,
         n_samples: size_t,
         n_bytes_per_sample: size_t,
         n_channels: size_t,

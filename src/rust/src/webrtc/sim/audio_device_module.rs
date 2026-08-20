@@ -9,6 +9,7 @@ use libc::size_t;
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_recordedDataIsAvailable(
+    _audio_callback_ptr: usize,
     _audio_samples: *const c_void,
     _n_samples: size_t,
     _n_bytes_per_sample: size_t,
@@ -26,6 +27,7 @@ pub unsafe fn Rust_recordedDataIsAvailable(
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_needMorePlayData(
+    _audio_callback_ptr: usize,
     _n_samples: size_t,
     _n_bytes_per_sample: size_t,
     _n_channels: size_t,

@@ -110,6 +110,7 @@ enum Event {
     PlayoutDelay,
     Terminate,
     RegisterAudioObserver(Box<dyn AudioDeviceObserver>),
+    SetCallbackIndirect(usize),
 }
 
 // Print the enum branch without the associated data for logging.
@@ -135,6 +136,7 @@ impl Display for Event {
                 Event::PlayoutDelay => "PlayoutDelay",
                 Event::Terminate => "Terminate",
                 Event::RegisterAudioObserver(_) => "RegisterAudioObserver",
+                Event::SetCallbackIndirect(_) => "SetCallbackIndirect",
             }
         )
     }
@@ -169,6 +171,7 @@ struct Worker {
     send_to_webrtc: Arc<AtomicBool>,
     should_play: bool,
     should_record: bool,
+    opaque_callback_data: Option<usize>,
 }
 
 impl Worker {
@@ -351,6 +354,9 @@ impl Worker {
         // This buffer tracks any extra data that would not fit in `output`,
         // if `output.len()` is not an exact multiple of WEBRTC_WINDOW.
         let mut buffer = VecDeque::<i16>::new();
+        let Some(opaque_callback_data) = self.opaque_callback_data else {
+            bail!("Opaque callback data wasn't initialized");
+        };
         buffer.reserve(WEBRTC_WINDOW);
         builder
             .name("ringrtc output")
@@ -380,8 +386,12 @@ impl Worker {
 
                 // Then, request more data from WebRTC.
                 while written < output.len() {
-                    let play_data =
-                        Worker::need_more_play_data(WEBRTC_WINDOW, NUM_CHANNELS, SAMPLE_FREQUENCY);
+                    let play_data = Worker::need_more_play_data(
+                        opaque_callback_data,
+                        WEBRTC_WINDOW,
+                        NUM_CHANNELS,
+                        SAMPLE_FREQUENCY,
+                    );
                     if play_data.success < 0 {
                         // C function failed; propagate error and don't continue.
                         return play_data.success as isize;
@@ -515,6 +525,9 @@ impl Worker {
         // if `input.len()` is not an exact multiple of WEBRTC_WINDOW.
         let mut buffer = VecDeque::<i16>::new();
         let send_to_webrtc = self.send_to_webrtc.clone();
+        let Some(opaque_callback_data) = self.opaque_callback_data else {
+            bail!("Opaque callback data wasn't initialized");
+        };
         buffer.reserve(WEBRTC_WINDOW);
         builder
             .name("ringrtc input")
@@ -541,6 +554,7 @@ impl Worker {
                         break;
                     }
                     let (ret, _new_mic_level) = Worker::recorded_data_is_available(
+                        opaque_callback_data,
                         chunk.to_vec(),
                         NUM_CHANNELS,
                         SAMPLE_FREQUENCY,
@@ -763,6 +777,10 @@ impl Worker {
                     self.audio_device_observer = Some(audio_device_observer);
                     continue;
                 }
+                Event::SetCallbackIndirect(opaque_callback_data) => {
+                    self.opaque_callback_data = Some(opaque_callback_data);
+                    Ok(())
+                }
             } {
                 warn!("{} failed: {:?}", log_str, e);
             }
@@ -771,6 +789,7 @@ impl Worker {
 
     #[allow(clippy::too_many_arguments)]
     fn recorded_data_is_available(
+        opauque_callback_data: usize,
         samples: Vec<i16>,
         channels: u32,
         samples_per_sec: u32,
@@ -790,6 +809,7 @@ impl Worker {
         //   remain valid while it runs.
         let ret = unsafe {
             Rust_recordedDataIsAvailable(
+                opauque_callback_data,
                 samples.as_ptr() as *const c_void,
                 samples.len(),
                 std::mem::size_of::<i16>(),
@@ -806,7 +826,12 @@ impl Worker {
         (ret, new_mic_level)
     }
 
-    fn need_more_play_data(samples: usize, channels: u32, samples_per_sec: u32) -> PlayData {
+    fn need_more_play_data(
+        opaque_callback_data: usize,
+        samples: usize,
+        channels: u32,
+        samples_per_sec: u32,
+    ) -> PlayData {
         let mut data = vec![0i16; samples];
         let mut samples_out = 0usize;
         let mut elapsed_time_ms = 0i64;
@@ -819,6 +844,7 @@ impl Worker {
         //   remain valid while it runs.
         let ret = unsafe {
             Rust_needMorePlayData(
+                opaque_callback_data,
                 samples,
                 std::mem::size_of::<i16>(),
                 channels.try_into().unwrap(), // constant, so unwrap is safe
@@ -910,6 +936,7 @@ impl Worker {
                 send_to_webrtc: Arc::new(AtomicBool::new(true)),
                 should_play: false,
                 should_record: false,
+                opaque_callback_data: None,
             };
             if let Err(e) = worker.register_device_collection_changed(DeviceType::Input) {
                 error!("Failed to register input device callback: {}", e);
@@ -1116,8 +1143,16 @@ impl AudioDeviceModule {
     }
 
     // Main initialization and termination
-    pub fn init(&mut self) -> i32 {
-        // Don't bother re-initializing -- new handled it.
+    pub fn init(&mut self, opaque_callback_data: usize) -> i32 {
+        // Don't need to fully initialize (new did most of it), but *do* pass
+        // this data from the C++ layer
+        if let Err(e) = self
+            .mpsc_sender
+            .send(Event::SetCallbackIndirect(opaque_callback_data))
+        {
+            error!("Failed to request SetCallbackIndirect: {}", e);
+            return -1;
+        }
         0
     }
 
@@ -1706,7 +1741,7 @@ mod audio_device_module_tests {
         )
         .expect("failed to set logging");
         let mut adm = AudioDeviceModule::new().unwrap();
-        assert_eq!(adm.init(), 0);
+        assert_eq!(adm.init(0), 0);
 
         assert_eq!(adm.backend_name(), expected_backend.to_string());
     }

@@ -24,7 +24,7 @@ macro_rules! all_adm_functions {
             active_audio_layer(audio_layer: webrtc::ptr::Borrowed<AudioLayer>) -> i32;
 
             // Main initialization and termination
-            init() -> i32;
+            init(callback_ptr: usize) -> i32;
             terminate() -> i32;
             initialized() -> bool;
 
