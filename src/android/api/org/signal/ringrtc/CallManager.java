@@ -276,9 +276,14 @@ public class CallManager {
         .createAudioDeviceModule();
     } else {
       // Use the Java Audio Device Module.
+      AudioDeviceModuleLogger audioDeviceModuleLogger = new AudioDeviceModuleLogger();
       adm = JavaAudioDeviceModule.builder(context)
         .setUseHardwareAcousticEchoCanceler(!audioConfig.useSoftwareAec)
         .setUseHardwareNoiseSuppressor(!audioConfig.useSoftwareNs)
+        .setAudioRecordErrorCallback(audioDeviceModuleLogger)
+        .setAudioRecordStateCallback(audioDeviceModuleLogger)
+        .setAudioTrackErrorCallback(audioDeviceModuleLogger)
+        .setAudioTrackStateCallback(audioDeviceModuleLogger)
         .createAudioDeviceModule();
     }
 
