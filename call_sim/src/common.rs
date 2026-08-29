@@ -499,26 +499,26 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             input_name: "silence".to_string(),
-            initial_packet_size_ms: 20,
-            min_packet_size_ms: 20,
-            max_packet_size_ms: 20,
+            initial_packet_size_ms: 60,
+            min_packet_size_ms: 60,
+            max_packet_size_ms: 60,
             initial_bitrate_bps: 32000,
-            min_bitrate_bps: 16000,
+            min_bitrate_bps: 32000,
             max_bitrate_bps: 32000,
             bandwidth: AudioBandwidth::Auto,
             complexity: 9,
             adaptation: 0,
             enable_cbr: true,
             enable_dtx: true,
-            enable_fec: true,
-            dred_duration: 0,
+            enable_fec: false,
+            dred_duration: 100,
             min_packet_loss_percent: 0,
             decoder_complexity: Some(0),
-            dnn_weights_path: "".to_string(),
+            dnn_weights_path: "/data/deep_plc-dred-weights.bin".to_string(),
             enable_tcc: false,
             enable_high_pass_filter: true,
-            // Default tests now disable AEC in order to prevent random timing delays
-            // from causing double-talk and thus attenuating valid audio.
+            // Disable AEC by default to prevent random timing delays from
+            // causing double-talk and thus attenuating valid audio.
             enable_aec: false,
             enable_ns: true,
             enable_agc: true,

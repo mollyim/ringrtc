@@ -470,7 +470,7 @@ impl Test {
                                         // emulation shouldn't change more than once every 2 seconds!
 
                                         let _ = tokio::join!(join_handle_a, join_handle_b);
-                                        error!(" Done.");
+                                        info!(" Done.");
                                     });
 
                                     emulation_started = true;
