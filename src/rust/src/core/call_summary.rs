@@ -507,6 +507,8 @@ impl From<&VideoReceiverStatsSnapshot> for StreamStats {
             packet_loss: Some(snapshot.packets_lost_pct),
             jitter: Some(snapshot.jitter as f32),
             framerate: Some(snapshot.framerate),
+            width: Some(snapshot.width),
+            height: Some(snapshot.height),
             ..Default::default()
         }
     }
@@ -521,6 +523,8 @@ impl From<&VideoSenderStatsSnapshot> for StreamStats {
             jitter: Some(snapshot.remote_jitter as f32),
             rtt: Some(snapshot.remote_round_trip_time as f32),
             framerate: Some(snapshot.framerate),
+            width: Some(snapshot.width),
+            height: Some(snapshot.height),
             ..Default::default()
         }
     }
@@ -1491,6 +1495,8 @@ mod test {
                     rtt: Some(5.0),
                     jitter_buffer_delay: Some(10.0),
                     framerate: Some(30.0),
+                    width: Some(1280),
+                    height: Some(720),
                 });
             }
             // One outbound audio stream
@@ -1502,6 +1508,7 @@ mod test {
                 rtt: Some(5.0),
                 jitter_buffer_delay: Some(10.0),
                 framerate: None,
+                ..Default::default()
             });
             // One inbound audio stream, and one inbound video stream for each participant
             for ssrc in 0..participant_count {
@@ -1513,6 +1520,7 @@ mod test {
                     rtt: Some(5.0),
                     jitter_buffer_delay: Some(10.0),
                     framerate: None,
+                    ..Default::default()
                 });
                 stats_sets.push_video_recv_stream_stats(protobuf::call_summary::StreamStats {
                     ssrc: Some((ssrc + 3000) as u32),
@@ -1522,6 +1530,8 @@ mod test {
                     rtt: Some(5.0),
                     jitter_buffer_delay: Some(10.0),
                     framerate: Some(30.0),
+                    width: Some(1280),
+                    height: Some(720),
                 });
                 stats_sets.push_stun_rtt(100.0);
             }
@@ -1649,7 +1659,7 @@ mod test {
     #[test]
     fn test_telemetry_pruning_maximum_call_size_not_requiring_pruning() {
         let telemetry = create_telemetry_for_group_call_with_size(CreateGroupCallParams {
-            size: 26,
+            size: 24,
             call_length: Duration::from_secs(86400),
             time_limit: Duration::from_secs(300),
             stats_period: Duration::from_secs(10),

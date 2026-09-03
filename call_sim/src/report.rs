@@ -456,6 +456,8 @@ pub struct VideoSendStats {
     pub packets_per_second: Stats,
     pub average_packet_size: Stats,
     pub bitrate: Stats,
+    pub source_framerate: Stats,
+    pub source_resolution: Stats,
     pub framerate: Stats,
     pub key_frames_encoded: Stats,
     pub retransmitted_packets_sent: Stats,
@@ -537,9 +539,9 @@ impl ClientLogReport {
             r".*ringrtc_stats!,audio,send,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<average_packet_size>[-+]?[0-9]*\.?[0-9]+),(?P<bitrate>[-+]?[0-9]*\.?[0-9]+)bps,(?P<remote_packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<remote_jitter>\d+)ms,(?P<remote_round_trip_time>\d+)ms,(?P<audio_energy>[-+]?[0-9]*\.?[0-9]+)",
         )?;
 
-        // Example: ringrtc_stats!,video,send,2003,8.0,1052.9,67430bps,2.0fps,0,4.0ms,1280x720,0,0.0bps,162.4ms,0,0,bandwidth,0,0.0%,170.2ms,1.0ms
+        // Example: ringrtc_stats!,video,send,2003,8.0,1052.9,67430bps,1280x720,8.0fps,1280x720,2.0fps,0,4.0ms,0,0.0bps,162.4ms,0,0,bandwidth,0,0.0%,170.2ms,1.0ms
         let re_video_send_line = Regex::new(
-            r".*ringrtc_stats!,video,send,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<average_packet_size>[-+]?[0-9]*\.?[0-9]+),(?P<bitrate>[-+]?[0-9]*\.?[0-9]+)bps,(?P<framerate>[0-9]*\.?[0-9]+)fps,(?P<key_frames_encoded>\d+),(?P<encode_time_per_frame>[0-9]*\.?[0-9]+)ms,(?P<resolution>\d+x\d+),(?P<retransmitted_packets_sent>\d+),(?P<retransmitted_bitrate>[0-9]*\.?[0-9]+)bps,(?P<send_delay_per_packet>[0-9]*\.?[0-9]+)ms,(?P<nack_count>\d+),(?P<pli_count>\d+),(?P<quality_limitation_reason>\w+),(?P<quality_limitation_resolution_changes>\d+),(?P<remote_packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<remote_jitter>[0-9]*\.?[0-9]+)ms,(?P<remote_round_trip_time>[0-9]*\.?[0-9]+)ms",
+            r".*ringrtc_stats!,video,send,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<average_packet_size>[-+]?[0-9]*\.?[0-9]+),(?P<bitrate>[-+]?[0-9]*\.?[0-9]+)bps,(?P<source_resolution>\d+x\d+),(?P<source_framerate>[0-9]*\.?[0-9]+)fps,(?P<resolution>\d+x\d+),(?P<framerate>[0-9]*\.?[0-9]+)fps,(?P<key_frames_encoded>\d+),(?P<encode_time_per_frame>[0-9]*\.?[0-9]+)ms,(?P<retransmitted_packets_sent>\d+),(?P<retransmitted_bitrate>[0-9]*\.?[0-9]+)bps,(?P<send_delay_per_packet>[0-9]*\.?[0-9]+)ms,(?P<nack_count>\d+),(?P<pli_count>\d+),(?P<quality_limitation_reason>\w+),(?P<quality_limitation_resolution_changes>\d+),(?P<remote_packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<remote_jitter>[0-9]*\.?[0-9]+)ms,(?P<remote_round_trip_time>[0-9]*\.?[0-9]+)ms",
         )?;
 
         // Example: ringrtc_stats!,audio,recv,1002,40.0,0.00%,32000.0bps,0ms,0.000,50ms,40ms,0,0.00%,0,0ms
@@ -639,6 +641,10 @@ impl ClientLogReport {
                     .data
                     .push(f32::from_str(&cap["bitrate"])? / 1000.0);
                 video_send_stats
+                    .source_framerate
+                    .data
+                    .push(f32::from_str(&cap["source_framerate"])?);
+                video_send_stats
                     .framerate
                     .data
                     .push(f32::from_str(&cap["framerate"])?);
@@ -678,6 +684,13 @@ impl ClientLogReport {
                     .remote_round_trip_time
                     .data
                     .push(f32::from_str(&cap["remote_round_trip_time"])?);
+
+                let res = &cap["source_resolution"];
+                let res: usize = res
+                    .split('x')
+                    .map(|n| n.parse::<usize>().unwrap())
+                    .product();
+                video_send_stats.source_resolution.data.push(res as f32);
 
                 let res = &cap["resolution"];
                 let res: usize = res
@@ -972,6 +985,18 @@ impl ClientLogReport {
                 data: video_send_stats.bitrate.data,
             };
 
+            let source_framerate = Stats {
+                config: StatsConfig {
+                    title: format!("Video Source Framerate (ssrc={ssrc})"),
+                    chart_name: format!("{}.log.video.send.source_framerate.svg", client_name),
+                    x_label: "Test Seconds".to_string(),
+                    y_label: "fps".to_string(),
+                    y_max: Some(32.0),
+                    ..Default::default()
+                },
+                data: video_send_stats.source_framerate.data,
+            };
+
             let framerate = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Framerate (ssrc={ssrc})"),
@@ -1083,6 +1108,17 @@ impl ClientLogReport {
                 data: video_send_stats.remote_round_trip_time.data,
             };
 
+            let source_resolution = Stats {
+                config: StatsConfig {
+                    title: "Video Source Resolution".to_string(),
+                    chart_name: format!("{}.log.video.send.source_resolution.svg", client_name),
+                    x_label: "Test Seconds".to_string(),
+                    y_label: "Resolution (sq. pixels)".to_string(),
+                    ..Default::default()
+                },
+                data: video_send_stats.source_resolution.data,
+            };
+
             let resolution = Stats {
                 config: StatsConfig {
                     title: "Video Send Resolution".to_string(),
@@ -1099,6 +1135,8 @@ impl ClientLogReport {
                 packets_per_second,
                 average_packet_size,
                 bitrate,
+                source_framerate,
+                source_resolution,
                 framerate,
                 key_frames_encoded,
                 retransmitted_packets_sent,
@@ -1665,6 +1703,7 @@ impl Report {
                     &per_ssrc.packets_per_second,
                     &per_ssrc.average_packet_size,
                     &per_ssrc.bitrate,
+                    &per_ssrc.source_framerate,
                     &per_ssrc.framerate,
                     &per_ssrc.key_frames_encoded,
                     &per_ssrc.retransmitted_packets_sent,
@@ -1675,6 +1714,7 @@ impl Report {
                     &per_ssrc.remote_packet_loss,
                     &per_ssrc.remote_jitter,
                     &per_ssrc.remote_round_trip_time,
+                    &per_ssrc.source_resolution,
                     &per_ssrc.resolution,
                 ]
             }));
@@ -1935,6 +1975,7 @@ impl Report {
                         &video_send_stats.packets_per_second,
                         &video_send_stats.average_packet_size,
                         &video_send_stats.bitrate,
+                        &video_send_stats.source_framerate,
                         &video_send_stats.framerate,
                         &video_send_stats.key_frames_encoded,
                         &video_send_stats.retransmitted_packets_sent,

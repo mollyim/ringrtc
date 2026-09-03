@@ -450,6 +450,9 @@ pub struct VideoSenderStatsSnapshot {
     pub remote_round_trip_time: f64,
     pub codec: StatsVideoCodecType,
     pub encoder_implementation: Option<String>,
+    pub source_framerate: f32,
+    pub source_width: u32,
+    pub source_height: u32,
 }
 
 impl Display for VideoSenderStatsSnapshot {
@@ -476,6 +479,9 @@ impl Display for VideoSenderStatsSnapshot {
             remote_round_trip_time,
             codec,
             encoder_implementation,
+            source_framerate,
+            source_width,
+            source_height,
         } = self;
         let encoder_impl_str = encoder_implementation.as_deref().unwrap_or("ImplNone");
         write!(
@@ -485,10 +491,12 @@ impl Display for VideoSenderStatsSnapshot {
             {packets_per_second:.1},\
             {average_packet_size:.1},\
             {bitrate:.0}bps,\
+            {source_width}x{source_height},\
+            {source_framerate:.1}fps,\
+            {width}x{height},\
             {framerate:.1}fps,\
             {key_frames_encoded},\
             {encode_time_per_frame:.1}ms,\
-            {width}x{height},\
             {retransmitted_packets_sent},\
             {retransmitted_bitrate:.1}bps,\
             {send_delay_per_packet:.1}ms,\
@@ -515,10 +523,12 @@ impl VideoSenderStatsSnapshot {
                  packets_per_second,\
                  average_packet_size,\
                  bitrate,\
+                 source_resolution,\
+                 source_framerate,\
+                 resolution,\
                  framerate,\
                  key_frames_encoded,\
                  encode_time_per_frame,\
-                 resolution,\
                  retransmitted_packets_sent,\
                  retransmitted_bitrate,\
                  send_delay_per_packet,\
@@ -541,6 +551,7 @@ impl VideoSenderStatsSnapshot {
         let bytes_sent_delta = delta!(curr_stats, prev_stats, bytes_sent);
         let retransmitted_bytes_sent_delta =
             delta!(curr_stats, prev_stats, retransmitted_bytes_sent);
+        let source_frames_delta = delta!(curr_stats, prev_stats, source_frames);
         let frames_encoded_delta = delta!(curr_stats, prev_stats, frames_encoded);
         let key_frames_encoded_delta = delta!(curr_stats, prev_stats, key_frames_encoded);
         let total_encode_time_delta = delta!(curr_stats, prev_stats, total_encode_time);
@@ -563,6 +574,9 @@ impl VideoSenderStatsSnapshot {
         let bitrate = compute_bitrate(bytes_sent_delta, seconds_elapsed);
         let retransmitted_bitrate =
             compute_bitrate(retransmitted_bytes_sent_delta, seconds_elapsed);
+        let source_framerate = (source_frames_delta as f32)
+            .naive_checked_div(seconds_elapsed)
+            .unwrap_or(0.0);
         let framerate = (frames_encoded_delta as f32)
             .naive_checked_div(seconds_elapsed)
             .unwrap_or(0.0);
@@ -612,6 +626,9 @@ impl VideoSenderStatsSnapshot {
             remote_round_trip_time,
             codec: curr_stats.codec,
             encoder_implementation,
+            source_framerate,
+            source_width: curr_stats.source_frame_width,
+            source_height: curr_stats.source_frame_height,
         }
     }
 }
@@ -1174,6 +1191,10 @@ pub struct VideoSenderStatistics {
     pub remote_round_trip_time: f64,
     pub codec: StatsVideoCodecType,
     pub raw_encoder_implementation: webrtc::ptr::Borrowed<std::os::raw::c_char>,
+    /// Cumulative frames produced by the capture source
+    pub source_frames: u32,
+    pub source_frame_width: u32,
+    pub source_frame_height: u32,
 }
 
 impl Default for VideoSenderStatistics {
@@ -1200,6 +1221,9 @@ impl Default for VideoSenderStatistics {
             remote_round_trip_time: Default::default(),
             codec: Default::default(),
             raw_encoder_implementation: webrtc::ptr::Borrowed::null(),
+            source_frames: Default::default(),
+            source_frame_width: Default::default(),
+            source_frame_height: Default::default(),
         }
     }
 }
