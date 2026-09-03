@@ -25,8 +25,16 @@ final class CallLinkTests: XCTestCase {
         XCTAssertNotEqual(Self.EXAMPLE_KEY_V1_INVALID.deriveRoomId(), anotherKey.deriveRoomId())
     }
 
-    func testFormatting() throws {
-        XCTAssertEqual(String(describing: Self.EXAMPLE_KEY_V1_INVALID), "bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-nc-bbbbbbbb")
+    func testRedactedFormatting() throws {
+        XCTAssertEqual(String(describing: Self.EXAMPLE_KEY_V0), "bcdf-****-****-****-****-****-****-****")
+        XCTAssertEqual(String(describing: Self.EXAMPLE_KEY_V1_INVALID), "bcdf****-********-********-********-**-********")
+        XCTAssertEqual(String(describing: Self.EXAMPLE_KEY_V1_VALID), "bcdf****-********-********-********-**-********")
+    }
+    
+    func testUnredactedFormatting() throws {
+        XCTAssertEqual(Self.EXAMPLE_KEY_V0.unredactedString, "bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz")
+        XCTAssertEqual(Self.EXAMPLE_KEY_V1_INVALID.unredactedString, "bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-nc-bbbbbbbb")
+        XCTAssertEqual(Self.EXAMPLE_KEY_V1_VALID.unredactedString, "bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx")
     }
 
     @MainActor
@@ -45,7 +53,7 @@ final class CallLinkTests: XCTestCase {
         switch result {
         case .success(let result):
             XCTAssertEqual(result.expiration.timeIntervalSince1970, Self.EXPIRATION_EPOCH_SECONDS)
-            XCTAssertEqual(String(describing: result.rootKey), "bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz")
+            XCTAssertEqual(result.rootKey.unredactedString, "bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz")
         case .failure(let code):
             XCTFail("unexpected failure: \(code)")
         }
@@ -67,7 +75,7 @@ final class CallLinkTests: XCTestCase {
         switch result {
         case .success(let result):
             XCTAssertEqual(result.expiration.timeIntervalSince1970, Self.EXPIRATION_EPOCH_SECONDS)
-            XCTAssertEqual(String(describing: result.rootKey), "bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx")
+            XCTAssertEqual(result.rootKey.unredactedString, "bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx")
         case .failure(let code):
             XCTFail("unexpected failure: \(code)")
         }

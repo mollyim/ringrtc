@@ -92,9 +92,15 @@ public class CallLinksTest extends CallTestBase {
     }
 
     @Test
+    public void testUnredactedFormatting() throws Exception {
+        assertEquals("bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz", EXAMPLE_KEY.toUnredactedString());
+        assertEquals("bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx", EXAMPLE_KEY_V1_VALID.toUnredactedString());
+    }
+
+    @Test
     public void testFormatting() throws Exception {
-        assertEquals("bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz", EXAMPLE_KEY.toString());
-        assertEquals("bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx", EXAMPLE_KEY_V1_VALID.toString());
+        assertEquals("bcdf-****-****-****-****-****-****-****", EXAMPLE_KEY.toString());
+        assertEquals("bcdf****-********-********-********-**-********", EXAMPLE_KEY_V1_VALID.toString());
     }
 
     @Test

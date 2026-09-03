@@ -467,16 +467,30 @@ describe('RingRTC', () => {
       );
     });
 
-    it('can be formatted', () => {
+    it('can be formatted with redaction', () => {
       assert.equal(
         `${EXAMPLE_CALL_LINK_ROOT_KEY}`,
+        'bcdf-****-****-****-****-****-****-****'
+      );
+    });
+
+    it('can be formatted with redaction', () => {
+      assert.equal(
+        `${EXAMPLE_CALL_LINK_ROOT_KEY_V1_VALID}`,
+        'bcdf****-********-********-********-**-********'
+      );
+    });
+
+    it('can be formatted without redaction', () => {
+      assert.equal(
+        EXAMPLE_CALL_LINK_ROOT_KEY.toUnredactedString(),
         'bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz'
       );
     });
 
-    it('can be formatted', () => {
+    it('can be formatted without redaction', () => {
       assert.equal(
-        `${EXAMPLE_CALL_LINK_ROOT_KEY_V1_VALID}`,
+        EXAMPLE_CALL_LINK_ROOT_KEY_V1_VALID.toUnredactedString(),
         'bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx'
       );
     });

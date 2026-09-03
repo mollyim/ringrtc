@@ -441,6 +441,24 @@ pub mod ios {
         }
     }
 
+    #[unsafe(no_mangle)]
+    pub extern "C" fn rtc_calllinks_CallLinkRootKey_toRedactedString(
+        root_key_bytes: rtc_Bytes,
+        context: *mut c_void,
+        callback: extern "C" fn(context: *mut c_void, result: rtc_String),
+    ) -> *const c_char {
+        match CallLinkRootKey::try_from(root_key_bytes.as_slice()) {
+            Ok(root_key) => {
+                callback(
+                    context,
+                    rtc_String::from(root_key.to_redacted_string().as_str()),
+                );
+                std::ptr::null()
+            }
+            Err(_) => cstr!("invalid root key").as_ptr(),
+        }
+    }
+
     #[repr(C)]
     #[derive(Default, Debug)]
     pub struct rtc_calllinks_CallLinkState<'a> {

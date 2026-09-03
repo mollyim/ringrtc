@@ -3233,6 +3233,18 @@ fn CallLinkRootKey_toFormattedString(mut cx: FunctionContext) -> JsResult<JsStri
     }
 }
 
+#[allow(non_snake_case)]
+fn CallLinkRootKey_toRedactedString(mut cx: FunctionContext) -> JsResult<JsString> {
+    let bytes = cx.argument::<JsUint8Array>(0)?;
+    match CallLinkRootKey::try_from(bytes.as_slice(&cx)) {
+        Ok(key) => {
+            let result = key.to_redacted_string();
+            Ok(cx.string(result))
+        }
+        Err(e) => cx.throw_error(e.to_string()),
+    }
+}
+
 #[neon::main]
 fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("createCallEndpoint", createCallEndpoint)?;
@@ -3249,6 +3261,10 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function(
         "CallLinkRootKey_toFormattedString",
         CallLinkRootKey_toFormattedString,
+    )?;
+    cx.export_function(
+        "CallLinkRootKey_toRedactedString",
+        CallLinkRootKey_toRedactedString,
     )?;
 
     let js_property_key = cx.string(CALL_ENDPOINT_PROPERTY_KEY);

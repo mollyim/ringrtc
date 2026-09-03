@@ -107,3 +107,19 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallLinkRootKey_nativeToFormatt
         })
         .resolve::<ThrowCallException>()
 }
+
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn Java_org_signal_ringrtc_CallLinkRootKey_nativeToRedactedString<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _class: JClass,
+    key_bytes: JByteArray,
+) -> JString<'local> {
+    unowned_env
+        .with_env(|env| -> Result<_> {
+            let key_bytes = env.convert_byte_array(key_bytes)?;
+            let key = CallLinkRootKey::try_from(key_bytes.as_slice())?;
+            Ok(env.new_string(key.to_redacted_string())?)
+        })
+        .resolve::<ThrowCallException>()
+}

@@ -35,9 +35,14 @@ export class CallLinkRootKey {
     return Native.CallLinkRootKey_deriveRoomId(this.bytes);
   }
 
-  toString(): string {
+  toUnredactedString(): string {
     // oxlint-disable-next-line typescript/no-unsafe-return
     return Native.CallLinkRootKey_toFormattedString(this.bytes);
+  }
+
+  toString(): string {
+    // oxlint-disable-next-line typescript/no-unsafe-return
+    return Native.CallLinkRootKey_toRedactedString(this.bytes);
   }
 }
 

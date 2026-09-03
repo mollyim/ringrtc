@@ -47,10 +47,21 @@ public class CallLinkRootKey {
     return rawKey;
   }
 
+  /** Returns the unredacted string form of this {@link CallLinkRootKey}. */
+  @NonNull
+  public String toUnredactedString() {
+    try {
+      return nativeToFormattedString(rawKey);
+    } catch (CallException e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  /** Returns the redacted string from of this {@link CallLinkRootKey}. */
   @NonNull @Override
   public String toString() {
     try {
-      return nativeToFormattedString(rawKey);
+      return nativeToRedactedString(rawKey);
     } catch (CallException e) {
       throw new AssertionError(e);
     }
@@ -61,4 +72,5 @@ public class CallLinkRootKey {
   private static native void nativeValidateKeyBytes(byte[] keyBytes) throws CallException;
   private static native byte[] nativeDeriveRoomId(byte[] keyBytes) throws CallException;
   private static native String nativeToFormattedString(byte[] keyBytes) throws CallException;
+  private static native String nativeToRedactedString(byte[] keyBytes) throws CallException;
 }

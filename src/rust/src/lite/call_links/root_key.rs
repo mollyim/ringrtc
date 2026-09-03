@@ -3,7 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::{collections::HashMap, fmt::Debug, ops::Deref};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display, Formatter},
+    ops::Deref,
+};
 
 use aes_gcm_siv::{
     Aes256GcmSiv, Key, KeyInit,
@@ -41,6 +45,10 @@ pub trait CallLinkRootKeyOps {
     /// Formats the root key. The returned string is shown to the user. The format varies,
     /// depending on the root key version.
     fn to_formatted_string(&self) -> String;
+
+    /// Generates a redacted string form of the key. The format varies, depending on
+    /// the root key version.
+    fn to_redacted_string(&self) -> String;
 
     /// Invoked to prepare any additional HTTP headers before the request is dispatched
     /// to the SFU front end.
@@ -90,6 +98,13 @@ impl CallLinkRootKeyOps for CallLinkRootKeyV0 {
         format!(
             "{:-^.2}",
             base16::ConsonantBase16::from(self.crn.as_slice())
+        )
+    }
+
+    fn to_redacted_string(&self) -> String {
+        format!(
+            "{:^.2}-****-****-****-****-****-****-****",
+            base16::ConsonantBase16::from(&self.crn[0..2])
         )
     }
 }
@@ -214,6 +229,13 @@ impl CallLinkRootKeyOps for CallLinkRootKeyV1 {
             )
         )
     }
+
+    fn to_redacted_string(&self) -> String {
+        format!(
+            "{:^.2}****-********-********-********-**-********",
+            base16::ConsonantBase16::from(&self.bytes[0..2])
+        )
+    }
 }
 
 impl TryFrom<&str> for CallLinkRootKeyV1 {
@@ -249,8 +271,14 @@ pub enum CallLinkRootKey {
 }
 
 impl Debug for CallLinkRootKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_formatted_string())
+    }
+}
+
+impl Display for CallLinkRootKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_redacted_string())
     }
 }
 
@@ -369,6 +397,10 @@ impl CallLinkRootKey {
     // Not a Display implementation so we don't accidentally log it.
     pub fn to_formatted_string(&self) -> String {
         (**self).to_formatted_string()
+    }
+
+    pub fn to_redacted_string(&self) -> String {
+        (**self).to_redacted_string()
     }
 }
 
@@ -509,5 +541,22 @@ mod tests {
         // Check that we do pad short titles.
         let different_ciphertext = key.encrypt(b"Secret Base", rand::rng());
         assert_eq!(ciphertext.len(), different_ciphertext.len(),);
+    }
+
+    #[test]
+    fn test_string_redaction() {
+        let key_v0_parsed =
+            CallLinkRootKey::try_from("crbn-mxzp-zprt-rxkr-mpqq-rtrr-cddc-bftt").unwrap();
+        assert_eq!(
+            "crbn-****-****-****-****-****-****-****",
+            key_v0_parsed.to_redacted_string()
+        );
+
+        let key_v1_parsed =
+            CallLinkRootKey::try_from("crbnmxzp-zprtrxkr-mpqqrtrr-cddcbftt-bc-pprrrrqz").unwrap();
+        assert_eq!(
+            "crbn****-********-********-********-**-********",
+            key_v1_parsed.to_redacted_string()
+        );
     }
 }
