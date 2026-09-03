@@ -60,6 +60,11 @@ use crate::{
     },
 };
 
+/// Default SVC mode
+const DEFAULT_SVC_MODE: &str = "L3T3_KEY";
+/// Default SVC screenshare mode
+const DEFAULT_SVC_MODE_FOR_SCREENSHARE: &str = "L1T3";
+
 pub const MAX_MESSAGE_AGE: Duration = Duration::from_secs(60);
 const TIME_OUT_PERIOD: Duration = Duration::from_secs(60);
 
@@ -391,11 +396,111 @@ struct GroupCallClient {
     active: bool,
 }
 
-#[derive(Debug)]
+/// SVC configuration.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SvcConfig {
+    /// The scalability mode to use.
     pub mode: String,
+    /// The scalability mode to use for screenshare.
     pub mode_for_screenshare: String,
+    /// The optional maximum bitrate (bps).
     pub max_bitrate_bps: Option<i32>,
+}
+
+impl Default for SvcConfig {
+    fn default() -> Self {
+        Self {
+            mode: DEFAULT_SVC_MODE.to_owned(),
+            mode_for_screenshare: DEFAULT_SVC_MODE_FOR_SCREENSHARE.to_owned(),
+            max_bitrate_bps: None,
+        }
+    }
+}
+
+impl SvcConfig {
+    /// This function takes a scalability mode string as input and validates if it exists
+    /// within a predefined set of allowed scalability modes. The valid scalability
+    /// modes include various combinations such as "L1T1", "L2T1h", and so on.
+    pub fn is_valid_scalability_mode(mode: &str) -> bool {
+        const VALID_MODES: [&str; 34] = [
+            "L1T1",
+            "L1T2",
+            "L1T3",
+            "L2T1",
+            "L2T1h",
+            "L2T1_KEY",
+            "L2T2",
+            "L2T2h",
+            "L2T2_KEY",
+            "L2T2_KEY_SHIFT",
+            "L2T3",
+            "L2T3h",
+            "L2T3_KEY",
+            "L3T1",
+            "L3T1h",
+            "L3T1_KEY",
+            "L3T2",
+            "L3T2h",
+            "L3T2_KEY",
+            "L3T3",
+            "L3T3h",
+            "L3T3_KEY",
+            "S2T1",
+            "S2T1h",
+            "S2T2",
+            "S2T2h",
+            "S2T3",
+            "S2T3h",
+            "S3T1",
+            "S3T1h",
+            "S3T2",
+            "S3T2h",
+            "S3T3",
+            "S3T3h",
+        ];
+        VALID_MODES.contains(&mode)
+    }
+
+    /// Checks if the provided screenshare scalability mode is valid.
+    /// The valid screenshare scalability modes are: `"L1T1"`, `"L1T2"`, and `"L1T3"`.
+    pub fn is_valid_screenshare_scalability_mode(mode: &str) -> bool {
+        const VALID_MODES: [&str; 3] = ["L1T1", "L1T2", "L1T3"];
+        VALID_MODES.contains(&mode)
+    }
+
+    /// Validates and, if necessary, corrects the scalability modes in the given `SvcConfig`
+    /// structure. Consumes the given `SvcConfig` and returns a new one with updated
+    /// scalability mode values.
+    ///
+    /// The invalid values, will be changed to the appropriate default values.
+    pub fn validate_and_correct_if_necessary(svc_config: SvcConfig) -> SvcConfig {
+        let SvcConfig {
+            mode,
+            mode_for_screenshare,
+            max_bitrate_bps,
+        } = svc_config;
+        let mode = if Self::is_valid_scalability_mode(&mode) {
+            mode
+        } else {
+            warn!("SVC mode correction: '{mode}' -> '{}'", DEFAULT_SVC_MODE);
+            DEFAULT_SVC_MODE.to_owned()
+        };
+        let mode_for_screenshare =
+            if Self::is_valid_screenshare_scalability_mode(&mode_for_screenshare) {
+                mode_for_screenshare
+            } else {
+                warn!(
+                    "SVC screenshare mode correction: '{mode_for_screenshare}' -> '{}'",
+                    DEFAULT_SVC_MODE_FOR_SCREENSHARE
+                );
+                DEFAULT_SVC_MODE_FOR_SCREENSHARE.to_owned()
+            };
+        SvcConfig {
+            mode,
+            mode_for_screenshare,
+            max_bitrate_bps,
+        }
+    }
 }
 
 pub struct CreateGroupCallParams {
@@ -3125,6 +3230,8 @@ where
 
         let asset_registry = { self.asset_manager.read()?.get_registry() };
 
+        let svc_config = svc_config.map(SvcConfig::validate_and_correct_if_necessary);
+
         let client = Client::start(ClientStartParams {
             group_id,
             client_id,
@@ -3237,6 +3344,8 @@ where
         );
 
         let asset_registry = { self.asset_manager.read()?.get_registry() };
+
+        let svc_config = svc_config.map(SvcConfig::validate_and_correct_if_necessary);
 
         let client = Client::start(ClientStartParams {
             group_id: room_id,
@@ -3567,5 +3676,130 @@ mod tests {
             },
             "not a ring intention",
         );
+    }
+
+    const SVC_VALID_MODES: [&str; 34] = [
+        "L1T1",
+        "L1T2",
+        "L1T3",
+        "L2T1",
+        "L2T1h",
+        "L2T1_KEY",
+        "L2T2",
+        "L2T2h",
+        "L2T2_KEY",
+        "L2T2_KEY_SHIFT",
+        "L2T3",
+        "L2T3h",
+        "L2T3_KEY",
+        "L3T1",
+        "L3T1h",
+        "L3T1_KEY",
+        "L3T2",
+        "L3T2h",
+        "L3T2_KEY",
+        "L3T3",
+        "L3T3h",
+        "L3T3_KEY",
+        "S2T1",
+        "S2T1h",
+        "S2T2",
+        "S2T2h",
+        "S2T3",
+        "S2T3h",
+        "S3T1",
+        "S3T1h",
+        "S3T2",
+        "S3T2h",
+        "S3T3",
+        "S3T3h",
+    ];
+
+    const SVC_VALID_SCREENSHARE_MODES: [&str; 3] = ["L1T1", "L1T2", "L1T3"];
+
+    #[test]
+    fn test_svc_defaults() {
+        assert!(SvcConfig::is_valid_scalability_mode(DEFAULT_SVC_MODE));
+        assert!(SvcConfig::is_valid_screenshare_scalability_mode(
+            DEFAULT_SVC_MODE_FOR_SCREENSHARE
+        ));
+    }
+
+    #[test]
+    fn test_default_svc_config() {
+        assert_eq!(
+            SvcConfig::default(),
+            SvcConfig {
+                mode: DEFAULT_SVC_MODE.to_owned(),
+                mode_for_screenshare: DEFAULT_SVC_MODE_FOR_SCREENSHARE.to_owned(),
+                max_bitrate_bps: None,
+            }
+        )
+    }
+
+    #[test]
+    fn test_svc_config_correction() {
+        // Both modes are invalid and should both be corrected to their corresponding
+        // default values.
+        assert_eq!(
+            SvcConfig::validate_and_correct_if_necessary(SvcConfig {
+                mode: "abc123".to_owned(),
+                mode_for_screenshare: "abc123".to_owned(),
+                ..Default::default()
+            }),
+            SvcConfig::default()
+        );
+
+        // The mode is invalid and should be corrected to its default value.
+        assert_eq!(
+            SvcConfig::validate_and_correct_if_necessary(SvcConfig {
+                mode: "abc123".to_owned(),
+                ..Default::default()
+            }),
+            SvcConfig::default()
+        );
+
+        // The screen share mode is invalid and should be corrected to its
+        // default value.
+        assert_eq!(
+            SvcConfig::validate_and_correct_if_necessary(SvcConfig {
+                mode_for_screenshare: "abc123".to_owned(),
+                ..Default::default()
+            }),
+            SvcConfig::default()
+        );
+
+        // Select each valid, but not applicable mode as the screen share mode value.
+        // The screen share mode should be corrected to the default value.
+        for mode in SVC_VALID_MODES {
+            if mode != "L1T1" && mode != "L1T2" && mode != "L1T3" {
+                let config = SvcConfig {
+                    mode_for_screenshare: mode.to_owned(),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    SvcConfig::validate_and_correct_if_necessary(config),
+                    SvcConfig::default(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_svc_config_validity_checks() {
+        for mode in SVC_VALID_MODES {
+            for screenshare_mode in SVC_VALID_SCREENSHARE_MODES {
+                let config = SvcConfig {
+                    mode: mode.to_owned(),
+                    mode_for_screenshare: screenshare_mode.to_owned(),
+                    ..Default::default()
+                };
+                let config_cloned = config.clone();
+                assert_eq!(
+                    config_cloned,
+                    SvcConfig::validate_and_correct_if_necessary(config)
+                );
+            }
+        }
     }
 }
