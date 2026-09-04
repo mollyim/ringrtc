@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.72.0
+
+- Update webrtc version to 7871k
+  - Support setting min capture rate in CameraEnumerationAndroid
+  - Add video source frame count and resolution to stats
+  - Fix rffi translation of quality limitation reason kNone
+  - Avoid including webrtc-specific headers in api/
+  - Move non-FFI classes and methods out of api/
+  - Add logs when the audio recording route changes
+  - Return whether a response actually belongs to given TurnPort
+  - Update opus build to match upstream
+  - Remove unused declarations from peer_connection_factory.h
+  - Require non-static functions to have a prototype
+  - Initialize audio callback ptr ptr in Create
+  - Update audio callbacks to avoid global
+
+- Ensure calls terminate completely in corner cases
+
+- Add SvcConfig validation and auto-correction
+
+- Implement call link root key redaction
+
+- Add source fps & resolution stats, update call summary
+
+- Call Sim: Cleanup baseline configuration for dred
+
+- Add handlers for the Java ADM logging callbacks
+
+- Reapply "Fix direct test program"
+
+- Bump to cubeb 0.38
+
 ## v2.71.0
 
 - Add SVC Support for group calls
