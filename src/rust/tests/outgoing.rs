@@ -3663,3 +3663,157 @@ fn group_call_ring_cancelled_by_another_device_before_join() {
         &messages[..]
     );
 }
+
+// A failure notifying the app that the call ended must not abandon media teardown.
+#[test]
+fn hangup_when_call_ended_notification_fails() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+
+    context.force_call_ended_failure(true);
+
+    cm.hangup().expect(error_line!());
+    context.wait_for_teardown();
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    context.force_call_ended_failure(false);
+    cm.synchronize().expect(error_line!());
+}
+
+// A peer that floods the call's event queue must not be able to prevent a
+// local hangup from tearing the call down.
+#[test]
+fn hangup_with_saturated_call_fsm_queue() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+
+    context.pause_call_fsm();
+    assert!(context.fill_call_fsm_queue() > 0);
+
+    cm.hangup().expect(error_line!());
+    context.wait_for_teardown();
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    context.resume_call_fsm();
+
+    assert_eq!(context.end_reason_count(CallEndReason::LocalHangup), 1);
+    assert!(context.wait_for_call_concluded(1));
+}
+
+// The peer connection is closed on hangup even when the connection's event
+// queue is full and a Terminate event cannot be queued.
+#[test]
+fn hangup_with_saturated_connection_fsm_queue() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+
+    context.pause_connection_fsm();
+    assert!(context.fill_connection_fsm_queue() > 0);
+
+    cm.hangup().expect(error_line!());
+    context.wait_for_teardown();
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    context.resume_connection_fsm();
+
+    assert!(context.wait_for_call_concluded(1));
+}
+
+// A hangup that slips into the connection's event queue while full must
+// still tear the call all the way down.
+#[test]
+fn remote_hangup_with_full_connection_fsm_queue() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+    let call_id = context.active_call().call_id();
+
+    context.pause_connection_fsm();
+    // The hangup lands in the queue, then the queue becomes full. Don't hold a
+    // Connection/Call clone past here, or the final drop can't conclude the call.
+    context
+        .active_connection()
+        .inject_received_hangup(call_id, signaling::Hangup::Normal)
+        .expect(error_line!());
+    assert!(context.fill_connection_fsm_queue() > 0);
+
+    context.resume_connection_fsm();
+
+    assert!(context.wait_for_call_concluded(1));
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    assert_eq!(context.end_reason_count(CallEndReason::RemoteHangup), 1);
+}
+
+// The connection FSM shuts down on hangup even though a Terminate event was
+// never delivered to it.
+#[test]
+fn connection_fsm_terminates_without_terminate_event() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let active_connection = context.active_connection();
+
+    context.pause_connection_fsm();
+    assert!(context.fill_connection_fsm_queue() > 0);
+
+    cm.hangup().expect(error_line!());
+    context.wait_for_teardown();
+
+    // Terminate cannot have been dequeued: the FSM is held and the queue is full.
+    assert!(!active_connection.fsm_terminated());
+
+    context.resume_connection_fsm();
+
+    assert!(context.wait_for_connection_fsm_terminated(&active_connection));
+}
+
+// The call FSM shuts down on hangup even though a Terminate event was never
+// delivered to it.
+#[test]
+fn call_fsm_terminates_without_terminate_event() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+
+    context.pause_call_fsm();
+    assert!(context.fill_call_fsm_queue() > 0);
+
+    cm.hangup().expect(error_line!());
+    context.wait_for_teardown();
+
+    assert!(!active_call.fsm_terminated());
+
+    context.resume_call_fsm();
+
+    assert!(context.wait_for_call_fsm_terminated(&active_call));
+}

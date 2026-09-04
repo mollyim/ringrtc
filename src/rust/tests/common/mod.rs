@@ -10,7 +10,7 @@
 use std::{
     cell::RefCell,
     env,
-    sync::LazyLock,
+    sync::{Arc, Condvar, LazyLock, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -21,11 +21,13 @@ use rand::{
     rngs::ChaCha20Rng,
 };
 use ringrtc::{
-    common::{ApplicationEvent, CallEndReason, CallMediaType, DeviceId},
+    common::{
+        ApplicationEvent, CallEndReason, CallMediaType, DataMode, DeviceId, EVENT_QUEUE_SIZE,
+    },
     core::{
         call::Call,
         call_manager::{CallManager, CreateGroupCallParams},
-        connection::Connection,
+        connection::{Connection, ConnectionObserverEvent},
         group_call, signaling,
     },
     lite::http,
@@ -90,15 +92,40 @@ pub fn test_init() {
     }
 }
 
+/// A paused FSM's resume latch, false until the test resumes it.
+type FsmPause = Arc<(Mutex<bool>, Condvar)>;
+
+fn resume_fsm(pause: &FsmPause) {
+    let (mutex, condvar) = &**pause;
+    let mut resumed = mutex.lock().unwrap();
+    *resumed = true;
+    condvar.notify_all();
+}
+
+/// How long test waiters block before declaring a hang a regression.
+#[allow(dead_code)]
+const FSM_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct TestContext {
     platform: SimPlatform,
     call_manager: CallManager<SimPlatform>,
     pub prng: Prng,
+    call_fsm_pause: RefCell<Option<FsmPause>>,
+    connection_fsm_pause: RefCell<Option<FsmPause>>,
 }
 
 impl Drop for TestContext {
     fn drop(&mut self) {
         info!("Dropping TestContext");
+
+        // Resume any FSM a (possibly panicking) test left paused, so close()
+        // does not block on a wedged FSM.
+        if let Some(pause) = self.call_fsm_pause.borrow_mut().take() {
+            resume_fsm(&pause);
+        }
+        if let Some(pause) = self.connection_fsm_pause.borrow_mut().take() {
+            resume_fsm(&pause);
+        }
 
         info!("test: closing call manager");
         self.call_manager.close().unwrap();
@@ -131,6 +158,8 @@ impl TestContext {
             platform,
             call_manager,
             prng: Prng::new(*RANDOM_SEED),
+            call_fsm_pause: RefCell::new(None),
+            connection_fsm_pause: RefCell::new(None),
         }
     }
 
@@ -150,6 +179,88 @@ impl TestContext {
         }
     }
 
+    pub fn pause_connection_fsm(&self) {
+        assert!(
+            self.connection_fsm_pause.borrow().is_none(),
+            "connection FSM already paused"
+        );
+        let pause = FsmPause::default();
+        self.active_connection()
+            .inject_pause(pause.clone())
+            .unwrap();
+        *self.connection_fsm_pause.borrow_mut() = Some(pause);
+    }
+
+    pub fn resume_connection_fsm(&self) {
+        if let Some(pause) = self.connection_fsm_pause.borrow_mut().take() {
+            resume_fsm(&pause);
+        }
+    }
+
+    pub fn fill_connection_fsm_queue(&self) -> usize {
+        let mut connection = self.active_connection();
+        for accepted in 0..2 * EVENT_QUEUE_SIZE {
+            if connection
+                .inject_update_data_mode(DataMode::Normal)
+                .is_err()
+            {
+                return accepted;
+            }
+        }
+        panic!("connection fsm queue never filled");
+    }
+
+    pub fn pause_call_fsm(&self) {
+        assert!(
+            self.call_fsm_pause.borrow().is_none(),
+            "call FSM already paused"
+        );
+        let pause = FsmPause::default();
+        self.active_call().inject_pause(pause.clone()).unwrap();
+        *self.call_fsm_pause.borrow_mut() = Some(pause);
+    }
+
+    pub fn resume_call_fsm(&self) {
+        if let Some(pause) = self.call_fsm_pause.borrow_mut().take() {
+            resume_fsm(&pause);
+        }
+    }
+
+    pub fn fill_call_fsm_queue(&self) -> usize {
+        let mut call = self.active_call();
+        let event = ConnectionObserverEvent::AudioLevels {
+            captured_level: 0,
+            received_level: 0,
+        };
+        for accepted in 0..2 * EVENT_QUEUE_SIZE {
+            if call.on_connection_observer_event(1, event).is_err() {
+                return accepted;
+            }
+        }
+        panic!("call fsm queue never filled");
+    }
+
+    pub fn wait_for_teardown(&self) {
+        // Flush twice: hangup and the teardown it spawns are separate tasks on
+        // the same FIFO worker, so a single flush can return between them.
+        let mut cm = self.cm();
+        cm.sync_worker_thread().unwrap();
+        cm.sync_worker_thread().unwrap();
+    }
+
+    pub fn wait_for_connection_fsm_terminated(&self, connection: &Connection<SimPlatform>) -> bool {
+        connection.wait_for_fsm_terminated(FSM_WAIT_TIMEOUT)
+    }
+
+    pub fn wait_for_call_fsm_terminated(&self, call: &Call<SimPlatform>) -> bool {
+        call.wait_for_fsm_terminated(FSM_WAIT_TIMEOUT)
+    }
+
+    pub fn wait_for_call_concluded(&self, count: usize) -> bool {
+        self.platform
+            .wait_for_call_concluded(count, FSM_WAIT_TIMEOUT)
+    }
+
     pub fn force_internal_fault(&self, enable: bool) {
         let mut platform = self.call_manager.platform().unwrap();
         platform.force_internal_fault(enable);
@@ -158,6 +269,11 @@ impl TestContext {
     pub fn force_signaling_failure(&self, enable: bool) {
         let mut platform = self.call_manager.platform().unwrap();
         platform.force_signaling_failure(enable);
+    }
+
+    pub fn force_call_ended_failure(&self, enable: bool) {
+        let mut platform = self.call_manager.platform().unwrap();
+        platform.force_call_ended_failure(enable);
     }
 
     pub fn no_auto_message_sent_for_ice(&self, enable: bool) {

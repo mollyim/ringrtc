@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -103,6 +103,8 @@ pub struct SimPlatform {
     /// True if the signaling functions should indicate a signaling
     /// failure to the call manager.
     force_signaling_failure: Arc<AtomicBool>,
+    /// True if on_call_ended should simulate a failure.
+    force_call_ended_failure: Arc<AtomicBool>,
     /// Track event frequencies
     event_map: Arc<Mutex<HashMap<ApplicationEvent, usize>>>,
     /// Track call end reason frequencies
@@ -119,6 +121,8 @@ pub struct SimPlatform {
     no_auto_message_sent_for_ice: Arc<AtomicBool>,
     /// Last sent message from on_send_ice
     last_ice_sent: Arc<Mutex<Option<signaling::SendIce>>>,
+    /// Notified each time a call concludes.
+    call_concluded_signal: Arc<(Mutex<()>, Condvar)>,
 }
 
 impl fmt::Display for SimPlatform {
@@ -212,6 +216,10 @@ impl Platform for SimPlatform {
         _summary: CallSummary,
     ) -> Result<()> {
         info!("on_call_ended(): {}, remote_peer: {}", reason, remote_peer);
+
+        if self.force_call_ended_failure.load(Ordering::Acquire) {
+            return Err(SimError::CallEndedError.into());
+        }
 
         let mut map = self.call_end_reason_map.lock().unwrap();
         map.entry(reason).and_modify(|e| *e += 1).or_insert(1);
@@ -541,6 +549,9 @@ impl Platform for SimPlatform {
             Err(SimError::CallConcludedError.into())
         } else {
             let _ = self.stats.call_concluded.fetch_add(1, Ordering::AcqRel);
+            let (mutex, condvar) = &*self.call_concluded_signal;
+            let _guard = mutex.lock().unwrap();
+            condvar.notify_all();
             Ok(())
         }
     }
@@ -728,6 +739,11 @@ impl SimPlatform {
             .store(enable, Ordering::Release);
     }
 
+    pub fn force_call_ended_failure(&mut self, enable: bool) {
+        self.force_call_ended_failure
+            .store(enable, Ordering::Release);
+    }
+
     pub fn no_auto_message_sent_for_ice(&mut self, enable: bool) {
         self.no_auto_message_sent_for_ice
             .store(enable, Ordering::Release);
@@ -833,6 +849,16 @@ impl SimPlatform {
 
     pub fn call_concluded_count(&self) -> usize {
         self.stats.call_concluded.load(Ordering::Acquire)
+    }
+
+    /// Block until at least `count` calls have concluded, or the timeout elapses.
+    pub fn wait_for_call_concluded(&self, count: usize, timeout: Duration) -> bool {
+        let (mutex, condvar) = &*self.call_concluded_signal;
+        let guard = mutex.lock().unwrap();
+        let (_guard, result) = condvar
+            .wait_timeout_while(guard, timeout, |_| self.call_concluded_count() < count)
+            .unwrap();
+        !result.timed_out()
     }
 
     pub fn take_group_call_ring_updates(&self) -> Vec<GroupCallRingUpdate> {

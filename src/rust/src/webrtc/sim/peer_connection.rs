@@ -66,6 +66,7 @@ impl RffiPeerConnection {
                 removed_ice_candidates: vec![],
                 max_bitrate_bps: None,
                 last_sent_rtp_data: None,
+                closed: false,
             })),
         }
     }
@@ -91,6 +92,23 @@ impl RffiPeerConnection {
     pub fn outgoing_audio_enabled(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.outgoing_audio_enabled
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        state.outgoing_audio_enabled = false;
+        state.rtp_packet_sink = None;
+    }
+
+    pub fn closed(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.closed
+    }
+
+    pub fn rtp_sink_registered(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.rtp_packet_sink.is_some()
     }
 
     fn set_incoming_media_enabled(&self, _enabled: bool) {
@@ -146,6 +164,7 @@ struct RffiPeerConnectionState {
     removed_ice_candidates: Vec<SocketAddr>,
     max_bitrate_bps: Option<i32>,
     last_sent_rtp_data: Option<Vec<u8>>,
+    closed: bool,
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
@@ -418,9 +437,12 @@ pub unsafe fn Rust_setRtpPacketObserver(
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
 pub unsafe fn Rust_closePeerConnection(
-    _peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
+    peer_connection: webrtc::ptr::BorrowedRc<RffiPeerConnection>,
 ) {
     info!("Rust_closePeerConnection:");
+    unsafe {
+        (*peer_connection.as_ptr()).close();
+    }
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]

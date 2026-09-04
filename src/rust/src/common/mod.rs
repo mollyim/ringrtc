@@ -11,7 +11,7 @@ pub mod time;
 pub mod units;
 mod versioning;
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use sha2::{Digest, Sha256};
 pub use versioning::SemanticVersion;
@@ -23,6 +23,12 @@ use crate::webrtc::{
 
 /// Common Result type, using `anyhow::Error` for Error.
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
+
+/// How long to wait for an FSM to quiesce before tearing down anyway.
+pub const TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bounded capacity of each FSM event channel.
+pub const EVENT_QUEUE_SIZE: usize = 256;
 
 /// Unique call identification number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

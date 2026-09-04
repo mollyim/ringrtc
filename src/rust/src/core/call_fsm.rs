@@ -43,13 +43,12 @@
 //! - CallTimeout
 //! - InternalError
 
-use std::{
-    fmt,
-    sync::{Arc, Condvar, Mutex, mpsc},
-    thread,
-    time::Duration,
-};
+#[cfg(feature = "sim")]
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::{fmt, thread, time::Duration};
 
+#[cfg(feature = "sim")]
+use crate::error::RingRtcError;
 use crate::{
     common::{
         ApplicationEvent, CallConfig, CallDirection, CallEndReason, CallState, ConnectionState,
@@ -63,7 +62,6 @@ use crate::{
         signaling,
         util::try_scoped,
     },
-    error::RingRtcError,
     webrtc::{peer_connection::AudioLevel, peer_connection_observer::NetworkRoute},
 };
 
@@ -108,7 +106,11 @@ pub enum CallEvent {
     /// The call timed out while establishing a connection.
     CallTimeout,
     /// Synchronize the FSM.
+    #[cfg(feature = "sim")]
     Synchronize(Arc<(Mutex<bool>, Condvar)>),
+    /// Block the FSM until released.
+    #[cfg(feature = "sim")]
+    Pause(Arc<(Mutex<bool>, Condvar)>),
     /// Terminate the call.
     Terminate,
 }
@@ -150,7 +152,10 @@ impl fmt::Display for CallEvent {
             }
             CallEvent::InternalError(e) => format!("InternalError: {}", e),
             CallEvent::CallTimeout => "CallTimeout".to_string(),
+            #[cfg(feature = "sim")]
             CallEvent::Synchronize(_) => "Synchronize".to_string(),
+            #[cfg(feature = "sim")]
+            CallEvent::Pause(_) => "Pause".to_string(),
             CallEvent::Terminate => "Terminate".to_string(),
         };
         write!(f, "({})", display)
@@ -200,6 +205,8 @@ where
     worker_thread: Actor<()>,
     /// Thread for processing client application notification events.
     notify_thread: Actor<()>,
+    /// Set once the FSM has begun terminating.
+    terminating: bool,
 }
 
 impl<T> fmt::Display for CallStateMachine<T>
@@ -230,6 +237,7 @@ where
             event_stream,
             worker_thread: Actor::start("call-worker", Stopper::new(), |_| Ok(()))?,
             notify_thread: Actor::start("call-notify", Stopper::new(), |_| Ok(()))?,
+            terminating: false,
         })
     }
 
@@ -239,19 +247,34 @@ where
                 Ok(state) => state,
                 Err(e) => {
                     error!("Handling event failed: {}", e);
+                    self.terminate_if_requested(&call);
                     return;
                 }
             };
             if !event.is_frequent() {
                 info!("state: {}, event: {}", state, event);
             }
-            if let Err(e) = self.handle_event(call, state, event) {
+            if let Err(e) = self.handle_event(call.clone(), state, event) {
                 error!("Handling event failed: {}", e);
             }
+
+            self.terminate_if_requested(&call);
+        }
+    }
+
+    /// Terminate out of band, independent of queue depth.
+    fn terminate_if_requested(&mut self, call: &Call<T>) {
+        if !self.terminating
+            && call.terminate_requested()
+            && let Err(e) = self.handle_terminate(call.clone())
+        {
+            error!("Handling terminate failed: {}", e);
+            // Don't return any error, let the queue drain.
         }
     }
 
     /// Synchronize a thread with the main FSM thread.
+    #[cfg(feature = "sim")]
     fn sync_thread(label: &'static str, actor: &Actor<()>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         actor.send(move |_| {
@@ -376,7 +399,10 @@ where
                 return self.handle_send_hangup_via_rtp_data_to_all(call, state, hangup);
             }
             CallEvent::Terminate => return self.handle_terminate(call),
+            #[cfg(feature = "sim")]
             CallEvent::Synchronize(sync) => return self.handle_synchronize(call, sync),
+            #[cfg(feature = "sim")]
+            CallEvent::Pause(pause) => return self.handle_pause(pause),
             _ => {}
         }
 
@@ -412,7 +438,10 @@ where
             CallEvent::CallTimeout => self.handle_call_timeout(call, state),
             // Handled above
             CallEvent::SendHangupViaRtpDataToAll(_) => Ok(()),
+            #[cfg(feature = "sim")]
             CallEvent::Synchronize(_) => Ok(()),
+            #[cfg(feature = "sim")]
+            CallEvent::Pause(_) => Ok(()),
             CallEvent::Terminate => Ok(()),
         }
     }
@@ -1054,6 +1083,7 @@ where
         Ok(())
     }
 
+    #[cfg(feature = "sim")]
     fn handle_synchronize(
         &mut self,
         mut call: Call<T>,
@@ -1074,19 +1104,41 @@ where
             condvar.notify_one();
             Ok(())
         } else {
-            Err(RingRtcError::MutexPoisoned(
-                "CallConnection Synchronize Condition Variable".to_string(),
+            Err(
+                RingRtcError::MutexPoisoned("Call Synchronize Condition Variable".to_string())
+                    .into(),
             )
-            .into())
+        }
+    }
+
+    #[cfg(feature = "sim")]
+    fn handle_pause(&self, pause: Arc<(Mutex<bool>, Condvar)>) -> Result<()> {
+        let (mutex, condvar) = &*pause;
+        if let Ok(guard) = mutex.lock() {
+            let _guard = condvar
+                .wait_while(guard, |released| !*released)
+                .expect("condvar should not be poisoned");
+            Ok(())
+        } else {
+            Err(RingRtcError::MutexPoisoned("Call Pause Condition Variable".to_string()).into())
         }
     }
 
     fn handle_terminate(&mut self, mut call: Call<T>) -> Result<()> {
-        self.event_stream.close();
-        self.drain_worker_thread();
-        self.drain_notify_thread();
+        if !self.terminating {
+            self.terminating = true;
+            self.event_stream.close();
+            self.drain_worker_thread();
+            self.drain_notify_thread();
+        }
 
-        call.set_state(CallState::Terminated)?;
+        if let Err(err) = call.set_state(CallState::Terminated) {
+            warn!(
+                "handle_terminate(): failed to set Terminated state: {}",
+                err
+            );
+        }
+
         call.terminate_complete()
     }
 

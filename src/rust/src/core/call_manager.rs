@@ -1146,7 +1146,7 @@ where
     }
 
     #[cfg(feature = "sim")]
-    fn sync_worker_thread(&mut self) -> Result<()> {
+    pub fn sync_worker_thread(&mut self) -> Result<()> {
         // cycle a condvar through the worker thread
         let condvar = Arc::new((Mutex::new(false), Condvar::new()));
         self.worker_start_sync(condvar.clone())?;
@@ -1216,14 +1216,17 @@ where
         self.send_next_message(Some(message_item))
     }
 
-    /// Concludes the specified Call.
+    /// Terminates the specified Call.
     ///
-    /// Conclusion includes:
+    /// Termination includes:
     /// - Trimming the message_queue, before possibly sending hangup message(s)
     /// - [optional] notifying application about call ended reason
-    /// - closing down Call object
+    /// - Closing down Call object
     /// - [optional] sending hangup on all connections via RTP data
     /// - [optional] sending Signal hangup message
+    ///
+    /// Don't return early on error; log it and continue to ensure a complete
+    /// teardown of the call.
     fn terminate_call(
         &mut self,
         mut call: Call<T>,
@@ -1234,43 +1237,58 @@ where
 
         info!("terminate_call(): call_id: {}", call_id);
 
-        self.trim_messages(call_id)?;
+        if let Err(err) = self.trim_messages(call_id) {
+            error!("terminate_call(): failed to trim messages: {}", err);
+        }
 
-        if let Some(reason) = reason {
-            let remote_peer = call.remote_peer()?;
-            let summary = call
-                .summary()
-                .build_call_summary(Some(call_id.call_summary_hash()), reason);
-            self.on_call_ended(&remote_peer, call_id, reason, summary)?;
+        if let Some(reason) = reason
+            && let Err(err) = try_scoped(|| {
+                let remote_peer = call.remote_peer()?;
+                let summary = call
+                    .summary()
+                    .build_call_summary(Some(call_id.call_summary_hash()), reason);
+                self.on_call_ended(&remote_peer, call_id, reason, summary)
+            })
+        {
+            error!("terminate_call(): failed to notify call ended: {}", err);
         }
 
         if let Some(hangup) = hangup {
             // All connections send hangup via RTP data.
-            call.inject_send_hangup_via_rtp_data_to_all(hangup)?;
+            if let Err(err) = call.inject_send_hangup_via_rtp_data_to_all(hangup) {
+                error!("terminate_call(): failed to hangup via RTP data: {}", err);
+            }
         }
 
         let mut call_manager = self.clone();
         self.worker_spawn(move || {
-            let err = try_scoped(|| {
-                if let Some(hangup) = hangup {
-                    // If we want to send a hangup message, be sure that
-                    // the call actually should send one.
-                    if call.should_send_hangup() {
-                        call.send_hangup_via_signaling_to_all(hangup)?;
-                    }
-                }
-                call_manager.terminate_and_drop_call(call_id)
-            });
-            if let Err(err) = err {
-                error!("Conclude call failed: {}", err);
-                if let Ok(remote_peer) = call.remote_peer() {
-                    let _ = call_manager.on_call_ended(
-                        &remote_peer,
-                        call_id,
-                        CallEndReason::InternalFailure,
-                        CallSummary::default(),
-                    );
-                }
+            let mut failed = false;
+
+            // If we want to send a hangup message, be sure that the call
+            // actually should send one.
+            if let Some(hangup) = hangup
+                && call.should_send_hangup()
+                && let Err(err) = call.send_hangup_via_signaling_to_all(hangup)
+            {
+                error!("terminate_call(): failed to hangup via signaling: {}", err);
+                failed = true;
+            }
+
+            if let Err(err) = call_manager.terminate_and_drop_call(call_id) {
+                error!(
+                    "terminate_call(): failed to terminate and drop call: {}",
+                    err
+                );
+                failed = true;
+            }
+
+            if failed && let Ok(remote_peer) = call.remote_peer() {
+                let _ = call_manager.on_call_ended(
+                    &remote_peer,
+                    call_id,
+                    CallEndReason::InternalFailure,
+                    CallSummary::default(),
+                );
             }
         })
     }

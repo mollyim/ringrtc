@@ -10,6 +10,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, SyncSender},
     },
     thread,
@@ -26,7 +27,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::{
     common::{
         CallConfig, CallDirection, CallId, CallMediaType, ConnectionState, DataMode, DeviceId,
-        Result, RingBench,
+        EVENT_QUEUE_SIZE, Result, RingBench, TERMINATE_TIMEOUT,
         actor::{Actor, Stopper},
         slice::SafeSlicing,
         units::DataRate,
@@ -37,7 +38,7 @@ use crate::{
         connection_fsm::{ConnectionEvent, ConnectionStateMachine},
         platform::Platform,
         signaling,
-        util::{ptr_as_box, redact_string},
+        util::{self, ptr_as_box, redact_string},
     },
     error::RingRtcError,
     lite::sfu::DemuxId,
@@ -388,6 +389,8 @@ where
     buffered_local_ice_candidates: Arc<CallMutex<Vec<signaling::IceCandidate>>>,
     /// Condition variable used at termination to quiesce and synchronize the FSM.
     terminate_condvar: Arc<(Mutex<bool>, Condvar)>,
+    /// Set when the connection has been asked to terminate.
+    terminate_requested: Arc<AtomicBool>,
     /// This is write-once configuration and will not change.
     connection_type: ConnectionType,
     /// Execution context for the connection periodic timer tick
@@ -480,6 +483,7 @@ where
             poll_stats_config: self.poll_stats_config,
             buffered_local_ice_candidates: Arc::clone(&self.buffered_local_ice_candidates),
             terminate_condvar: Arc::clone(&self.terminate_condvar),
+            terminate_requested: Arc::clone(&self.terminate_requested),
             connection_type: self.connection_type,
             tick_context: self.tick_context.clone(),
             accumulated_rtp_data_message: Arc::clone(&self.accumulated_rtp_data_message),
@@ -504,7 +508,7 @@ where
         incoming_video_sink: Option<Box<dyn VideoSink>>,
     ) -> Result<Self> {
         // Create a FSM worker for this connection.
-        let (fsm_sender, fsm_receiver) = std::sync::mpsc::sync_channel(256);
+        let (fsm_sender, fsm_receiver) = std::sync::mpsc::sync_channel(EVENT_QUEUE_SIZE);
 
         let call_id = call.call_id();
         let direction = call.direction();
@@ -555,6 +559,7 @@ where
                 "buffered_local_ice_candidates",
             )),
             terminate_condvar: Arc::new((Mutex::new(false), Condvar::new())),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
             connection_type,
             tick_context: Actor::start("tick_context", Stopper::new(), |actor| {
                 Ok(TickState {
@@ -678,7 +683,7 @@ where
         })();
 
         // Always start the FSM no matter what happened above because
-        // close() relies on it running.
+        // terminate() relies on it running.
         self.start_fsm()?;
         result
     }
@@ -809,7 +814,7 @@ where
         // checks the state and because we don't want to do things (like
         // handle ICE connected events) until after everything is set up.
         // Always start the FSM no matter what happened above because
-        // close() relies on it running.
+        // terminate() relies on it running.
         self.start_fsm()?;
         result
     }
@@ -954,7 +959,7 @@ where
         // checks the state and because we don't want to do things (like
         // handle ICE connected events) until after everything is set up.
         // Always start the FSM no matter what happened above because
-        // close() relies on it running.
+        // terminate() relies on it running.
         self.start_fsm()?;
         result
     }
@@ -1113,13 +1118,9 @@ where
         }
     }
 
-    /// Returns `true` if the call is terminating.
+    /// Returns `true` if the call is terminating or already terminated..
     pub fn terminating(&self) -> Result<bool> {
-        if let ConnectionState::Terminating = self.state()? {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(self.state()?.terminating_or_terminated())
     }
 
     /// Clone the Connection, Box it and return a raw pointer to the Box.
@@ -1711,6 +1712,11 @@ where
             })
     }
 
+    /// Whether the connection has been asked to terminate.
+    pub fn terminate_requested(&self) -> bool {
+        self.terminate_requested.load(Ordering::SeqCst)
+    }
+
     /// Terminate the connection.
     ///
     /// Notify the internal FSM to terminate.
@@ -1720,12 +1726,28 @@ where
     pub fn terminate(&mut self) -> Result<()> {
         info!("terminate(): ref_count: {}", self.ref_count());
 
-        self.set_state(ConnectionState::Terminating)?;
+        // Set the state before the terminate_requested flag, so the FSM
+        // cannot observe the flag while the state still reads as active.
+        if let Err(err) = self.set_state(ConnectionState::Terminating) {
+            warn!(
+                "terminate(): failed to set and notify Terminating state: {}",
+                err
+            );
+        }
+        self.terminate_requested.store(true, Ordering::SeqCst);
 
-        self.inject_event(ConnectionEvent::Terminate)?;
-        self.wait_for_terminate()?;
-
-        self.set_state(ConnectionState::Terminated)?;
+        // Wait for the FSM to quiesce.
+        if let Err(err) = util::try_scoped(|| {
+            self.inject_event(ConnectionEvent::Terminate)?;
+            self.wait_for_terminate()?;
+            if let Err(err) = self.set_state(ConnectionState::Terminated) {
+                warn!("terminate(): failed to notify Terminated: {}", err);
+            }
+            Ok(())
+        }) {
+            // Log-and-continue so that teardown can continue below.
+            error!("terminate(): failed to quiesce the FSM: {}", err);
+        }
 
         // Stop the timer thread, if any.
         self.tick_context.stopper().stop_all_and_join();
@@ -1763,28 +1785,37 @@ where
                 Ok(())
             }
             None => Err(RingRtcError::OptionValueNotSet(
-                String::from("close()"),
+                String::from("terminate()"),
                 String::from("connection_ptr"),
             )
             .into()),
         }
     }
 
-    /// Bottom half of `close()`
+    /// Bottom half of `terminate()`
     ///
-    /// Waits for the FSM shutdown condition variable to signal that
-    /// shutdown is complete.
+    /// Waits for the FSM shutdown condition variable to signal that shutdown is
+    /// complete, or times out after `TERMINATE_TIMEOUT`.
     fn wait_for_terminate(&mut self) -> Result<()> {
-        // Wait for terminate operation to complete
         info!("terminate(): waiting for terminate complete...");
         let (mutex, condvar) = &*self.terminate_condvar;
-        if let Ok(mut terminate_complete) = mutex.lock() {
-            while !*terminate_complete {
-                terminate_complete = condvar.wait(terminate_complete).map_err(|_| {
+        if let Ok(terminate_complete) = mutex.lock() {
+            let (_terminate_complete, result) = condvar
+                .wait_timeout_while(
+                    terminate_complete,
+                    TERMINATE_TIMEOUT,
+                    |terminate_complete| !*terminate_complete,
+                )
+                .map_err(|_| {
                     RingRtcError::MutexPoisoned(
                         "Connection Terminate Condition Variable".to_string(),
                     )
                 })?;
+            if result.timed_out() {
+                return Err(RingRtcError::TerminateTimeout(
+                    "Connection Terminate Condition Variable".to_string(),
+                )
+                .into());
             }
         } else {
             return Err(RingRtcError::MutexPoisoned(
@@ -2026,7 +2057,11 @@ where
     /// # Arguments
     ///
     /// * `call_id` - Call ID from the remote peer.
-    fn inject_received_hangup(&mut self, call_id: CallId, hangup: signaling::Hangup) -> Result<()> {
+    pub fn inject_received_hangup(
+        &mut self,
+        call_id: CallId,
+        hangup: signaling::Hangup,
+    ) -> Result<()> {
         self.inject_event(ConnectionEvent::ReceivedHangup(call_id, hangup))
     }
 
@@ -2196,6 +2231,39 @@ where
             .lock()
             .unwrap()
             .sender_status
+    }
+
+    /// Inject a pausing event into the FSM.
+    ///
+    /// Blocks the FSM (not the caller) once it dequeues the event, until `pause`
+    /// is released, so a test can saturate the event queue behind it.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn inject_pause(&mut self, pause: Arc<(Mutex<bool>, Condvar)>) -> Result<()> {
+        self.inject_event(ConnectionEvent::Pause(pause))
+    }
+
+    /// Whether the FSM has signaled that termination is complete.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn fsm_terminated(&self) -> bool {
+        *self.terminate_condvar.0.lock().unwrap()
+    }
+
+    /// Block the caller until the FSM signals termination, or the timeout
+    /// elapses. Returns whether termination is completed.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn wait_for_fsm_terminated(&self, timeout: Duration) -> bool {
+        let (mutex, condvar) = &*self.terminate_condvar;
+        let guard = mutex.lock().unwrap();
+        let (guard, _) = condvar
+            .wait_timeout_while(guard, timeout, |terminated| !*terminated)
+            .unwrap();
+        *guard
     }
 }
 

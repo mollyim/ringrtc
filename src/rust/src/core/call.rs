@@ -22,7 +22,7 @@ use x25519_dalek::StaticSecret;
 use crate::{
     common::{
         ApplicationEvent, CallConfig, CallDirection, CallId, CallMediaType, CallState, DeviceId,
-        Result,
+        EVENT_QUEUE_SIZE, Result, TERMINATE_TIMEOUT,
         actor::{Actor, Stopper},
     },
     core::{
@@ -33,7 +33,7 @@ use crate::{
         call_summary::DirectCallSummary,
         connection::{Connection, ConnectionObserverEvent, ConnectionType},
         platform::Platform,
-        signaling,
+        signaling, util,
     },
     error::RingRtcError,
     webrtc::{
@@ -101,6 +101,8 @@ where
     connection_map: Arc<CallMutex<HashMap<DeviceId, Connection<T>>>>,
     /// Condition variable used at termination to quiesce and synchronize the FSM.
     terminate_condvar: Arc<(Mutex<bool>, Condvar)>,
+    /// Set when the call has been asked to terminate.
+    terminate_requested: Arc<AtomicBool>,
     /// Whether or not an offer has been sent via messaging for this call.
     did_send_offer: Arc<AtomicBool>,
     /// Whether or not the application has already been notified of ApplicationEvent::RemoteRinging.
@@ -191,6 +193,7 @@ where
             timeout_stopper: self.timeout_stopper.clone(),
             connection_map: Arc::clone(&self.connection_map),
             terminate_condvar: Arc::clone(&self.terminate_condvar),
+            terminate_requested: Arc::clone(&self.terminate_requested),
             did_send_offer: Arc::clone(&self.did_send_offer),
             did_notify_application_of_remote_ringing: Arc::clone(
                 &self.did_notify_application_of_remote_ringing,
@@ -219,7 +222,7 @@ where
         let asset_registry = call_manager.asset_registry()?;
 
         // create a FSM worker for this connection
-        let (fsm_sender, fsm_receiver) = std::sync::mpsc::sync_channel(256);
+        let (fsm_sender, fsm_receiver) = std::sync::mpsc::sync_channel(EVENT_QUEUE_SIZE);
         let mut call_fsm = CallStateMachine::new(fsm_receiver.into())?;
         thread::Builder::new()
             .name("fsm-worker".to_string())
@@ -240,6 +243,7 @@ where
             timeout_stopper: Stopper::new(),
             connection_map: Arc::new(CallMutex::new(HashMap::new(), "connection_map")),
             terminate_condvar: Arc::new((Mutex::new(false), Condvar::new())),
+            terminate_requested: Arc::new(AtomicBool::new(false)),
             did_send_offer: Arc::new(AtomicBool::new(false)),
             did_notify_application_of_remote_ringing: Arc::new(AtomicBool::new(false)),
             forking: Arc::new(CallMutex::new(None, "forking")),
@@ -388,13 +392,9 @@ where
         }
     }
 
-    /// Returns `true` if the call is terminating.
+    /// Returns `true` if the call is terminating or already terminated.
     pub fn terminating(&self) -> Result<bool> {
-        if let CallState::Terminating = self.state()? {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(self.state()?.terminating_or_terminated())
     }
 
     /// Return the strong reference count on the state `Arc<Mutex<>>`.
@@ -975,6 +975,11 @@ where
         Ok(())
     }
 
+    /// Whether the call has been asked to terminate.
+    pub fn terminate_requested(&self) -> bool {
+        self.terminate_requested.load(Ordering::SeqCst)
+    }
+
     /// Terminate this Call.
     ///
     /// Notify the internal FSM to terminate.
@@ -982,12 +987,23 @@ where
     /// `Note:` The current thread is blocked while waiting for the
     /// FSM to signal that termination is complete.
     pub fn terminate(&mut self) -> Result<()> {
-        let start_ref_count = self.ref_count();
-        info!("terminate(): ref_count: {}", start_ref_count);
+        info!("terminate(): ref_count: {}", self.ref_count());
 
-        self.set_state(CallState::Terminating)?;
-        self.inject_event(CallEvent::Terminate)?;
-        self.wait_for_terminate()?;
+        // Set the state before the terminate_requested flag, so the FSM
+        // cannot observe the flag while the state still reads as active.
+        if let Err(err) = self.set_state(CallState::Terminating) {
+            warn!("terminate(): failed to set Terminating state: {}", err);
+        }
+        self.terminate_requested.store(true, Ordering::SeqCst);
+
+        // Wait for the FSM to quiesce.
+        if let Err(err) = util::try_scoped(|| {
+            self.inject_event(CallEvent::Terminate)?;
+            self.wait_for_terminate()
+        }) {
+            // Log-and-continue so that teardown can continue below.
+            error!("terminate(): failed to quiesce the FSM: {}", err);
+        }
 
         self.terminate_connections()?;
 
@@ -998,19 +1014,28 @@ where
         Ok(())
     }
 
-    /// Bottom half of `close()`
+    /// Bottom half of `terminate()`
     ///
-    /// Waits for the FSM shutdown condition variable to signal that
-    /// shutdown is complete.
+    /// Waits for the FSM shutdown condition variable to signal that shutdown is
+    /// complete, or times out after `TERMINATE_TIMEOUT`.
     pub fn wait_for_terminate(&mut self) -> Result<()> {
-        // Wait for terminate operation to complete
         info!("terminate(): waiting for terminate complete...");
         let (mutex, condvar) = &*self.terminate_condvar;
-        if let Ok(mut terminate_complete) = mutex.lock() {
-            while !*terminate_complete {
-                terminate_complete = condvar.wait(terminate_complete).map_err(|_| {
+        if let Ok(terminate_complete) = mutex.lock() {
+            let (_terminate_complete, result) = condvar
+                .wait_timeout_while(
+                    terminate_complete,
+                    TERMINATE_TIMEOUT,
+                    |terminate_complete| !*terminate_complete,
+                )
+                .map_err(|_| {
                     RingRtcError::MutexPoisoned("Call Terminate Condition Variable".to_string())
                 })?;
+            if result.timed_out() {
+                return Err(RingRtcError::TerminateTimeout(
+                    "Call Terminate Condition Variable".to_string(),
+                )
+                .into());
             }
         } else {
             return Err(RingRtcError::MutexPoisoned(
@@ -1254,5 +1279,37 @@ where
         let forking = self.forking.lock()?;
         let parent_connection = forking.as_ref().unwrap().parent_connection.clone();
         Ok(parent_connection)
+    }
+
+    /// Inject a pausing event into the FSM.
+    ///
+    /// Blocks the FSM once it dequeues the event, until released.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn inject_pause(&mut self, pause: Arc<(Mutex<bool>, Condvar)>) -> Result<()> {
+        self.inject_event(CallEvent::Pause(pause))
+    }
+
+    /// Whether the FSM has signaled that termination is complete.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn fsm_terminated(&self) -> bool {
+        *self.terminate_condvar.0.lock().unwrap()
+    }
+
+    /// Block the caller until the FSM signals termination, or the timeout
+    /// elapses. Returns whether termination is completed.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn wait_for_fsm_terminated(&self, timeout: Duration) -> bool {
+        let (mutex, condvar) = &*self.terminate_condvar;
+        let guard = mutex.lock().unwrap();
+        let (guard, _) = condvar
+            .wait_timeout_while(guard, timeout, |terminated| !*terminated)
+            .unwrap();
+        *guard
     }
 }
