@@ -4,6 +4,7 @@ FROM docker.io/eclipse-temurin:21.0.11_10-jdk-noble@sha256:15ec53e5373fbede42fb2
 # Minimal environment with only system tools. This stage is stable and reusable across merges.
 
 RUN apt-get install -y --no-install-recommends --update \
+      curl \
       fd-find \
       git \
       make \
@@ -17,13 +18,10 @@ RUN apt-get install -y --no-install-recommends --update \
 RUN git config --global user.name "builder" \
  && git config --global user.email "builder@docker.local"
 
-FROM base AS builder
+FROM base AS toolchain
 
-# Stage 2: builder
-# Adds toolchains, project source, and the build entrypoint.
-
-LABEL im.molly.artifacts.maven.path="/root/.m2/repository/"
-LABEL im.molly.staging.maven.url="https://maven.cloudsmith.io/mollyim/ringrtc/"
+# Stage 2: toolchain
+# Language SDKs, compilers, and build tools.
 
 # Install Android SDK
 ARG ANDROID_SDK_DIST="commandlinetools-linux-13114758_latest.zip"
@@ -73,7 +71,7 @@ RUN apt-get update --snapshot "$APT_SNAPSHOT_ID" \
       xz-utils \
  && rm -rf /var/lib/apt/lists/*
 
-## Cache gradle wrapper
+# Pre-fetch Gradle wrapper
 COPY gradlew /ringrtc/
 COPY gradle/wrapper /ringrtc/gradle/wrapper
 RUN /ringrtc/gradlew --version
@@ -94,11 +92,45 @@ COPY bin/prepare-workspace bin/env.sh bin/env-android.sh bin/gsync-webrtc /ringr
 COPY config /ringrtc/config
 RUN /ringrtc/bin/prepare-workspace android
 
-# Copy project and purge generated files
-COPY . /ringrtc/
-WORKDIR /ringrtc
-RUN git clean -ffdx -e "out/" -e "src/webrtc*"
+FROM toolchain AS source
 
-# Use Make as the builder entrypoint
+# Stage 3: source
+# Full project source tree.
+
+WORKDIR /ringrtc
+COPY . .
+
+# If a Git checkout is present, remove untracked files so builds start from a clean tree.
+RUN test ! -e .git || git clean -ffdx -e "out/" -e "src/webrtc*"
+
+FROM source AS deps-overlay
+
+# Stage 4: deps-overlay
+# Hook for pre-built dependencies, supplied via named build contexts.
+
+# This project has none, so the stage is an empty alias of source.
+
+FROM deps-overlay AS assemble
+
+# Stage 5: assemble
+# Build stage for the project.
+# Can be overridden with a prebuilt image via:
+#  --build-context assemble=docker-image://<image>
+
+RUN make assemble
+
+FROM scratch AS artifacts
+
+# Stage 6: artifacts
+# Build outputs only, laid out exactly as consumers expect.
+
+COPY --from=assemble /root/.m2/repository/ /
+
+FROM deps-overlay AS default
+
+# Stage 7: default
+# Runnable build environment without prebuilt outputs.
+# Left as the final stage so it becomes the default target.
+
 ENTRYPOINT ["make"]
 CMD ["help"]
