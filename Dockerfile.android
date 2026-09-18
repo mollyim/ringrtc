@@ -100,9 +100,6 @@ FROM toolchain AS source
 WORKDIR /ringrtc
 COPY . .
 
-# If a Git checkout is present, remove untracked files so builds start from a clean tree.
-RUN test ! -e .git || git clean -ffdx -e "out/" -e "src/webrtc*"
-
 FROM source AS deps-overlay
 
 # Stage 4: deps-overlay
