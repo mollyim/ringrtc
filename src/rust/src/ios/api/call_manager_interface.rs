@@ -11,7 +11,7 @@ use libc::size_t;
 
 use crate::{
     common::{CallConfig, CallMediaType, DataMode, DeviceId},
-    core::{group_call, signaling},
+    core::{call_manager::SvcConfig, group_call, signaling},
     ios::{
         api::call_summary::rtc_callsummary_CallSummary,
         call_manager::{self, IosCallManager},
@@ -99,6 +99,18 @@ impl AppByteSlice {
 pub struct AppOptionalUInt16 {
     pub value: u16,
     pub valid: bool,
+}
+
+/// Structure for passing call configuration from Swift to Rust.
+#[repr(C)]
+#[derive(Debug)]
+#[allow(non_snake_case)]
+pub struct AppCallConfig {
+    pub dataMode: i32,
+    pub dredDuration: u8,
+    pub enableVp9Encode: bool,
+    pub enableVp9Decode: bool,
+    pub statsIntervalSecs: AppOptionalUInt16,
 }
 
 /// Structure for passing optional u32 values to/from Swift.
@@ -340,6 +352,38 @@ pub struct AppVideoRequest {
 pub struct AppVideoRequestArray {
     pub resolutions: *const AppVideoRequest,
     pub count: size_t,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+#[allow(non_snake_case)]
+pub struct AppSvcConfig {
+    pub mode: AppByteSlice,
+    pub modeForScreenshare: AppByteSlice,
+    pub maxBitrateBps: AppOptionalUInt32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+#[allow(non_snake_case)]
+pub struct AppOptionalSvcConfig {
+    pub valid: bool,
+    pub config: AppSvcConfig,
+}
+
+fn svc_config_from_app_svc_config(app_svc_config: &AppSvcConfig) -> Option<SvcConfig> {
+    let mode = string_from_app_slice(&app_svc_config.mode)?;
+    let mode_for_screenshare = string_from_app_slice(&app_svc_config.modeForScreenshare)?;
+    let max_bitrate_bps = if app_svc_config.maxBitrateBps.valid {
+        Some(app_svc_config.maxBitrateBps.value as i32)
+    } else {
+        None
+    };
+    Some(SvcConfig {
+        mode,
+        mode_for_screenshare,
+        max_bitrate_bps,
+    })
 }
 
 #[repr(C)]
@@ -682,24 +726,27 @@ pub extern "C" fn ringrtcProceed(
     callManager: *mut c_void,
     callId: u64,
     appCallContext: AppCallContext,
-    dataMode: i32,
+    callConfig: AppCallConfig,
     audioLevelsIntervalMillis: u64,
-    enable_vp9: bool,
-    dred_duration: u8,
 ) -> *mut c_void {
     let audio_levels_interval = if audioLevelsIntervalMillis == 0 {
         None
     } else {
         Some(Duration::from_millis(audioLevelsIntervalMillis))
     };
+    let mut config = CallConfig::default()
+        .with_data_mode(DataMode::from_i32(callConfig.dataMode))
+        .with_enable_vp9_encode(callConfig.enableVp9Encode)
+        .with_enable_vp9_decode(callConfig.enableVp9Decode)
+        .with_dred_duration(callConfig.dredDuration);
+    if callConfig.statsIntervalSecs.valid {
+        config = config.with_stats_interval_secs(callConfig.statsIntervalSecs.value);
+    }
     match call_manager::proceed(
         callManager as *mut IosCallManager,
         callId,
         appCallContext,
-        CallConfig::default()
-            .with_data_mode(DataMode::from_i32(dataMode))
-            .with_enable_vp9(enable_vp9)
-            .with_dred_duration(dred_duration),
+        config,
         audio_levels_interval,
     ) {
         Ok(_v) => {
@@ -1144,6 +1191,7 @@ pub extern "C" fn ringrtcCreateGroupCallClient(
     hkdfExtraInfo: AppByteSlice,
     audio_levels_interval_millis: u64,
     dred_duration: u8,
+    svcConfig: AppOptionalSvcConfig,
     nativePeerConnectionFactoryOwnedRc: *const c_void,
     nativeAudioTrackOwnedRc: *const c_void,
     nativeVideoTrackOwnedRc: *const c_void,
@@ -1170,6 +1218,18 @@ pub extern "C" fn ringrtcCreateGroupCallClient(
         Some(Duration::from_millis(audio_levels_interval_millis))
     };
 
+    let svc_config = if svcConfig.valid {
+        match svc_config_from_app_svc_config(&svcConfig.config) {
+            Some(svc_config) => Some(svc_config),
+            None => {
+                error!("Bad SVC configuration");
+                return group_call::INVALID_CLIENT_ID;
+            }
+        }
+    } else {
+        None
+    };
+
     match call_manager::create_group_call_client(
         callManager as *mut IosCallManager,
         group_id,
@@ -1177,6 +1237,7 @@ pub extern "C" fn ringrtcCreateGroupCallClient(
         hkdf_extra_info,
         audio_levels_interval,
         dred_duration,
+        svc_config,
         unsafe {
             webrtc::ptr::OwnedRc::from_ptr(
                 nativePeerConnectionFactoryOwnedRc
@@ -1207,6 +1268,7 @@ pub extern "C" fn ringrtcCreateCallLinkCallClient(
     hkdfExtraInfo: AppByteSlice,
     audioLevelsIntervalMillis: u64,
     dred_duration: u8,
+    svcConfig: AppOptionalSvcConfig,
     nativePeerConnectionFactoryOwnedRc: *const c_void,
     nativeAudioTrackOwnedRc: *const c_void,
     nativeVideoTrackOwnedRc: *const c_void,
@@ -1246,6 +1308,18 @@ pub extern "C" fn ringrtcCreateCallLinkCallClient(
         Some(Duration::from_millis(audioLevelsIntervalMillis))
     };
 
+    let svc_config = if svcConfig.valid {
+        match svc_config_from_app_svc_config(&svcConfig.config) {
+            Some(svc_config) => Some(svc_config),
+            None => {
+                error!("Bad SVC configuration");
+                return group_call::INVALID_CLIENT_ID;
+            }
+        }
+    } else {
+        None
+    };
+
     match call_manager::create_call_link_call_client(
         callManager as *mut IosCallManager,
         sfu_url,
@@ -1256,6 +1330,7 @@ pub extern "C" fn ringrtcCreateCallLinkCallClient(
         hkdf_extra_info,
         audio_levels_interval,
         dred_duration,
+        svc_config,
         unsafe {
             webrtc::ptr::OwnedRc::from_ptr(
                 nativePeerConnectionFactoryOwnedRc

@@ -5,20 +5,20 @@
 
 //! WebRTC Peer Connection
 
-#[cfg(all(not(feature = "sim"), feature = "native"))]
+#[cfg(feature = "native")]
 use std::ffi::c_void;
-#[cfg(all(not(feature = "sim"), feature = "native"))]
+#[cfg(feature = "native")]
 use std::sync::{Arc, Mutex};
-use std::{ffi::CString, os::raw::c_char};
+use std::{ffi::CString, fmt::Formatter, os::raw::c_char};
 
-#[cfg(all(not(feature = "sim"), feature = "native"))]
+#[cfg(feature = "native")]
 use anyhow::anyhow;
 pub use pcf::{RffiPeerConnectionFactoryInterface, RffiPeerConnectionFactoryOwner};
 
-#[cfg(all(not(feature = "sim"), feature = "native"))]
+#[cfg(feature = "native")]
 use crate::webrtc::audio_device_module::AudioDeviceModule;
-#[cfg(all(not(feature = "sim"), feature = "native"))]
-use crate::webrtc::ffi::audio_device_module::{AUDIO_DEVICE_CBS_PTR, decrement_adm_ref_count};
+#[cfg(feature = "native")]
+use crate::webrtc::audio_device_module_callbacks::{AUDIO_DEVICE_CBS_PTR, decrement_adm_ref_count};
 #[cfg(not(feature = "sim"))]
 use crate::webrtc::ffi::peer_connection_factory as pcf;
 #[cfg(feature = "injectable_network")]
@@ -27,6 +27,7 @@ use crate::webrtc::injectable_network::InjectableNetwork;
 use crate::webrtc::sim::peer_connection_factory as pcf;
 use crate::{
     common::Result,
+    core::util::truncate_for_logging,
     error::RingRtcError,
     webrtc,
     webrtc::{
@@ -191,7 +192,7 @@ impl ProxyInfo {
 }
 
 /// Describes an audio input or output device.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AudioDevice {
     /// Name of the device
     pub name: String,
@@ -201,6 +202,17 @@ pub struct AudioDevice {
     pub i18n_key: String,
 }
 
+impl std::fmt::Debug for AudioDevice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AudioDevice{{ name: {}, unique_id: {} }}",
+            truncate_for_logging(&self.name),
+            truncate_for_logging(&self.unique_id)
+        )
+    }
+}
+
 /// Stays in sync with RffiAudioConfig in peer_connection_factory.h.
 #[repr(C)]
 pub struct RffiAudioConfig {
@@ -208,16 +220,16 @@ pub struct RffiAudioConfig {
     pub aec_enabled: bool,
     pub ns_enabled: bool,
     pub agc_enabled: bool,
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub adm_borrowed: webrtc::ptr::Borrowed<c_void>,
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub rust_audio_device_callbacks: webrtc::ptr::Borrowed<c_void>,
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub free_adm_cb: unsafe extern "C" fn(webrtc::ptr::Borrowed<c_void>),
 }
 pub struct RffiAudioConfigWrapper {
     rffi: RffiAudioConfig,
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     adm: Option<Arc<Mutex<AudioDeviceModule>>>,
 }
 
@@ -255,12 +267,15 @@ pub trait AudioDeviceObserver: Send + std::fmt::Debug {
 impl AudioConfig {
     // Return both the RffiAudioConfig as well as the name of the cubeb backend
     // in use, if any.
+    // Fallible only with `native`, where registering the ADM callback can fail.
+    #[cfg_attr(not(feature = "native"), allow(clippy::unnecessary_wraps))]
     fn rffi(
         &self,
-        #[allow(unused_mut, unused_variables)] // iOS and Android won't use this; that's fine.
+        // iOS and Android won't use this; that's fine.
+        #[cfg_attr(not(feature = "native"), allow(unused_mut, unused_variables))]
         mut audio_device_observer: Option<Box<dyn AudioDeviceObserver>>,
     ) -> Result<RffiAudioConfigWrapper> {
-        #[cfg(all(not(feature = "sim"), feature = "native"))]
+        #[cfg(feature = "native")]
         let (adm_borrowed, adm_arc) = match AudioDeviceModule::new() {
             Ok(mut adm) => {
                 if let Some(observer) = audio_device_observer.take() {
@@ -293,15 +308,15 @@ impl AudioConfig {
                 aec_enabled: self.aec_enabled,
                 ns_enabled: self.ns_enabled,
                 agc_enabled: self.agc_enabled,
-                #[cfg(all(not(feature = "sim"), feature = "native"))]
+                #[cfg(feature = "native")]
                 adm_borrowed,
-                #[cfg(all(not(feature = "sim"), feature = "native"))]
+                #[cfg(feature = "native")]
                 rust_audio_device_callbacks: webrtc::ptr::Borrowed::from_ptr(AUDIO_DEVICE_CBS_PTR)
                     .to_void(),
-                #[cfg(all(not(feature = "sim"), feature = "native"))]
+                #[cfg(feature = "native")]
                 free_adm_cb: decrement_adm_ref_count,
             },
-            #[cfg(all(not(feature = "sim"), feature = "native"))]
+            #[cfg(feature = "native")]
             adm: adm_arc,
         })
     }
@@ -360,7 +375,7 @@ pub struct PeerConnectionFactory {
     #[cfg(feature = "native")]
     device_counts: DeviceCounts,
     // Hold this so we run `drop` on it on shutdown
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     adm: Option<Arc<Mutex<AudioDeviceModule>>>,
 }
 
@@ -393,7 +408,7 @@ impl PeerConnectionFactory {
             rffi,
             #[cfg(feature = "native")]
             device_counts: Default::default(),
-            #[cfg(all(not(feature = "sim"), feature = "native"))]
+            #[cfg(feature = "native")]
             adm: audio_config_rffi.adm,
         })
     }
@@ -419,7 +434,7 @@ impl PeerConnectionFactory {
             rffi,
             #[cfg(feature = "native")]
             device_counts: Default::default(),
-            #[cfg(all(not(feature = "sim"), feature = "native"))]
+            #[cfg(feature = "native")]
             adm: None,
         }
     }
@@ -595,7 +610,7 @@ impl PeerConnectionFactory {
         )
     }
 
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub fn set_audio_playout_device_by_id(&mut self, device_id: &str) -> Result<()> {
         self.adm.as_ref().and_then(|adm| adm.lock().ok()).map_or(
             Err(anyhow!("couldn't access ADM")),
@@ -609,7 +624,7 @@ impl PeerConnectionFactory {
         )
     }
 
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub fn set_input_voice_processing_enabled(&mut self, enabled: bool) -> Result<()> {
         self.adm
             .as_ref()
@@ -685,7 +700,7 @@ impl PeerConnectionFactory {
         )
     }
 
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub fn set_audio_recording_device_by_id(&mut self, device_id: &str) -> Result<()> {
         self.adm.as_ref().and_then(|adm| adm.lock().ok()).map_or(
             Err(anyhow!("couldn't access ADM")),
@@ -699,7 +714,7 @@ impl PeerConnectionFactory {
         )
     }
 
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub fn audio_backend(&self) -> Option<String> {
         self.adm
             .as_ref()
@@ -707,7 +722,7 @@ impl PeerConnectionFactory {
             .map(|adm| adm.backend_name())
     }
 
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub fn set_audio_warmup(&mut self, enable: bool) -> Result<()> {
         if self
             .adm

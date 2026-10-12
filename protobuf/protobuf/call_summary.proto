@@ -54,7 +54,10 @@ message StreamStats {
   optional float  jitter              = 4;
   optional float  rtt                 = 5;
   optional float  jitter_buffer_delay = 6;
+  // Only present for video streams
   optional float  framerate           = 7;
+  optional uint32 width               = 8;
+  optional uint32 height              = 9;
 }
 
 message StatsSet {

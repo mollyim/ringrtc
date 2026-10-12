@@ -131,6 +131,7 @@ message SfuToDevice {
     message PeekDeviceInfo {
       optional fixed32 demux_id = 1;
       optional string opaque_user_id = 2;
+      optional bool  requires_svc = 3;
     }
 
     enum CallLinkRestrictions {
@@ -197,6 +198,13 @@ message SfuToDevice {
     optional uint32 target_seqnum = 3;
   }
 
+  message ServerAddress {
+    repeated string udp_addresses = 1;
+    repeated string tcp_addresses = 2;
+    repeated string tls_addresses = 3;
+    optional string tls_hostname = 4;
+  }
+
   reserved 1;
   optional VideoRequest video_request               = 2;
   reserved 3;
@@ -216,4 +224,6 @@ message SfuToDevice {
   optional bytes content                            = 12;
 
   optional SendEndorsementsResponse endorsements    = 13;
+  reserved 14;
+  optional ServerAddress server_address             = 15;
 }

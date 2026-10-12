@@ -11,6 +11,7 @@ export type {
   CallSettings,
   DeviceId,
   GroupCallObserver,
+  GroupCallSvcConfig,
   HttpResult,
   PeekDeviceInfo,
   PeekInfo,

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::{process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
 
 use anyhow::Result;
 use bollard::{
@@ -15,6 +15,7 @@ use bollard::{
 use chrono::DateTime;
 use futures_util::stream::StreamExt;
 use itertools::Itertools;
+use log::{error, info};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncWriteExt, stdout},
@@ -30,10 +31,10 @@ use crate::{
 };
 
 /// This function builds all docker images that we need.
-pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
-    println!("\nBuilding images:");
+pub async fn build_images(build_visqol_mos: bool, build_local_sfu: bool) -> Result<()> {
+    info!("Building images:");
 
-    println!("cli:");
+    info!("cli:");
     stdout().flush().await?;
     let mut now = std::time::Instant::now();
     let _ = Command::new("docker")
@@ -50,9 +51,9 @@ pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
         .wait()
         .await?;
 
-    println!("... took {:.2?}", now.elapsed());
+    info!("... took {:.2?}", now.elapsed());
 
-    println!("signaling-server:");
+    info!("signaling-server:");
     stdout().flush().await?;
     now = std::time::Instant::now();
     let _ = Command::new("docker")
@@ -69,10 +70,10 @@ pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
         .wait()
         .await?;
 
-    println!("... took {:.2?}", now.elapsed());
+    info!("... took {:.2?}", now.elapsed());
 
     if build_visqol_mos {
-        println!("visqol_mos:");
+        info!("visqol_mos:");
         stdout().flush().await?;
         now = std::time::Instant::now();
         let _ = Command::new("docker")
@@ -81,12 +82,12 @@ pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
             .spawn()?
             .wait()
             .await?;
-        println!("... took {:.2?}", now.elapsed());
+        info!("... took {:.2?}", now.elapsed());
     } else {
-        println!("skip visqol_mos");
+        info!("skip visqol_mos");
     }
 
-    println!("pesq_mos:");
+    info!("pesq_mos:");
     stdout().flush().await?;
     now = std::time::Instant::now();
     let _ = Command::new("docker")
@@ -95,9 +96,9 @@ pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
         .spawn()?
         .wait()
         .await?;
-    println!("... took {:.2?}", now.elapsed());
+    info!("... took {:.2?}", now.elapsed());
 
-    println!("plc_mos:");
+    info!("plc_mos:");
     stdout().flush().await?;
     now = std::time::Instant::now();
     let _ = Command::new("docker")
@@ -106,33 +107,111 @@ pub async fn build_images(build_visqol_mos: bool) -> Result<()> {
         .spawn()?
         .wait()
         .await?;
-    println!("... took {:.2?}", now.elapsed());
+    info!("... took {:.2?}", now.elapsed());
+
+    if build_local_sfu {
+        info!("local_sfu (cloning):");
+        stdout().flush().await?;
+        now = std::time::Instant::now();
+        pull_or_clone_sfu_repo().await?;
+        info!("... took {:.2?}", now.elapsed());
+
+        info!("local_sfu (building):");
+        stdout().flush().await?;
+        now = std::time::Instant::now();
+        let _ = Command::new("docker")
+            .args([
+                "build",
+                ".",
+                "-f",
+                "backend/Dockerfile",
+                "-t",
+                "calling-backend",
+            ])
+            .current_dir("call_sim/docker/local_sfu")
+            .spawn()?
+            .wait()
+            .await?;
+        info!("... took {:.2?}", now.elapsed());
+    }
+
+    Ok(())
+}
+
+async fn pull_or_clone_sfu_repo() -> Result<()> {
+    let path = Path::new("call_sim/docker/local_sfu");
+
+    // assume is directory and the matching repo
+    if path.exists() {
+        println!("Repo exists, pulling origin main");
+        let _ = Command::new("git")
+            .args(["pull", "origin", "main"])
+            .current_dir("call_sim/docker/local_sfu")
+            .spawn()?
+            .wait()
+            .await?;
+    } else {
+        println!("The directory does not exist.");
+        let _ = Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "main",
+                "git@github.com:signalapp/Signal-Calling-Service.git",
+                "local_sfu",
+            ])
+            .current_dir("call_sim/docker")
+            .spawn()?
+            .wait()
+            .await?;
+    }
 
     Ok(())
 }
 
 /// This function cleans all docker containers that were used.
-pub async fn clean_up(container_names: Vec<&str>) -> Result<()> {
-    println!("\nCleaning up containers:");
+pub async fn clean_up(container_names: Vec<&str>, container_prefixes: Vec<&str>) -> Result<()> {
+    info!("Cleaning up containers:");
+    let mut args = vec!["docker", "ps", "-aq"];
+    let name_filter: String;
+    if !container_names.is_empty() {
+        name_filter = format!("name=\"^({})$\"", container_names.join("|"));
+        args.push("--filter");
+        args.push(name_filter.as_str());
+    }
 
-    // Ignore errors and try to move on.
-    for container in container_names.iter() {
-        let result = Command::new("docker")
-            .args(["rm", "--force", "--volumes", container])
-            .stderr(Stdio::null())
-            .spawn()?
-            .wait()
-            .await;
-        if result.is_err() {
-            println!("  Couldn't remove {}", container);
-        }
+    let prefix_filter: String;
+    if !container_prefixes.is_empty() {
+        prefix_filter = format!("name=\"^({})\"", container_prefixes.join("|"));
+        args.push("--filter");
+        args.push(prefix_filter.as_str());
+    }
+
+    let rm_args = vec!["xargs", "docker", "rm", "--force", "--volumes"];
+    args.push("|");
+    args.extend(rm_args);
+    info!("Running {}", args.join(" "));
+
+    // Use sh and pipe which has portable syntax vs command subtitution
+    if let Err(e) = Command::new("sh")
+        .arg("-c")
+        .arg(args.join(" "))
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait()
+        .await
+    {
+        // Ignore errors and try to move on.
+        error!("Failed to completely cleanup with error: {e}");
     }
 
     Ok(())
 }
 
 pub async fn create_network() -> Result<()> {
-    println!("\nCreating networks:");
+    info!("Creating networks:");
 
     let _ = Command::new("docker")
         .args([
@@ -150,7 +229,7 @@ pub async fn create_network() -> Result<()> {
 }
 
 pub async fn clean_network() -> Result<()> {
-    println!("\nCleaning networks:");
+    info!("Cleaning networks:");
 
     let _ = Command::new("docker")
         .args(["network", "rm", "ringrtc_default"])
@@ -162,7 +241,7 @@ pub async fn clean_network() -> Result<()> {
 }
 
 pub async fn start_signaling_server() -> Result<()> {
-    println!("\nStarting Signaling Server:");
+    info!("Starting Signaling Server:");
 
     let _ = Command::new("docker")
         .args([
@@ -195,7 +274,7 @@ pub async fn start_signaling_server() -> Result<()> {
 ///
 /// Note: We'll typically use one server, turn, to serve both clients.
 pub async fn start_turn_server() -> Result<()> {
-    println!("\nStarting TURN/relay server");
+    info!("Starting TURN/relay server");
 
     let _ = Command::new("docker")
         .args([
@@ -246,8 +325,58 @@ pub async fn start_turn_server() -> Result<()> {
     Ok(())
 }
 
+/// Start an SFU at 172.28.0.252, but might be available at `calling-backend`. Exposes:
+/// - STUN at the standard port (3478) via UDP
+/// - Group call API at 8080 over HTTP
+/// - Ice candidate port over 9900 for TCP
+/// - Group calling at 10000 for UDP, port 80 for TCP.
+pub async fn start_sfu_server() -> Result<()> {
+    info!("Starting SFU server");
+
+    let _ = Command::new("docker")
+        .args([
+            "run",
+            "--name",
+            "calling-backend",
+            "-d",
+            "--privileged",
+            "--network",
+            "ringrtc_default",
+            "--ip",
+            "172.28.0.252",
+            "-p",
+            "80:80",
+            "-p",
+            "3478:3478/udp",
+            "-p",
+            "8080:8080",
+            "-p",
+            "9900:9900",
+            "-p",
+            "10000:10000",
+            "--entrypoint",
+            "calling_backend",
+            "calling-backend",
+            "--ice-candidate-ip",
+            "172.28.0.252",
+            "--signaling-port",
+            "8080",
+            "--ice-candidate-port-tcp",
+            "9900",
+            "--inactivity-timeout-secs",
+            "30",
+            "--diagnostics-interval-secs",
+            "1",
+        ])
+        .spawn()?
+        .wait()
+        .await?;
+
+    Ok(())
+}
+
 pub async fn start_tcpdump(name: &str, report_path: &str) -> Result<()> {
-    println!("\nStarting tcpdump for `{}`", name);
+    info!("Starting tcpdump for `{}`", name);
 
     let _ = Command::new("docker")
         .args([
@@ -287,7 +416,7 @@ pub async fn start_client(
     media_path: &str,
     data_path: &str,
 ) -> Result<()> {
-    println!("\nStarting Client `{}`:", name);
+    info!("Starting Client `{}`:", name);
 
     let _ = Command::new("docker")
         .args([
@@ -734,7 +863,7 @@ pub async fn start_playout(
     file_duration: f64,
     desired_duration: u16,
 ) -> Result<()> {
-    println!("start playing");
+    info!("start playing");
 
     // Give a bit of slack by rounding the duration up, in case the file is within a small fraction
     // of a second of the desired time (for instance, normal_phrasing is 29.9997 seconds long),
@@ -790,7 +919,7 @@ async fn wait_ready(name: &str, max_attempts: u32, probe: &[&str]) -> Result<boo
             .await?
             .success();
         if succeeded {
-            println!(
+            info!(
                 "{name} `{}` ready after {attempt} attempt(s)",
                 probe.join(" ")
             );
@@ -798,7 +927,7 @@ async fn wait_ready(name: &str, max_attempts: u32, probe: &[&str]) -> Result<boo
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-    println!(
+    info!(
         "{name} `{}` not ready after {max_attempts} attempts",
         probe.join(" ")
     );
@@ -806,7 +935,7 @@ async fn wait_ready(name: &str, max_attempts: u32, probe: &[&str]) -> Result<boo
 }
 
 pub async fn start_virtual_audio(name: &str, output_file: &Option<String>) -> Result<()> {
-    println!("start virtual audio and its dependencies");
+    info!("start virtual audio and its dependencies");
 
     // Start the session bus. `nohup` keeps it alive after `docker exec` returns.
     let _ = Command::new("docker")
@@ -944,16 +1073,18 @@ pub async fn start_virtual_audio(name: &str, output_file: &Option<String>) -> Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_cli(
     name: &str,
     media_io: MediaFileIo,
     call_config: &CallConfig,
-    remote_call_config: &CallConfig,
+    remote_call_config: Option<&CallConfig>,
     client_profile: &ClientProfile,
     call_type: &CallTypeConfig,
+    ip: String,
     profile: bool,
 ) -> Result<()> {
-    println!("Starting cli for `{}`", name);
+    info!("Starting cli for `{}`", name);
 
     start_virtual_audio(name, &media_io.audio_output_file).await?;
 
@@ -1040,10 +1171,10 @@ pub async fn start_cli(
         args.push(format!("--decoder-complexity={}", complexity));
     }
 
-    if !call_config.audio.dnn_weights_path.is_empty() {
+    if !call_config.audio.dnn_weights_name.is_empty() {
         args.push(format!(
-            "--dnn-weights-path={}",
-            call_config.audio.dnn_weights_path
+            "--dnn-weights-path=/data/{}",
+            call_config.audio.dnn_weights_name
         ));
     }
 
@@ -1118,16 +1249,12 @@ pub async fn start_cli(
         args.push(format!("--output-video-file=/report/{}", output_video_file));
     }
 
-    if let Some((width, height)) = remote_call_config.video.dimensions() {
+    if let Some((width, height)) = remote_call_config.and_then(|rcc| rcc.video.dimensions()) {
         args.push(format!("--output-video-width={}", width));
         args.push(format!("--output-video-height={}", height));
     }
 
-    if name == "client_a" {
-        args.push("--ip=172.28.0.2".to_string());
-    } else {
-        args.push("--ip=172.28.0.3".to_string());
-    }
+    args.push(format!("--ip={ip}"));
 
     if let CallProfile::DeterministicLoss(loss_rate) = call_config.profile {
         args.push(format!("--deterministic-loss={}", loss_rate));
@@ -1138,18 +1265,18 @@ pub async fn start_cli(
     args.push(format!("--user-id={}", client_profile.user_id));
     args.push(format!("--device-id={}", client_profile.device_id));
     if let CallTypeConfig::Group {
-        sfu_url,
+        sfu_connection_params,
         group_name,
     } = call_type
     {
-        args.push(format!("--sfu-url={}", sfu_url));
+        args.push(format!("--sfu-url={}", sfu_connection_params.url()));
         args.push("--is-group-call".to_string());
 
         let group = if let Some(group_name) = group_name {
             client_profile
                 .groups
                 .iter()
-                .filter(|&g| group_name == &g.name)
+                .filter(|&g| group_name == &g.metadata.name)
                 .exactly_one()
                 .map_err(|_| {
                     anyhow::anyhow!("Did't find exactly one group named: {:?}", group_name)
@@ -1160,10 +1287,11 @@ pub async fn start_cli(
                 .first()
                 .expect("at least one group info detailed")
         };
-        args.push(format!("--group-id={}", group.id));
+        args.push(format!("--group-id={}", group.metadata.id_base64));
         args.push(format!("--membership-proof={}", group.membership_proof));
 
         let member_info = group
+            .metadata
             .members
             .iter()
             .map(|member| format!("{}:{}", member.user_id, member.member_id))
@@ -1171,7 +1299,7 @@ pub async fn start_cli(
         args.push(format!("--group-member-info={}", member_info));
     }
 
-    println!("Final Client args: {}", args.join(" "));
+    info!("Final Client args: {}", args.join(" "));
     let _ = Command::new("docker").args(&args).spawn()?.wait().await?;
 
     Ok(())
@@ -1243,7 +1371,7 @@ pub async fn finish_perf(client: &str) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    println!("{} perf exited? {}", client, exited);
+    info!("{} perf exited? {}", client, exited);
     Ok(())
 }
 
@@ -1253,7 +1381,7 @@ pub async fn convert_raw_to_wav(
     wav_file: &str,
     length: Option<u16>,
 ) -> Result<f64> {
-    println!("\nConverting raw file `{}` to wav:", raw_file);
+    info!("Converting raw file `{}` to wav:", raw_file);
 
     let mut args = [
         "run",
@@ -1316,7 +1444,7 @@ pub async fn convert_wav_to_16khz_mono(
     input_file: &str,
     output_file: &str,
 ) -> Result<()> {
-    println!("\nConverting file `{}` to 16kHz/mono wav:", input_file);
+    info!("Converting file `{}` to 16kHz/mono wav:", input_file);
 
     let args = [
         "run",
@@ -1342,7 +1470,7 @@ pub async fn convert_wav_to_16khz_mono(
 }
 
 pub async fn convert_mp4_to_yuv(location: &str, mp4_file: &str, yuv_file: &str) -> Result<()> {
-    println!("\nConverting `{mp4_file}` to YUV:");
+    info!("Converting `{mp4_file}` to YUV:");
 
     let args = [
         "run",
@@ -1369,7 +1497,7 @@ pub async fn convert_yuv_to_mp4(
     mp4_file: &str,
     dimensions: (u16, u16),
 ) -> Result<()> {
-    println!("\nConverting `{yuv_file}` to MP4:");
+    info!("Converting `{yuv_file}` to MP4:");
 
     let args = [
         "run",
@@ -1395,7 +1523,7 @@ pub async fn convert_yuv_to_mp4(
 }
 
 pub async fn generate_spectrogram(location: &str, wav_file: &str, extension: &str) -> Result<()> {
-    println!("\nGenerating spectrogram for `{}`:", wav_file);
+    info!("Generating spectrogram for `{}`:", wav_file);
 
     let _ = Command::new("docker")
         .args([
@@ -1432,12 +1560,11 @@ pub async fn analyze_visqol_mos(
     extension: &str,
     speech: bool,
 ) -> Result<()> {
-    println!("\nAnalyzing visqol mos for `{}`:", degraded_file);
+    info!("Analyzing visqol mos for `{}`:", degraded_file);
 
     let mut args = [
         "run",
-        "--name",
-        "visqol_mos",
+        "--rm",
         "-v",
         &format!("{}:/degraded", degraded_path),
         "-v",
@@ -1455,20 +1582,7 @@ pub async fn analyze_visqol_mos(
         args.push("--use_speech_mode".to_string());
     }
 
-    let _ = Command::new("docker").args(&args).spawn()?.wait().await?;
-
-    // Get the logs.
-    let output = Command::new("docker")
-        .args(["logs", "visqol_mos"])
-        .output()
-        .await?;
-
-    // Remove the container.
-    let _ = Command::new("docker")
-        .args(["rm", "visqol_mos"])
-        .spawn()?
-        .wait()
-        .await?;
+    let output = Command::new("docker").args(&args).output().await?;
 
     // Save the logs.
     let mut file = OpenOptions::new()
@@ -1490,12 +1604,11 @@ pub async fn analyze_pesq_mos(
     ref_file: &str,
     extension: &str,
 ) -> Result<()> {
-    println!("\nAnalyzing pesq mos for `{}`:", degraded_file);
+    info!("Analyzing pesq mos for `{}`:", degraded_file);
 
     let args = [
         "run",
-        "--name",
-        "pesq_mos",
+        "--rm",
         "-v",
         &format!("{}:/degraded", degraded_path),
         "-v",
@@ -1507,20 +1620,7 @@ pub async fn analyze_pesq_mos(
     .map(String::from)
     .to_vec();
 
-    let _ = Command::new("docker").args(&args).spawn()?.wait().await?;
-
-    // Get the logs.
-    let output = Command::new("docker")
-        .args(["logs", "pesq_mos"])
-        .output()
-        .await?;
-
-    // Remove the container.
-    let _ = Command::new("docker")
-        .args(["rm", "pesq_mos"])
-        .spawn()?
-        .wait()
-        .await?;
+    let output = Command::new("docker").args(&args).output().await?;
 
     // Save the logs.
     let mut file = OpenOptions::new()
@@ -1540,12 +1640,11 @@ pub async fn analyze_plc_mos(
     degraded_file: &str,
     extension: &str,
 ) -> Result<()> {
-    println!("\nAnalyzing plc mos for `{}`:", degraded_file);
+    info!("Analyzing plc mos for `{}`:", degraded_file);
 
     let args = [
         "run",
-        "--name",
-        "plc_mos",
+        "--rm",
         "-v",
         &format!("{}:/degraded", degraded_path),
         "plc_mos",
@@ -1555,20 +1654,7 @@ pub async fn analyze_plc_mos(
     .map(String::from)
     .to_vec();
 
-    let _ = Command::new("docker").args(&args).spawn()?.wait().await?;
-
-    // Get the logs.
-    let output = Command::new("docker")
-        .args(["logs", "plc_mos"])
-        .output()
-        .await?;
-
-    // Remove the container.
-    let _ = Command::new("docker")
-        .args(["rm", "plc_mos"])
-        .spawn()?
-        .wait()
-        .await?;
+    let output = Command::new("docker").args(&args).output().await?;
 
     // Save the logs.
     let mut file = OpenOptions::new()
@@ -1590,7 +1676,7 @@ pub async fn analyze_video(
     ref_file: &str,
     dimensions: (u16, u16),
 ) -> Result<()> {
-    println!("\nAnalyzing video for `{}`:", degraded_file);
+    info!("Analyzing video for `{}`:", degraded_file);
 
     let _ = Command::new("docker")
         .args([
@@ -1664,6 +1750,25 @@ pub async fn get_turn_server_logs(path: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn get_sfu_server_logs(path: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args(["logs", "calling-backend"])
+        .output()
+        .await?;
+
+    // Save the logs.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(format!("{}/sfu.log", path))
+        .await?;
+    file.write_all(&output.stdout).await?;
+    file.write_all(&output.stderr).await?;
+
+    Ok(())
+}
+
 pub struct DockerStats {
     docker: Docker,
 }
@@ -1674,7 +1779,7 @@ impl DockerStats {
         Ok(DockerStats { docker })
     }
 
-    pub fn start(&self, name: &str, path: &str) -> Result<()> {
+    pub fn start(&self, name: &str, path: &str) {
         let docker = self.docker.clone();
         let name = name.to_string();
         let path = path.to_string();
@@ -1766,7 +1871,7 @@ impl DockerStats {
                                                 (tx_bitrate, rx_bitrate)
                                             }
                                             None => {
-                                                println!("Error: stat missing eth0!");
+                                                error!("Error: stat missing eth0!");
                                                 break;
                                             }
                                         };
@@ -1806,24 +1911,22 @@ impl DockerStats {
                                         prev_system_cpu_usage = system_cpu_usage;
                                     }
                                     _ => {
-                                        println!("Error: stat missing required data!");
+                                        error!("Error: stat missing required data!");
                                         break;
                                     }
                                 }
                             }
                             Err(err) => {
-                                println!("Error collecting stats for {}: {:?}", name, err);
+                                error!("Error collecting stats for {}: {:?}", name, err);
                                 break;
                             }
                         }
                     }
                 }
                 Err(err) => {
-                    println!("Error creating stats file: {:?}", err);
+                    error!("Error creating stats file: {:?}", err);
                 }
             }
         });
-
-        Ok(())
     }
 }

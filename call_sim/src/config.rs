@@ -1,56 +1,100 @@
 use std::time::SystemTime;
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-use hex::ToHex;
-use hmac::{Hmac, Mac};
+use hex::{FromHex, ToHex};
+use hmac::{Hmac, KeyInit, Mac};
+use itertools::Itertools;
 use sha2::{Digest, Sha256};
 
-use crate::common::{ClientProfile, Group, GroupMember};
+use crate::common::{ClientProfile, Group, GroupMember, GroupMetadata};
 
 type HmacSha256 = Hmac<Sha256>;
 const GV2_AUTH_MATCH_LIMIT: usize = 10;
 
-pub fn generate_client_profiles(
-    num_profiles: usize,
-    auth_key: &[u8; 32],
-    now: SystemTime,
-) -> Vec<ClientProfile> {
-    let user_id_hex = gen_uuid();
-    let user_id_base64 = BASE64_STANDARD.encode(hex::decode(&user_id_hex).unwrap());
+#[derive(Debug, Clone)]
+pub struct DynamicClientProfileFactory {
+    group_auth_key: [u8; 32],
+}
 
-    let member_id_hex = format!("{}{}", gen_uuid(), gen_uuid());
-    let member_id_base64 = BASE64_STANDARD.encode(hex::decode(&member_id_hex).unwrap());
+impl DynamicClientProfileFactory {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        let key = <[u8; 32]>::from_hex(
+            "deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+        )
+        .unwrap();
+        Self::new_with_key(key)
+    }
 
-    let group_name = "generated_group".to_owned();
-    let group_id_hex = gen_uuid();
-    let group_id_base64 = BASE64_STANDARD.encode(hex::decode(&group_id_hex).unwrap());
+    pub fn new_with_key(group_auth_key: [u8; 32]) -> Self {
+        Self { group_auth_key }
+    }
 
-    let timestamp = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let membership_proof = BASE64_STANDARD.encode(generate_signed_v2_password(
-        &member_id_hex,
-        &group_id_hex,
-        timestamp,
-        ALL_PERMISSIONS,
-        auth_key,
-    ));
-    let members = vec![GroupMember {
-        user_id: user_id_base64.clone(),
-        member_id: member_id_base64,
-    }];
-    let groups = vec![Group {
-        name: group_name,
-        id: group_id_base64,
-        membership_proof,
-        members,
-    }];
+    pub fn client_profiles_for_group<T: AsRef<str>>(
+        &self,
+        group_name: &str,
+        names: &[T],
+        sys_now: SystemTime,
+    ) -> Vec<ClientProfile> {
+        let client_ids = names
+            .iter()
+            .map(|_| {
+                let user_id_hex = gen_uuid();
+                let member_id_hex = format!("{}{}", gen_uuid(), gen_uuid());
+                (user_id_hex, member_id_hex)
+            })
+            .collect_vec();
+        let members = client_ids
+            .iter()
+            .map(|(user_id_hex, member_id_hex)| {
+                let user_id_base64 = BASE64_STANDARD.encode(hex::decode(user_id_hex).unwrap());
+                let member_id_base64 = BASE64_STANDARD.encode(hex::decode(member_id_hex).unwrap());
 
-    (1..=num_profiles)
-        .map(|idx| ClientProfile {
-            user_id: user_id_hex.clone(),
-            device_id: idx.to_string(),
-            groups: groups.clone(),
-        })
-        .collect()
+                GroupMember {
+                    user_id: user_id_base64,
+                    member_id: member_id_base64,
+                }
+            })
+            .collect();
+
+        let group_id_hex = gen_uuid();
+        let group_id_base64 = BASE64_STANDARD.encode(hex::decode(&group_id_hex).unwrap());
+        let group_metadata = {
+            GroupMetadata {
+                name: group_name.to_owned(),
+                id_base64: group_id_base64,
+                members,
+            }
+        };
+
+        client_ids
+            .into_iter()
+            .map(|(user_id_hex, member_id_hex)| {
+                let timestamp = sys_now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let membership_proof = BASE64_STANDARD.encode(generate_signed_v2_password(
+                    &member_id_hex,
+                    &group_id_hex,
+                    timestamp,
+                    ALL_PERMISSIONS,
+                    &self.group_auth_key,
+                ));
+
+                let groups = vec![Group {
+                    metadata: group_metadata.clone(),
+                    membership_proof,
+                }];
+
+                ClientProfile {
+                    user_id: user_id_hex,
+                    device_id: "1".to_string(),
+                    groups,
+                }
+            })
+            .collect()
+    }
 }
 
 fn gen_uuid() -> String {

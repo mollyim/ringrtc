@@ -44,13 +44,15 @@
 //! - [ConnectionObserverEvents](../connection/enum.ConnectionObserverEvent.html)
 //! - ObserverErrors
 
+use std::{fmt, thread, time::SystemTime};
+#[cfg(feature = "sim")]
 use std::{
-    fmt,
     sync::{Arc, Condvar, Mutex, mpsc},
-    thread,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
+#[cfg(feature = "sim")]
+use crate::error::RingRtcError;
 use crate::{
     common::{
         CallDirection, CallId, ConnectionState, DataMode, Result, RingBench,
@@ -63,7 +65,6 @@ use crate::{
         signaling,
         util::try_scoped,
     },
-    error::RingRtcError,
     webrtc::{media::MediaStream, peer_connection_observer::NetworkRoute},
 };
 
@@ -134,9 +135,11 @@ pub enum ConnectionEvent {
     /// Action: remember the MediaStream so we can "connect" to it after the call is accepted
     ReceivedIncomingMedia(MediaStream),
     /// Synchronize the FSM.
-    /// Only used by unit tests
+    #[cfg(feature = "sim")]
     Synchronize(Arc<(Mutex<bool>, Condvar)>),
-
+    /// Block the FSM until released.
+    #[cfg(feature = "sim")]
+    Pause(Arc<(Mutex<bool>, Condvar)>),
     /// Terminate the connection.
     /// Source: Termination of the call or response to ICE failed
     /// Action: Drain threads of tasks and wait for them
@@ -185,7 +188,10 @@ impl fmt::Display for ConnectionEvent {
             ),
             ConnectionEvent::InternalError(e) => format!("InternalError: {}", e),
             ConnectionEvent::ReceivedIncomingMedia(_) => "ReceivedIncomingMedia".to_string(),
+            #[cfg(feature = "sim")]
             ConnectionEvent::Synchronize(_) => "Synchronize".to_string(),
+            #[cfg(feature = "sim")]
+            ConnectionEvent::Pause(_) => "Pause".to_string(),
             ConnectionEvent::Terminate => "Terminate".to_string(),
         };
         write!(f, "({})", display)
@@ -230,6 +236,8 @@ where
     /// We process remote receiver status messages larger than the seqnum
     /// and use the bitrate when it changes.
     last_remote_receiver_status: Option<(u64, DataRate)>,
+    /// Set once the FSM has begun terminating.
+    terminating: bool,
 }
 
 impl<T> fmt::Display for ConnectionStateMachine<T>
@@ -253,15 +261,17 @@ where
             notify_thread: Actor::start("connection-fsm-notify", Stopper::new(), |_| Ok(()))?,
             last_remote_sender_status: None,
             last_remote_receiver_status: None,
+            terminating: false,
         })
     }
 
     pub fn run(&mut self) {
-        while let Some((cc, event)) = self.event_stream.recv() {
-            let state = match cc.state() {
+        while let Some((connection, event)) = self.event_stream.recv() {
+            let state = match connection.state() {
                 Ok(state) => state,
                 Err(e) => {
                     error!("Handling event failed: {}", e);
+                    self.terminate_if_requested(&connection);
                     return;
                 }
             };
@@ -283,13 +293,27 @@ where
                 }
                 _ => info!("state: {}, event: {}", state, event),
             };
-            if let Err(e) = self.handle_event(cc, state, event) {
+            if let Err(e) = self.handle_event(connection.clone(), state, event) {
                 error!("Handling event failed: {}", e);
             }
+
+            self.terminate_if_requested(&connection);
+        }
+    }
+
+    /// Terminate out of band, independent of queue depth.
+    fn terminate_if_requested(&mut self, connection: &Connection<T>) {
+        if !self.terminating
+            && connection.terminate_requested()
+            && let Err(e) = self.handle_terminate(connection.clone())
+        {
+            error!("Handling terminate failed: {}", e);
+            // Don't return any error, let the queue drain.
         }
     }
 
     /// Synchronize a thread with the main FSM thread.
+    #[cfg(feature = "sim")]
     fn sync_thread(label: &'static str, actor: &Actor<()>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         actor.send(move |_| {
@@ -345,21 +369,29 @@ where
         // side needs to be informed.
         match event {
             ConnectionEvent::SendHangupViaRtpData(hangup) => {
-                return self.handle_send_hangup_via_rtp_data(connection, state, hangup);
+                self.handle_send_hangup_via_rtp_data(connection, state, hangup);
+                return Ok(());
             }
             ConnectionEvent::Terminate => return self.handle_terminate(connection),
+            #[cfg(feature = "sim")]
             ConnectionEvent::Synchronize(sync) => return self.handle_synchronize(sync),
+            #[cfg(feature = "sim")]
+            ConnectionEvent::Pause(pause) => return self.handle_pause(pause),
             _ => {}
         }
 
-        if state.terminating_or_terminated() {
-            debug!("handle_event(): dropping event {} while terminating", event);
+        if self.terminating || state.terminating_or_terminated() {
+            debug!(
+                "handle_event(): dropping event {} while terminating or terminated",
+                event
+            );
             return Ok(());
         }
 
         match event {
             ConnectionEvent::ReceivedHangup(call_id, hangup) => {
-                self.handle_received_hangup(connection, state, call_id, hangup)
+                self.handle_received_hangup(connection, state, call_id, hangup);
+                Ok(())
             }
             ConnectionEvent::Accept => self.handle_accept(connection, state),
             ConnectionEvent::ReceivedAcceptedViaRtpData(id) => {
@@ -377,13 +409,16 @@ where
                 ),
             ConnectionEvent::ReceivedIce(ice) => self.handle_received_ice(connection, state, ice),
             ConnectionEvent::UpdateSenderStatus(status) => {
-                self.handle_update_sender_status(connection, state, status)
+                self.handle_update_sender_status(connection, state, status);
+                Ok(())
             }
             ConnectionEvent::UpdateDataMode(mode) => {
-                self.handle_update_data_mode(connection, state, mode)
+                self.handle_update_data_mode(connection, state, mode);
+                Ok(())
             }
             ConnectionEvent::LocalIceCandidates(candidates) => {
-                self.handle_local_ice_candidates(connection, state, candidates)
+                self.handle_local_ice_candidates(connection, state, candidates);
+                Ok(())
             }
             ConnectionEvent::IceConnected => self.handle_ice_connected(connection, state),
             ConnectionEvent::IceFailed => self.handle_ice_failed(connection, state),
@@ -391,12 +426,19 @@ where
             ConnectionEvent::IceNetworkRouteChanged(network_route) => {
                 self.handle_ice_network_route_changed(connection, network_route)
             }
-            ConnectionEvent::InternalError(error) => self.handle_internal_error(connection, error),
+            ConnectionEvent::InternalError(error) => {
+                self.handle_internal_error(connection, error);
+                Ok(())
+            }
             ConnectionEvent::ReceivedIncomingMedia(stream) => {
-                self.handle_received_incoming_media(connection, state, stream)
+                self.handle_received_incoming_media(connection, state, stream);
+                Ok(())
             }
             ConnectionEvent::SendHangupViaRtpData(_) => Ok(()),
+            #[cfg(feature = "sim")]
             ConnectionEvent::Synchronize(_) => Ok(()),
+            #[cfg(feature = "sim")]
+            ConnectionEvent::Pause(_) => Ok(()),
             ConnectionEvent::Terminate => Ok(()),
         }
     }
@@ -472,7 +514,7 @@ where
         state: ConnectionState,
         call_id: CallId,
         hangup: signaling::Hangup,
-    ) -> Result<()> {
+    ) {
         ringbench!(
             RingBench::WebRtc,
             RingBench::Conn,
@@ -481,14 +523,13 @@ where
 
         if connection.call_id() != call_id {
             warn!("Remote hangup for non-active call");
-            return Ok(());
+            return;
         }
         if state.connecting_or_connected() {
             self.notify_observer(connection, ConnectionObserverEvent::ReceivedHangup(hangup))
         } else {
             self.unexpected_state(state, "RemoteHangup");
         }
-        Ok(())
     }
 
     fn handle_received_accepted_via_rtp_data(
@@ -706,7 +747,7 @@ where
         mut connection: Connection<T>,
         state: ConnectionState,
         hangup: signaling::Hangup,
-    ) -> Result<()> {
+    ) {
         if state.can_send_hangup_via_rtp() {
             self.worker_spawn(move || {
                 if let Err(err) = connection.send_hangup_via_rtp_data(hangup) {
@@ -716,7 +757,6 @@ where
         } else {
             self.unexpected_state(state, "SendHangupViaRtpData");
         }
-        Ok(())
     }
 
     fn handle_update_sender_status(
@@ -724,7 +764,7 @@ where
         mut connection: Connection<T>,
         state: ConnectionState,
         sender_status: signaling::SenderStatus,
-    ) -> Result<()> {
+    ) {
         if state.connected_or_reconnecting() {
             // notify the peer via an RTP data message.
             self.worker_spawn(move || {
@@ -741,7 +781,6 @@ where
         } else {
             self.unexpected_state(state, "UpdateSenderStatus");
         };
-        Ok(())
     }
 
     fn handle_update_data_mode(
@@ -749,7 +788,7 @@ where
         mut connection: Connection<T>,
         state: ConnectionState,
         data_mode: DataMode,
-    ) -> Result<()> {
+    ) {
         if state.connecting_or_connected() {
             self.worker_spawn(move || {
                 let result = try_scoped(|| {
@@ -763,7 +802,6 @@ where
                 }
             });
         };
-        Ok(())
     }
 
     fn handle_local_ice_candidates(
@@ -771,7 +809,7 @@ where
         mut connection: Connection<T>,
         state: ConnectionState,
         candidates: Vec<signaling::IceCandidate>,
-    ) -> Result<()> {
+    ) {
         ringbench!(
             RingBench::WebRtc,
             RingBench::Conn,
@@ -795,7 +833,6 @@ where
         } else {
             self.unexpected_state(state, "LocalIceCandidate");
         }
-        Ok(())
     }
 
     fn handle_ice_connected(
@@ -910,11 +947,7 @@ where
         Ok(())
     }
 
-    fn handle_internal_error(
-        &mut self,
-        connection: Connection<T>,
-        error: anyhow::Error,
-    ) -> Result<()> {
+    fn handle_internal_error(&mut self, connection: Connection<T>, error: anyhow::Error) {
         self.notify_spawn(move || {
             let result = try_scoped(|| {
                 if connection.terminating()? {
@@ -927,7 +960,6 @@ where
                 // Nothing else we can do here.
             }
         });
-        Ok(())
     }
 
     fn handle_received_incoming_media(
@@ -935,7 +967,7 @@ where
         mut connection: Connection<T>,
         state: ConnectionState,
         stream: MediaStream,
-    ) -> Result<()> {
+    ) {
         if state.connecting_or_connected() {
             self.worker_spawn(move || {
                 let result = try_scoped(|| {
@@ -951,9 +983,9 @@ where
         } else {
             self.unexpected_state(state, "ReceivedIncomingMedia");
         }
-        Ok(())
     }
 
+    #[cfg(feature = "sim")]
     fn handle_synchronize(&mut self, sync: Arc<(Mutex<bool>, Condvar)>) -> Result<()> {
         ConnectionStateMachine::<T>::sync_thread("worker", &self.worker_thread)?;
         ConnectionStateMachine::<T>::sync_thread("notify", &self.notify_thread)?;
@@ -971,10 +1003,29 @@ where
         }
     }
 
+    #[cfg(feature = "sim")]
+    fn handle_pause(&self, pause: Arc<(Mutex<bool>, Condvar)>) -> Result<()> {
+        let (mutex, condvar) = &*pause;
+        if let Ok(guard) = mutex.lock() {
+            let _guard = condvar
+                .wait_while(guard, |released| !*released)
+                .expect("condvar should not be poisoned");
+            Ok(())
+        } else {
+            Err(
+                RingRtcError::MutexPoisoned("Connection Pause Condition Variable".to_string())
+                    .into(),
+            )
+        }
+    }
+
     fn handle_terminate(&mut self, mut connection: Connection<T>) -> Result<()> {
-        self.event_stream.close();
-        self.drain_worker_thread();
-        self.drain_notify_thread();
+        if !self.terminating {
+            self.terminating = true;
+            self.event_stream.close();
+            self.drain_worker_thread();
+            self.drain_notify_thread();
+        }
 
         connection.notify_terminate_complete()
     }

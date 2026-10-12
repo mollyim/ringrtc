@@ -7,8 +7,6 @@
 
 set -e
 
-ENV_SH_SKIP_WEBRTC_VERSION_CHECK=1
-
 # shellcheck source=bin/env.sh
 . "$(dirname "$0")"/env.sh
 
@@ -28,23 +26,28 @@ case "$1" in
     windows)
         WEBRTC_PLATFORM="windows"
         ;;
+      desktop)
+        echo "Using platform $HOST_PLATFORM"
+        WEBRTC_PLATFORM="$HOST_PLATFORM"
+        ;;
     *)
         echo "ERROR: Unknown platform type: $1"
         echo "Supported platforms: 'android', 'ios', 'mac', 'unix', 'windows'"
         exit 1
 esac
 
+# It's correct to source this twice; see the code around
+# INTENDED_WEBRTC_PLATFORM in env.sh
 # shellcheck source=bin/env.sh
 . "$(dirname "$0")"/env.sh
+
+echo "Preparing worksapce for ${WEBRTC_PLATFORM}"
 
 mkdir -p "$OUTPUT_DIR"
 echo "WEBRTC_PLATFORM=$WEBRTC_PLATFORM" > "${OUTPUT_DIR}/platform.env"
 
 # WebRTC checkout
 "$BIN_DIR"/gsync-webrtc "$WEBRTC_REVISION"
-
-# Platform specific setup
-prepare_workspace_platform
 
 # shellcheck disable=SC2317
 echo "WEBRTC_PLATFORM=$WEBRTC_PLATFORM" > "${OUTPUT_DIR}/${WEBRTC_PLATFORM}.env"

@@ -11,8 +11,9 @@ use std::{
 use log::*;
 use ringrtc::{
     common::Result,
-    core::group_call::{
-        self, ClientId, ConnectionState, GroupId, JoinState, Reaction, VideoRequest,
+    core::{
+        call_manager::CreateGroupCallParams,
+        group_call::{self, ClientId, ConnectionState, GroupId, JoinState, Reaction, VideoRequest},
     },
     lite::sfu::{DemuxId, MembershipProof, PeekInfo},
     native::{GroupUpdate, GroupUpdateHandler},
@@ -102,18 +103,19 @@ impl CallEndpoint {
         self.actor.send(move |state| {
             let client_id = state
                 .call_manager
-                .create_group_call_client(
-                    group_id.clone(),
+                .create_group_call_client(CreateGroupCallParams {
+                    group_id: group_id.clone(),
                     sfu_url,
-                    None, // proxy_info
+                    proxy_info: None,
                     hkdf_extra_info,
-                    Some(Duration::from_millis(200)),
-                    0,
-                    Some(state.peer_connection_factory.clone()),
-                    state.outgoing_audio_track.clone(),
-                    state.outgoing_video_track.clone(),
-                    Some(state.incoming_video_sink.clone()),
-                )
+                    audio_levels_interval: Some(Duration::from_millis(200)),
+                    dred_duration: 0,
+                    svc_config: None,
+                    peer_connection_factory: Some(state.peer_connection_factory.clone()),
+                    outgoing_audio_track: state.outgoing_audio_track.clone(),
+                    outgoing_video_track: state.outgoing_video_track.clone(),
+                    incoming_video_sink: Some(state.incoming_video_sink.clone()),
+                })
                 .expect("create group call client");
 
             state

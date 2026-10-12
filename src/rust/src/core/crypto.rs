@@ -8,8 +8,8 @@ use std::{collections::HashMap, mem::size_of, time::SystemTime};
 use aes::Aes256;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac as _};
-use rand::{CryptoRng, Rng};
+use hmac::{Hmac, KeyInit, Mac as _};
+use rand::{CryptoRng, Rng, RngExt};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -229,7 +229,7 @@ fn len_as_u32_be_bytes(slice: &[u8]) -> [u8; 4] {
 fn decrypt_internal(state: &ReceiverState, frame_counter: FrameCounter, data: &mut [u8]) {
     let mut cipher = Aes256Ctr::new(
         &state.sender_state.current_aes_key.into(),
-        convert_frame_counter_to_iv(frame_counter)[..].into(),
+        (&convert_frame_counter_to_iv(frame_counter)).into(),
     );
     cipher.apply_keystream(data);
 }

@@ -92,9 +92,15 @@ public class CallLinksTest extends CallTestBase {
     }
 
     @Test
+    public void testUnredactedFormatting() throws Exception {
+        assertEquals("bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz", EXAMPLE_KEY.toUnredactedString());
+        assertEquals("bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx", EXAMPLE_KEY_V1_VALID.toUnredactedString());
+    }
+
+    @Test
     public void testFormatting() throws Exception {
-        assertEquals("bcdf-ghkm-npqr-stxz-bcdf-ghkm-npqr-stxz", EXAMPLE_KEY.toString());
-        assertEquals("bcdfghkm-npqrstxz-bcdfghkm-npqrstxz-bc-sbspxdpx", EXAMPLE_KEY_V1_VALID.toString());
+        assertEquals("bcdf-****-****-****-****-****-****-****", EXAMPLE_KEY.toString());
+        assertEquals("bcdf****-********-********-********-**-********", EXAMPLE_KEY_V1_VALID.toString());
     }
 
     @Test
@@ -435,7 +441,7 @@ public class CallLinksTest extends CallTestBase {
         CallManager callManager = CallManager.createCallManager(observer);
 
         GroupCall.Observer callObserver = mock();
-        GroupCall call = callManager.createCallLinkCall("sfu.example", null, ENDORSEMENT_PUBLIC_KEY, new byte[] { 1, 2, 3 }, EXAMPLE_KEY, null, new byte[] {}, null, null, new AudioConfig(), callObserver);
+        GroupCall call = callManager.createCallLinkCall("sfu.example", null, ENDORSEMENT_PUBLIC_KEY, new byte[] { 1, 2, 3 }, EXAMPLE_KEY, null, new byte[] {}, null, null, new AudioConfig(), null, callObserver);
         assertEquals(call.getKind(), GroupCall.Kind.CALL_LINK);
 
         call.connect();

@@ -11,7 +11,7 @@ pub mod time;
 pub mod units;
 mod versioning;
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use sha2::{Digest, Sha256};
 pub use versioning::SemanticVersion;
@@ -23,6 +23,12 @@ use crate::webrtc::{
 
 /// Common Result type, using `anyhow::Error` for Error.
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
+
+/// How long to wait for an FSM to quiesce before tearing down anyway.
+pub const TERMINATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bounded capacity of each FSM event channel.
+pub const EVENT_QUEUE_SIZE: usize = 256;
 
 /// Unique call identification number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -854,7 +860,8 @@ pub struct CallConfig {
     pub audio_jitter_buffer_config: AudioJitterBufferConfig,
     pub audio_rtcp_report_interval_ms: i32,
 
-    pub enable_vp9: bool,
+    pub enable_vp9_encode: bool,
+    pub enable_vp9_decode: bool,
 }
 
 impl Default for CallConfig {
@@ -870,7 +877,8 @@ impl Default for CallConfig {
             enable_tcc_audio: false,
             audio_jitter_buffer_config: Default::default(),
             audio_rtcp_report_interval_ms: 5000,
-            enable_vp9: true,
+            enable_vp9_encode: true,
+            enable_vp9_decode: true,
         }
     }
 }
@@ -880,14 +888,29 @@ impl CallConfig {
         self.data_mode = data_mode;
         self
     }
+    pub fn with_enable_vp9_encode(mut self, enable_vp9_encode: bool) -> Self {
+        self.enable_vp9_encode = enable_vp9_encode;
+        self
+    }
 
-    pub fn with_enable_vp9(mut self, enable_vp9: bool) -> Self {
-        self.enable_vp9 = enable_vp9;
+    pub fn with_enable_vp9_decode(mut self, enable_vp9_decode: bool) -> Self {
+        self.enable_vp9_decode = enable_vp9_decode;
         self
     }
 
     pub fn with_dred_duration(mut self, dred_duration: u8) -> Self {
         self.audio_encoder_config.dred_duration = dred_duration;
+        self
+    }
+
+    pub fn with_stats_interval_secs(mut self, stats_interval_secs: u16) -> Self {
+        self.stats_interval_secs = stats_interval_secs;
+        // if stats_interval_secs <= stats_initial_offset_secs, then stats break
+        // guarantee that is not the case
+        self.stats_initial_offset_secs = core::cmp::min(
+            self.stats_initial_offset_secs,
+            stats_interval_secs.saturating_sub(1),
+        );
         self
     }
 }

@@ -491,7 +491,7 @@ impl From<&AudioSenderStatsSnapshot> for StreamStats {
         Self {
             ssrc: Some(snapshot.ssrc),
             bitrate: Some(snapshot.bitrate),
-            packet_loss: Some(snapshot.remote_packets_lost_pct),
+            packet_loss: Some(snapshot.remote_packets_lost_pct as f32),
             jitter: Some(snapshot.remote_jitter as f32),
             rtt: Some(snapshot.remote_rtt as f32),
             ..Default::default()
@@ -507,6 +507,8 @@ impl From<&VideoReceiverStatsSnapshot> for StreamStats {
             packet_loss: Some(snapshot.packets_lost_pct),
             jitter: Some(snapshot.jitter as f32),
             framerate: Some(snapshot.framerate),
+            width: Some(snapshot.width),
+            height: Some(snapshot.height),
             ..Default::default()
         }
     }
@@ -517,10 +519,12 @@ impl From<&VideoSenderStatsSnapshot> for StreamStats {
         Self {
             ssrc: Some(snapshot.ssrc),
             bitrate: Some(snapshot.bitrate),
-            packet_loss: Some(snapshot.remote_packets_lost_pct),
+            packet_loss: Some(snapshot.remote_packets_lost_pct as f32),
             jitter: Some(snapshot.remote_jitter as f32),
             rtt: Some(snapshot.remote_round_trip_time as f32),
             framerate: Some(snapshot.framerate),
+            width: Some(snapshot.width),
+            height: Some(snapshot.height),
             ..Default::default()
         }
     }
@@ -786,7 +790,7 @@ impl CallInfo {
                 self.quality_stats_sketches
                     .audio
                     .packet_loss_send
-                    .add(snapshot.remote_packets_lost_pct as f64);
+                    .add(snapshot.remote_packets_lost_pct);
                 self.quality_stats_sketches
                     .audio
                     .rtt
@@ -794,7 +798,9 @@ impl CallInfo {
                 self.stream_summaries
                     .update_audio_send_stream_summary(snapshot.ssrc, |summary| {
                         summary.bitrate.push(snapshot.bitrate);
-                        summary.packet_loss.push(snapshot.remote_packets_lost_pct);
+                        summary
+                            .packet_loss
+                            .push(snapshot.remote_packets_lost_pct as f32);
                         summary.jitter.push(snapshot.remote_jitter as f32);
                     });
                 self.stats_sets
@@ -836,7 +842,7 @@ impl CallInfo {
                 self.quality_stats_sketches
                     .video
                     .packet_loss_send
-                    .add(snapshot.remote_packets_lost_pct as f64);
+                    .add(snapshot.remote_packets_lost_pct);
                 self.quality_stats_sketches
                     .video
                     .rtt
@@ -844,7 +850,9 @@ impl CallInfo {
                 self.stream_summaries
                     .update_video_send_stream_summary(snapshot.ssrc, |summary| {
                         summary.bitrate.push(snapshot.bitrate);
-                        summary.packet_loss.push(snapshot.remote_packets_lost_pct);
+                        summary
+                            .packet_loss
+                            .push(snapshot.remote_packets_lost_pct as f32);
                         summary.jitter.push(snapshot.remote_jitter as f32);
                         summary.video_codec = snapshot.codec;
                         summary.codec_implementation = snapshot.encoder_implementation.clone();
@@ -1422,7 +1430,7 @@ mod test {
     use std::time::Duration;
 
     use prost::Message;
-    use rand::Rng;
+    use rand::RngExt;
 
     use crate::{
         core::call_summary::{MAX_TELEMETRY_ENCODED_SIZE, Sample, StatsSets},
@@ -1436,9 +1444,9 @@ mod test {
 
     #[test]
     fn test_welford() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let samples: Vec<f32> = (0..1000)
-            .map(|_| rng.gen_range(-50000.0..50000.0))
+            .map(|_| rng.random_range(-50000.0..50000.0))
             .collect();
 
         let mean_0 = samples.iter().sum::<f32>() / (samples.len() as f32);
@@ -1487,6 +1495,8 @@ mod test {
                     rtt: Some(5.0),
                     jitter_buffer_delay: Some(10.0),
                     framerate: Some(30.0),
+                    width: Some(1280),
+                    height: Some(720),
                 });
             }
             // One outbound audio stream
@@ -1498,6 +1508,7 @@ mod test {
                 rtt: Some(5.0),
                 jitter_buffer_delay: Some(10.0),
                 framerate: None,
+                ..Default::default()
             });
             // One inbound audio stream, and one inbound video stream for each participant
             for ssrc in 0..participant_count {
@@ -1509,6 +1520,7 @@ mod test {
                     rtt: Some(5.0),
                     jitter_buffer_delay: Some(10.0),
                     framerate: None,
+                    ..Default::default()
                 });
                 stats_sets.push_video_recv_stream_stats(protobuf::call_summary::StreamStats {
                     ssrc: Some((ssrc + 3000) as u32),
@@ -1518,6 +1530,8 @@ mod test {
                     rtt: Some(5.0),
                     jitter_buffer_delay: Some(10.0),
                     framerate: Some(30.0),
+                    width: Some(1280),
+                    height: Some(720),
                 });
                 stats_sets.push_stun_rtt(100.0);
             }
@@ -1645,7 +1659,7 @@ mod test {
     #[test]
     fn test_telemetry_pruning_maximum_call_size_not_requiring_pruning() {
         let telemetry = create_telemetry_for_group_call_with_size(CreateGroupCallParams {
-            size: 26,
+            size: 24,
             call_length: Duration::from_secs(86400),
             time_limit: Duration::from_secs(300),
             stats_period: Duration::from_secs(10),

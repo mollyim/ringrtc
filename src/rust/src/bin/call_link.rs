@@ -53,7 +53,7 @@ fn prompt(s: &str) {
 fn root_key_from_id(id: &str) -> CallLinkRootKey {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut hasher);
-    let prng = rand_chacha::ChaCha20Rng::seed_from_u64(hasher.finish());
+    let prng = rand::rngs::ChaCha20Rng::seed_from_u64(hasher.finish());
     CallLinkRootKey::generate(prng)
 }
 
@@ -274,7 +274,7 @@ The admin passkey for any created links is a constant {ADMIN_PASSKEY:?}.
             }
             ["set-title", id, new_title] => {
                 let root_key = root_key_from_id(id);
-                let encrypted_name = root_key.encrypt(new_title.as_bytes(), rand::thread_rng());
+                let encrypted_name = root_key.encrypt(new_title.as_bytes(), rand::rng());
                 let auth_credential_presentation = issue_and_present_auth_credential(
                     &server_zkparams,
                     &public_zkparams,

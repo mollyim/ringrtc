@@ -9,9 +9,3 @@
 
 # Use the locally-installed Visual Studio rather than depot_tools' hermetic toolchain.
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
-
-prepare_workspace_platform() {
-    echo "Preparing workspace for Windows..."
-
-    # @note Nothing here yet.
-}

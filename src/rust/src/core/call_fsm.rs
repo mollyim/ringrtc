@@ -43,13 +43,12 @@
 //! - CallTimeout
 //! - InternalError
 
-use std::{
-    fmt,
-    sync::{Arc, Condvar, Mutex, mpsc},
-    thread,
-    time::Duration,
-};
+#[cfg(feature = "sim")]
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::{fmt, thread, time::Duration};
 
+#[cfg(feature = "sim")]
+use crate::error::RingRtcError;
 use crate::{
     common::{
         ApplicationEvent, CallConfig, CallDirection, CallEndReason, CallState, ConnectionState,
@@ -63,7 +62,6 @@ use crate::{
         signaling,
         util::try_scoped,
     },
-    error::RingRtcError,
     webrtc::{peer_connection::AudioLevel, peer_connection_observer::NetworkRoute},
 };
 
@@ -108,7 +106,11 @@ pub enum CallEvent {
     /// The call timed out while establishing a connection.
     CallTimeout,
     /// Synchronize the FSM.
+    #[cfg(feature = "sim")]
     Synchronize(Arc<(Mutex<bool>, Condvar)>),
+    /// Block the FSM until released.
+    #[cfg(feature = "sim")]
+    Pause(Arc<(Mutex<bool>, Condvar)>),
     /// Terminate the call.
     Terminate,
 }
@@ -150,7 +152,10 @@ impl fmt::Display for CallEvent {
             }
             CallEvent::InternalError(e) => format!("InternalError: {}", e),
             CallEvent::CallTimeout => "CallTimeout".to_string(),
+            #[cfg(feature = "sim")]
             CallEvent::Synchronize(_) => "Synchronize".to_string(),
+            #[cfg(feature = "sim")]
+            CallEvent::Pause(_) => "Pause".to_string(),
             CallEvent::Terminate => "Terminate".to_string(),
         };
         write!(f, "({})", display)
@@ -200,6 +205,8 @@ where
     worker_thread: Actor<()>,
     /// Thread for processing client application notification events.
     notify_thread: Actor<()>,
+    /// Set once the FSM has begun terminating.
+    terminating: bool,
 }
 
 impl<T> fmt::Display for CallStateMachine<T>
@@ -230,6 +237,7 @@ where
             event_stream,
             worker_thread: Actor::start("call-worker", Stopper::new(), |_| Ok(()))?,
             notify_thread: Actor::start("call-notify", Stopper::new(), |_| Ok(()))?,
+            terminating: false,
         })
     }
 
@@ -239,19 +247,34 @@ where
                 Ok(state) => state,
                 Err(e) => {
                     error!("Handling event failed: {}", e);
+                    self.terminate_if_requested(&call);
                     return;
                 }
             };
             if !event.is_frequent() {
                 info!("state: {}, event: {}", state, event);
             }
-            if let Err(e) = self.handle_event(call, state, event) {
+            if let Err(e) = self.handle_event(call.clone(), state, event) {
                 error!("Handling event failed: {}", e);
             }
+
+            self.terminate_if_requested(&call);
+        }
+    }
+
+    /// Terminate out of band, independent of queue depth.
+    fn terminate_if_requested(&mut self, call: &Call<T>) {
+        if !self.terminating
+            && call.terminate_requested()
+            && let Err(e) = self.handle_terminate(call.clone())
+        {
+            error!("Handling terminate failed: {}", e);
+            // Don't return any error, let the queue drain.
         }
     }
 
     /// Synchronize a thread with the main FSM thread.
+    #[cfg(feature = "sim")]
     fn sync_thread(label: &'static str, actor: &Actor<()>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         actor.send(move |_| {
@@ -373,10 +396,14 @@ where
         // side needs to be informed.
         match event {
             CallEvent::SendHangupViaRtpDataToAll(hangup) => {
-                return self.handle_send_hangup_via_rtp_data_to_all(call, state, hangup);
+                self.handle_send_hangup_via_rtp_data_to_all(call, state, hangup);
+                return Ok(());
             }
             CallEvent::Terminate => return self.handle_terminate(call),
+            #[cfg(feature = "sim")]
             CallEvent::Synchronize(sync) => return self.handle_synchronize(call, sync),
+            #[cfg(feature = "sim")]
+            CallEvent::Pause(pause) => return self.handle_pause(pause),
             _ => {}
         }
 
@@ -396,9 +423,13 @@ where
             CallEvent::SendingOffer => Ok(()),
             CallEvent::SendingAnswer => Ok(()),
             CallEvent::ReceivedAnswer(received) => {
-                self.handle_received_answer(call, state, received)
+                self.handle_received_answer(call, state, received);
+                Ok(())
             }
-            CallEvent::ReceivedIce(received) => self.handle_received_ice(call, state, received),
+            CallEvent::ReceivedIce(received) => {
+                self.handle_received_ice(call, state, received);
+                Ok(())
+            }
             CallEvent::ReceivedHangup(received) => {
                 self.handle_received_hangup(call, state, received)
             }
@@ -406,13 +437,23 @@ where
                 self.handle_connection_observer_event(call, state, event, remote_device_id)
             }
             CallEvent::ConnectionObserverError(error, remote_device) => {
-                self.handle_connection_observer_error(call, error, remote_device)
+                self.handle_connection_observer_error(call, error, remote_device);
+                Ok(())
             }
-            CallEvent::InternalError(error) => self.handle_internal_error(call, error),
-            CallEvent::CallTimeout => self.handle_call_timeout(call, state),
+            CallEvent::InternalError(error) => {
+                self.handle_internal_error(call, error);
+                Ok(())
+            }
+            CallEvent::CallTimeout => {
+                self.handle_call_timeout(call, state);
+                Ok(())
+            }
             // Handled above
             CallEvent::SendHangupViaRtpDataToAll(_) => Ok(()),
+            #[cfg(feature = "sim")]
             CallEvent::Synchronize(_) => Ok(()),
+            #[cfg(feature = "sim")]
+            CallEvent::Pause(_) => Ok(()),
             CallEvent::Terminate => Ok(()),
         }
     }
@@ -521,7 +562,7 @@ where
         call: Call<T>,
         state: CallState,
         received: signaling::ReceivedAnswer,
-    ) -> Result<()> {
+    ) {
         // Accept answers when we are ringing so we can get answers for more than one connection.
         if matches!(
             state,
@@ -535,7 +576,6 @@ where
         } else {
             self.unexpected_state(state, "HandleReceivedAnswer");
         }
-        Ok(())
     }
 
     fn handle_received_ice(
@@ -543,7 +583,7 @@ where
         call: Call<T>,
         state: CallState,
         received: signaling::ReceivedIce,
-    ) -> Result<()> {
+    ) {
         if state.can_receive_ice_candidates() {
             self.schedule_work_until_terminating(call, "Handle Received Ice failed", move |call| {
                 call.received_ice(received)
@@ -551,7 +591,6 @@ where
         } else {
             self.unexpected_state(state, "HandleReceivedIceCandidates");
         }
-        Ok(())
     }
 
     fn handle_received_hangup(
@@ -696,7 +735,7 @@ where
         call: Call<T>,
         state: CallState,
         hangup: signaling::Hangup,
-    ) -> Result<()> {
+    ) {
         info!("handle_send_hangup_via_rtp_data_to_all():");
         if state.can_send_hangup_via_rtp() {
             self.schedule_work_even_when_terminating(
@@ -707,7 +746,6 @@ where
         } else {
             self.unexpected_state(state, "LocalHangup")
         }
-        Ok(())
     }
 
     fn handle_connection_observer_event(
@@ -806,6 +844,9 @@ where
                     ) => {
                         if call.active_device_id()? == remote_device_id {
                             call.set_state(CallState::ReconnectingAfterAccepted)?;
+                            if call.active_connection().and_then(|c| c.regather_on_all_networks()).is_ok() {
+                                info!("reconnecting: regathering candidates on all networks");
+                            }
                             self.notify_application(call, ApplicationEvent::Reconnecting)
                         } else {
                             info!(
@@ -1011,14 +1052,13 @@ where
         }
     }
 
-    fn handle_internal_error(&mut self, call: Call<T>, error: anyhow::Error) -> Result<()> {
+    fn handle_internal_error(&mut self, call: Call<T>, error: anyhow::Error) {
         info!("handle_internal_error():");
         self.worker_spawn(move || {
             if let Err(err) = call.internal_error(error) {
                 error!("Processing internal error failed: {}", err);
             }
         });
-        Ok(())
     }
 
     fn handle_connection_observer_error(
@@ -1026,7 +1066,7 @@ where
         call: Call<T>,
         error: anyhow::Error,
         remote_device_id: DeviceId,
-    ) -> Result<()> {
+    ) {
         info!(
             "handle_connection_observer_error(): call_id: {} remote_device_id: {}",
             call.call_id(),
@@ -1035,10 +1075,10 @@ where
 
         // Treat a connection internal error as a call internal error,
         // i.e. ignore the remote_device ID.
-        self.handle_internal_error(call, error)
+        self.handle_internal_error(call, error);
     }
 
-    fn handle_call_timeout(&mut self, call: Call<T>, state: CallState) -> Result<()> {
+    fn handle_call_timeout(&mut self, call: Call<T>, state: CallState) {
         info!("handle_call_timeout():");
 
         if !state.active() {
@@ -1048,9 +1088,9 @@ where
                 move |call| call.call_manager()?.timeout(call.call_id()),
             );
         }
-        Ok(())
     }
 
+    #[cfg(feature = "sim")]
     fn handle_synchronize(
         &mut self,
         mut call: Call<T>,
@@ -1071,19 +1111,41 @@ where
             condvar.notify_one();
             Ok(())
         } else {
-            Err(RingRtcError::MutexPoisoned(
-                "CallConnection Synchronize Condition Variable".to_string(),
+            Err(
+                RingRtcError::MutexPoisoned("Call Synchronize Condition Variable".to_string())
+                    .into(),
             )
-            .into())
+        }
+    }
+
+    #[cfg(feature = "sim")]
+    fn handle_pause(&self, pause: Arc<(Mutex<bool>, Condvar)>) -> Result<()> {
+        let (mutex, condvar) = &*pause;
+        if let Ok(guard) = mutex.lock() {
+            let _guard = condvar
+                .wait_while(guard, |released| !*released)
+                .expect("condvar should not be poisoned");
+            Ok(())
+        } else {
+            Err(RingRtcError::MutexPoisoned("Call Pause Condition Variable".to_string()).into())
         }
     }
 
     fn handle_terminate(&mut self, mut call: Call<T>) -> Result<()> {
-        self.event_stream.close();
-        self.drain_worker_thread();
-        self.drain_notify_thread();
+        if !self.terminating {
+            self.terminating = true;
+            self.event_stream.close();
+            self.drain_worker_thread();
+            self.drain_notify_thread();
+        }
 
-        call.set_state(CallState::Terminated)?;
+        if let Err(err) = call.set_state(CallState::Terminated) {
+            warn!(
+                "handle_terminate(): failed to set Terminated state: {}",
+                err
+            );
+        }
+
         call.terminate_complete()
     }
 

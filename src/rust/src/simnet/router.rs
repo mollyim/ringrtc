@@ -11,7 +11,11 @@ use std::{
     time::Duration,
 };
 
-use rand::{Rng, distributions, distributions::Distribution, rngs::ThreadRng, thread_rng};
+use rand::{
+    RngExt,
+    distr::{self, Distribution},
+    rngs::ThreadRng,
+};
 
 use crate::common::{
     Result,
@@ -178,7 +182,7 @@ struct LinkState {
     previous_packet_dropped: bool,
 
     #[allow(deprecated)]
-    delay_distribution: distributions::uniform::Uniform<u64>,
+    delay_distribution: distr::uniform::Uniform<u64>,
 
     // We keep a clone of the actor in the link state
     // so we can schedule tasks based on the state.
@@ -198,16 +202,18 @@ impl Link {
         //     config.delay_mean.as_secs_f64(),
         //     config.delay_std_dev.as_secs_f64(),
         // );
-        let delay_distribution = distributions::Uniform::from(
-            (config.delay_min.as_millis() as u64)..(config.delay_max.as_millis() as u64),
-        );
+        let delay_distribution = distr::Uniform::new_inclusive(
+            config.delay_min.as_millis() as u64,
+            config.delay_max.as_millis() as u64,
+        )
+        .expect("Uniform distribution failed, make sure high > low");
         let leaky_bucket = LeakyBucket::start(config.clone(), receiver, stopper.clone())?;
         Ok(Self {
             actor: Actor::start("simnet-Link", stopper, move |actor| {
                 Ok(LinkState {
                     actor,
                     config,
-                    rng: thread_rng(),
+                    rng: rand::rng(),
                     previous_packet_dropped: false,
                     delay_distribution,
                     leaky_bucket,
@@ -223,7 +229,7 @@ impl Link {
             } else {
                 state.config.loss_probability
             };
-            if !packet.reliable() && state.rng.gen_bool(loss_probability) {
+            if !packet.reliable() && state.rng.random_bool(loss_probability) {
                 println!(
                     "Dropped packet from {:?} to {:?} of size {} randomly (previous_packet_dropped={})",
                     packet.source, packet.dest, packet.size().as_bytes(), state.previous_packet_dropped

@@ -94,16 +94,25 @@ pub mod electron;
 #[cfg(feature = "native")]
 pub mod native;
 
-#[cfg(all(feature = "virtual_audio", feature = "native", not(feature = "sim")))]
+#[cfg(all(feature = "virtual_audio", feature = "native"))]
 pub mod virtual_audio;
+
+pub mod bin {
+    pub mod utils {
+        #[cfg(feature = "native")]
+        pub mod audio;
+    }
+}
 
 /// Foreign Function Interface (FFI) to WebRTC C++ library.
 pub mod webrtc {
     pub mod arc;
     pub use arc::Arc;
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
     pub mod audio_device_module;
-    #[cfg(all(not(feature = "sim"), feature = "native"))]
+    #[cfg(feature = "native")]
+    pub mod audio_device_module_callbacks;
+    #[cfg(feature = "native")]
     pub mod audio_device_module_utils;
     pub mod ice_gatherer;
     #[cfg(feature = "injectable_network")]
@@ -138,6 +147,8 @@ pub mod webrtc {
     }
     #[cfg(feature = "sim")]
     pub mod sim {
+        #[cfg(feature = "native")]
+        pub mod audio_device_module;
         pub mod ice_gatherer;
         pub mod media;
         pub mod peer_connection;

@@ -22,6 +22,9 @@ call_sim = ["signaling"]
 call_summary = []
 assets = []
 
+[lints]
+workspace = true
+
 [build-dependencies]
 prost-build = "0.14.1"
 tonic-prost-build = "0.14.2"

@@ -14,6 +14,7 @@ use jni::{
     sys::{jbyte, jint, jlong, jobject},
 };
 use log::Level;
+use rand::rand_core::UnwrapErr;
 
 use crate::{
     android::{
@@ -24,7 +25,7 @@ use crate::{
     },
     common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result},
     core::{
-        call_manager::CallManager,
+        call_manager::{CallManager, CreateCallLinkCallParams, CreateGroupCallParams, SvcConfig},
         connection::Connection,
         group_call, signaling,
         util::{ptr_as_box, ptr_as_mut},
@@ -204,7 +205,8 @@ pub fn call(
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let app_remote_peer = Arc::new(env.new_global_ref(jni_remote)?);
-    call_manager.call(app_remote_peer, call_media_type, local_device_id)
+    call_manager.call(app_remote_peer, call_media_type, local_device_id);
+    Ok(())
 }
 
 /// Application notification to proceed with a new call
@@ -227,27 +229,31 @@ pub fn proceed(
         android_call_context,
         call_config,
         audio_levels_interval,
-    )
+    );
+    Ok(())
 }
 
 /// Application notification that signal message was sent successfully
 pub fn message_sent(call_manager: *mut AndroidCallManager, call_id: jlong) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let call_id = CallId::from(call_id);
-    call_manager.message_sent(call_id)
+    call_manager.message_sent(call_id);
+    Ok(())
 }
 
 /// Application notification that signal message was not sent successfully
 pub fn message_send_failure(call_manager: *mut AndroidCallManager, call_id: jlong) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let call_id = CallId::from(call_id);
-    call_manager.message_send_failure(call_id)
+    call_manager.message_send_failure(call_id);
+    Ok(())
 }
 
 /// Application notification of local hangup
 pub fn hangup(call_manager: *mut AndroidCallManager) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.hangup()
+    call_manager.hangup();
+    Ok(())
 }
 
 /// Application notification cancelling a group call ring
@@ -309,7 +315,8 @@ pub fn received_answer(
             sender_identity_key,
             receiver_identity_key,
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received offer message
@@ -354,7 +361,8 @@ pub fn received_offer(
             sender_identity_key,
             receiver_identity_key,
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification to add ICE candidates to a Connection
@@ -390,7 +398,8 @@ pub fn received_ice(
             },
             sender_device_id,
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received Hangup message
@@ -414,7 +423,8 @@ pub fn received_hangup(
             sender_device_id,
             hangup: signaling::Hangup::from_type_and_device_id(hangup_type, hangup_device_id),
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received Busy message
@@ -433,7 +443,8 @@ pub fn received_busy(
         remote_peer,
         call_id,
         signaling::ReceivedBusy { sender_device_id },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received call message.
@@ -468,7 +479,8 @@ pub fn received_call_message(
         local_device_id,
         message,
         Duration::from_secs(message_age_sec),
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received HTTP response.
@@ -508,7 +520,8 @@ pub fn http_request_failed(call_manager: *mut AndroidCallManager, request_id: jl
 pub fn accept_call(call_manager: *mut AndroidCallManager, call_id: jlong) -> Result<()> {
     let call_id = CallId::from(call_id);
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.accept_call(call_id)
+    call_manager.accept_call(call_id);
+    Ok(())
 }
 
 /// CMI request to get the active Connection object (a raw jobject pointing to the Global ref)
@@ -582,13 +595,15 @@ pub fn update_data_mode(call_manager: *mut AndroidCallManager, data_mode: DataMo
 pub fn drop_call(call_manager: *mut AndroidCallManager, call_id: jlong) -> Result<()> {
     let call_id = CallId::from(call_id);
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.drop_call(call_id)
+    call_manager.drop_call(call_id);
+    Ok(())
 }
 
 /// CMI request to reset the Call Manager
 pub fn reset(call_manager: *mut AndroidCallManager) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.reset()
+    call_manager.reset();
+    Ok(())
 }
 
 /// CMI request to close down the Call Manager.
@@ -697,7 +712,7 @@ pub fn update_call_link(
         if name.is_empty() {
             vec![]
         } else {
-            root_key.encrypt(name.as_bytes(), rand::rngs::OsRng)
+            root_key.encrypt(name.as_bytes(), UnwrapErr(rand::rngs::SysRng))
         }
     });
     let new_restrictions = jint_to_restrictions(new_restrictions);
@@ -891,6 +906,7 @@ pub fn create_group_call_client(
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
     dred_duration: jbyte,
+    svc_config: JObject,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -933,6 +949,8 @@ pub fn create_group_call_client(
         Some(Duration::from_millis(audio_levels_interval_millis as u64))
     };
 
+    let svc_config = jobject_to_svc_config(env, svc_config)?;
+
     let proxy_info = if jni_proxy_info.is_null() {
         None
     } else {
@@ -940,18 +958,19 @@ pub fn create_group_call_client(
     };
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.create_group_call_client(
+    call_manager.create_group_call_client(CreateGroupCallParams {
         group_id,
         sfu_url,
         proxy_info,
         hkdf_extra_info,
         audio_levels_interval,
-        dred_duration as u8,
-        Some(peer_connection_factory),
+        dred_duration: dred_duration as u8,
+        svc_config,
+        peer_connection_factory: Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
-        None,
-    )
+        incoming_video_sink: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -967,6 +986,7 @@ pub fn create_call_link_call_client(
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
     dred_duration: jbyte,
+    svc_config: JObject,
     native_pcf_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -1017,6 +1037,8 @@ pub fn create_call_link_call_client(
         Some(Duration::from_millis(audio_levels_interval_millis as u64))
     };
 
+    let svc_config = jobject_to_svc_config(env, svc_config)?;
+
     let proxy_info = if jni_proxy_info.is_null() {
         None
     } else {
@@ -1024,21 +1046,22 @@ pub fn create_call_link_call_client(
     };
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.create_call_link_call_client(
+    call_manager.create_call_link_call_client(CreateCallLinkCallParams {
         sfu_url,
         proxy_info,
-        &endorsement_public_key,
-        &auth_presentation,
+        endorsement_public_key: &endorsement_public_key,
+        auth_presentation: &auth_presentation,
         root_key,
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
-        dred_duration as u8,
-        Some(peer_connection_factory),
+        dred_duration: dred_duration as u8,
+        svc_config,
+        peer_connection_factory: Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
-        None,
-    )
+        incoming_video_sink: None,
+    })
 }
 
 pub fn delete_group_call_client(
@@ -1354,4 +1377,43 @@ fn jint_to_restrictions(raw_restrictions: jint) -> Option<CallLinkRestrictions> 
         1 => Some(CallLinkRestrictions::AdminApproval),
         _ => None,
     }
+}
+
+fn jobject_to_svc_config(env: &mut Env, svc_config: JObject) -> Result<Option<SvcConfig>> {
+    const STRING_TYPE: FieldSignature<'static> = jni_sig!(java.lang.String);
+    const NULLABLE_INT_TYPE: FieldSignature<'static> = jni_sig!(java.lang.Integer);
+
+    if svc_config.is_null() {
+        return Ok(None);
+    }
+
+    let mode = env
+        .get_field(&svc_config, jni_str!("mode"), &STRING_TYPE)?
+        .into_object()?;
+    let mode = env.cast_local::<JString>(mode)?.try_to_string(env)?;
+    let mode_for_screenshare = env
+        .get_field(&svc_config, jni_str!("modeForScreenshare"), &STRING_TYPE)?
+        .into_object()?;
+    let mode_for_screenshare = env
+        .cast_local::<JString>(mode_for_screenshare)?
+        .try_to_string(env)?;
+    let max_bitrate_bps = env
+        .get_field(&svc_config, jni_str!("maxBitrateBps"), &NULLABLE_INT_TYPE)?
+        .into_object()?;
+    let max_bitrate_bps = if max_bitrate_bps.is_null() {
+        None
+    } else {
+        let value = env.call_method(
+            max_bitrate_bps,
+            jni_str!("intValue"),
+            jni_sig!(() -> int),
+            &[],
+        )?;
+        Some(value.into_int()?)
+    };
+    Ok(Some(SvcConfig {
+        mode,
+        mode_for_screenshare,
+        max_bitrate_bps,
+    }))
 }

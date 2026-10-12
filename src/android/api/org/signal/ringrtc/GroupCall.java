@@ -144,6 +144,7 @@ public final class GroupCall {
                             @NonNull  byte[]                hkdfExtraInfo,
                             @Nullable Integer               audioLevelsIntervalMs,
                             @Nullable Byte                  dredDuration,
+                            @Nullable SvcConfig             svcConfig,
                             @NonNull  PeerConnectionFactory factory,
                             @NonNull  Observer              observer) {
         Log.i(TAG, "create():");
@@ -161,6 +162,7 @@ public final class GroupCall {
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
                 dredDurationByte,
+                svcConfig,
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
                 // Returns a borrowed RC.
@@ -194,6 +196,7 @@ public final class GroupCall {
                             @NonNull  byte[]                hkdfExtraInfo,
                             @Nullable Integer               audioLevelsIntervalMs,
                             @Nullable Byte                  dredDuration,
+                            @Nullable SvcConfig             svcConfig,
                             @NonNull  PeerConnectionFactory factory,
                             @NonNull  Observer              observer) {
         Log.i(TAG, "create():");
@@ -214,6 +217,7 @@ public final class GroupCall {
                 hkdfExtraInfo,
                 audioLevelsIntervalMillis,
                 dredDurationByte,
+                svcConfig,
                 // Returns a borrowed RC.
                 factory.getNativePeerConnectionFactory(),
                 // Returns a borrowed RC.
@@ -1382,6 +1386,7 @@ public final class GroupCall {
                                           byte[] hkdfExtraInfo,
                                           int audioLevelsIntervalMillis,
                                           byte dredDuration,
+                                          SvcConfig svcConfig,
                                           long nativePeerConnectionFactory,
                                           long nativeAudioTrack,
                                           long nativeVideoTrack)
@@ -1398,6 +1403,7 @@ public final class GroupCall {
                                              byte[] hkdfExtraInfo,
                                              int audioLevelsIntervalMillis,
                                              byte dredDuration,
+                                             SvcConfig svcConfig,
                                              long nativePeerConnectionFactory,
                                              long nativeAudioTrack,
                                              long nativeVideoTrack)

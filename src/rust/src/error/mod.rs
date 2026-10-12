@@ -23,6 +23,8 @@ pub enum RingRtcError {
     OptionValueNotSet(String, String),
     #[error("Couldn't register an actor")]
     RegisterActor,
+    #[error("Timed out waiting for termination: {0}")]
+    TerminateTimeout(String),
 
     // Call Manager error codes
     #[error("Active call already in progress, id: {0}")]
@@ -131,4 +133,6 @@ pub enum RingRtcError {
     InvalidRemoteSrtpKey,
     #[error("Buffer too small")]
     BufferTooSmall,
+    #[error("Failed to enable SVC")]
+    EnableScalableVideoCoding,
 }

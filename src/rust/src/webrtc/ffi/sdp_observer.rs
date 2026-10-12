@@ -69,18 +69,37 @@ unsafe extern "C" {
         salt_len: size_t,
     ) -> bool;
 
-    pub fn Rust_sessionDescriptionToV4(
+    // Only for use when we detect that the remote does not support asymmetric codecs.
+    // TODO: Remove this when the 90-day for asymmetric codecs expires.
+    pub fn Rust_sessionDescriptionToV4Legacy(
         v4: webrtc::ptr::Borrowed<RffiSessionDescription>,
         enable_vp9: bool,
     ) -> webrtc::ptr::Owned<RffiConnectionParametersV4>;
 
+    pub fn Rust_sessionDescriptionToV4(
+        v4: webrtc::ptr::Borrowed<RffiSessionDescription>,
+        enable_vp9_encode: bool,
+        enable_vp9_decode: bool,
+    ) -> webrtc::ptr::Owned<RffiConnectionParametersV4>;
+
     pub fn Rust_deleteV4(session_description: webrtc::ptr::Owned<RffiConnectionParametersV4>);
+
+    // Only for use when we detect that the remote does not support asymmetric codecs.
+    // TODO: Remove this when the 90-day for asymmetric codecs expires.
+    pub fn Rust_sessionDescriptionFromV4Legacy(
+        offer: bool,
+        v4: webrtc::ptr::Borrowed<RffiConnectionParametersV4>,
+        enable_tcc_audio: bool,
+        enable_vp9: bool,
+    ) -> webrtc::ptr::Owned<RffiSessionDescription>;
 
     pub fn Rust_sessionDescriptionFromV4(
         offer: bool,
         v4: webrtc::ptr::Borrowed<RffiConnectionParametersV4>,
         enable_tcc_audio: bool,
-        enable_vp9: bool,
+        enable_vp9_encode: bool,
+        enable_vp9_decode: bool,
+        v4_is_local: bool,
     ) -> webrtc::ptr::Owned<RffiSessionDescription>;
 
     pub fn Rust_localDescriptionForGroupCall(
@@ -90,6 +109,9 @@ unsafe extern "C" {
         local_demux_id: u32,
         remote_demux_ids_data: webrtc::ptr::Borrowed<u32>,
         remote_demux_ids_len: size_t,
+        remote_demux_ids_require_svc_data: webrtc::ptr::Borrowed<u32>,
+        remote_demux_ids_require_svc_len: size_t,
+        enable_svc: bool,
     ) -> webrtc::ptr::Owned<RffiSessionDescription>;
 
     pub fn Rust_remoteDescriptionForGroupCall(
@@ -99,6 +121,9 @@ unsafe extern "C" {
         local_demux_id: u32,
         remote_demux_ids_data: webrtc::ptr::Borrowed<u32>,
         remote_demux_ids_len: size_t,
+        remote_demux_ids_require_svc_data: webrtc::ptr::Borrowed<u32>,
+        remote_demux_ids_require_svc_len: size_t,
+        enable_svc: bool,
     ) -> webrtc::ptr::Owned<RffiSessionDescription>;
 
     pub fn Rust_deleteSessionDescription(sdi: webrtc::ptr::Owned<RffiSessionDescription>);

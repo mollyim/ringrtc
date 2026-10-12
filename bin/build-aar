@@ -10,10 +10,16 @@ set -e
 # shellcheck source=bin/env.sh
 . "$(dirname "$0")"/env.sh
 
+BUILD_WHAT_FLAG=""
+if [ "${BUILD_WHAT}" = "ringrtc" ]; then
+  BUILD_WHAT_FLAG="--ringrtc-only"
+fi
+
 "${0}.py"                                  \
     --build-dir="${OUTPUT_DIR}"            \
     --webrtc-src-dir="${WEBRTC_SRC_DIR}"   \
     --gradle-dir="${PROJECT_DIR}"          \
     --publish-version="${PROJECT_VERSION}" \
     --webrtc-version="${WEBRTC_VERSION}"   \
-    "$@"
+    ${BUILD_WHAT_FLAG}                     \
+    "$@" 

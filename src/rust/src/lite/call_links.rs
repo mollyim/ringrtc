@@ -338,6 +338,8 @@ pub fn delete_call_link(
 pub mod ios {
     use std::ffi::{CStr, c_char, c_void};
 
+    use rand::rand_core::UnwrapErr;
+
     use super::*;
     use crate::lite::{
         ffi::ios::{cstr, rtc_Bytes, rtc_OptionalU16, rtc_String},
@@ -390,7 +392,7 @@ pub mod ios {
         context: *mut c_void,
         callback: extern "C" fn(context: *mut c_void, result: rtc_Bytes),
     ) {
-        let root_key = CallLinkRootKey::generate(rand::rngs::OsRng);
+        let root_key = CallLinkRootKey::generate(UnwrapErr(rand::rngs::SysRng));
         callback(context, rtc_Bytes::from(root_key.as_slice()));
     }
 
@@ -399,7 +401,7 @@ pub mod ios {
         context: *mut c_void,
         callback: extern "C" fn(context: *mut c_void, result: rtc_Bytes),
     ) {
-        let passkey = CallLinkRootKey::generate_admin_passkey(rand::rngs::OsRng);
+        let passkey = CallLinkRootKey::generate_admin_passkey(UnwrapErr(rand::rngs::SysRng));
         callback(context, rtc_Bytes::from(&passkey));
     }
 
@@ -432,6 +434,24 @@ pub mod ios {
                 callback(
                     context,
                     rtc_String::from(root_key.to_formatted_string().as_str()),
+                );
+                std::ptr::null()
+            }
+            Err(_) => cstr!("invalid root key").as_ptr(),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn rtc_calllinks_CallLinkRootKey_toRedactedString(
+        root_key_bytes: rtc_Bytes,
+        context: *mut c_void,
+        callback: extern "C" fn(context: *mut c_void, result: rtc_String),
+    ) -> *const c_char {
+        match CallLinkRootKey::try_from(root_key_bytes.as_slice()) {
+            Ok(root_key) => {
+                callback(
+                    context,
+                    rtc_String::from(root_key.to_redacted_string().as_str()),
                 );
                 std::ptr::null()
             }
@@ -656,7 +676,7 @@ pub mod ios {
                         if name_bytes.is_empty() {
                             vec![]
                         } else {
-                            link_root_key.encrypt(name_bytes, rand::rngs::OsRng)
+                            link_root_key.encrypt(name_bytes, UnwrapErr(rand::rngs::SysRng))
                         }
                     });
                     update_call_link(

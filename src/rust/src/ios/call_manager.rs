@@ -13,7 +13,7 @@ use crate::{
     common::{CallConfig, CallId, CallMediaType, DataMode, DeviceId, Result},
     core::{
         call_manager,
-        call_manager::CallManager,
+        call_manager::{CallManager, CreateCallLinkCallParams, CreateGroupCallParams, SvcConfig},
         group_call, signaling,
         util::{ptr_as_box, ptr_as_mut},
     },
@@ -39,7 +39,7 @@ pub type IosCallManager = CallManager<IosPlatform>;
 
 /// Creates a new IosCallManager object.
 pub fn create(app_interface: AppInterface, http_client: http::ios::Client) -> Result<*mut c_void> {
-    let platform = IosPlatform::new(app_interface)?;
+    let platform = IosPlatform::new(app_interface);
     let call_manager = IosCallManager::new(platform, http_client)?;
     let call_manager_box = Box::new(call_manager);
     Ok(Box::into_raw(call_manager_box) as *mut c_void)
@@ -70,7 +70,8 @@ pub fn call(
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
 
-    call_manager.call(call_data, call_media_type, app_local_device)
+    call_manager.call(call_data, call_media_type, app_local_device);
+    Ok(())
 }
 
 /// Application notification to proceed with a new call
@@ -88,27 +89,31 @@ pub fn proceed(
         Arc::new(app_call_context),
         call_config,
         audio_levels_interval,
-    )
+    );
+    Ok(())
 }
 
 /// Application notification that the sending of the previous message was a success.
 pub fn message_sent(call_manager: *mut IosCallManager, call_id: u64) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let call_id = CallId::from(call_id);
-    call_manager.message_sent(call_id)
+    call_manager.message_sent(call_id);
+    Ok(())
 }
 
 /// Application notification that the sending of the previous message was a failure.
 pub fn message_send_failure(call_manager: *mut IosCallManager, call_id: u64) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let call_id = CallId::from(call_id);
-    call_manager.message_send_failure(call_id)
+    call_manager.message_send_failure(call_id);
+    Ok(())
 }
 
 /// Application notification of local hangup.
 pub fn hangup(call_manager: *mut IosCallManager) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.hangup()
+    call_manager.hangup();
+    Ok(())
 }
 
 /// Application notification cancelling a group ring.
@@ -177,7 +182,8 @@ pub fn received_answer(
             sender_identity_key,
             receiver_identity_key,
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received offer message
@@ -241,7 +247,8 @@ pub fn received_offer(
             sender_identity_key,
             receiver_identity_key,
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification to add ICE candidates to a Connection
@@ -253,7 +260,8 @@ pub fn received_ice(
 ) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
     let call_id = CallId::from(call_id);
-    call_manager.received_ice(call_data, call_id, received)
+    call_manager.received_ice(call_data, call_id, received);
+    Ok(())
 }
 
 /// Application notification of received Hangup message
@@ -274,7 +282,8 @@ pub fn received_hangup(
             hangup: signaling::Hangup::from_type_and_device_id(hangup_type, hangup_device_id),
             sender_device_id,
         },
-    )
+    );
+    Ok(())
 }
 
 /// Application notification of received Busy message
@@ -290,7 +299,8 @@ pub fn received_busy(
         call_data,
         call_id,
         signaling::ReceivedBusy { sender_device_id },
-    )
+    );
+    Ok(())
 }
 
 pub fn received_call_message(
@@ -308,14 +318,16 @@ pub fn received_call_message(
         local_device_id,
         message,
         message_age_sec,
-    )
+    );
+    Ok(())
 }
 
 /// Application notification to accept the incoming call
 pub fn accept_call(call_manager: *mut IosCallManager, call_id: u64) -> Result<()> {
     let call_id = CallId::from(call_id);
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.accept_call(call_id)
+    call_manager.accept_call(call_id);
+    Ok(())
 }
 
 /// CMI request for the active Connection object
@@ -367,13 +379,15 @@ pub fn update_data_mode(call_manager: *mut IosCallManager, data_mode: DataMode) 
 pub fn drop_call(call_manager: *mut IosCallManager, call_id: u64) -> Result<()> {
     let call_id = CallId::from(call_id);
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.drop_call(call_id)
+    call_manager.drop_call(call_id);
+    Ok(())
 }
 
 /// CMI request to reset the Call Manager
 pub fn reset(call_manager: *mut IosCallManager) -> Result<()> {
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.reset()
+    call_manager.reset();
+    Ok(())
 }
 
 /// CMI request to close down the Call Manager.
@@ -396,6 +410,7 @@ pub fn create_group_call_client(
     hkdf_extra_info: Vec<u8>,
     audio_levels_interval: Option<Duration>,
     dred_duration: u8,
+    svc_config: Option<SvcConfig>,
     native_peer_connection_factory: webrtc::ptr::OwnedRc<pcf::RffiPeerConnectionFactoryInterface>,
     native_audio_track: webrtc::ptr::OwnedRc<media::RffiAudioTrack>,
     native_video_track: webrtc::ptr::OwnedRc<media::RffiVideoTrack>,
@@ -417,17 +432,18 @@ pub fn create_group_call_client(
     );
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.create_group_call_client(
+    call_manager.create_group_call_client(CreateGroupCallParams {
         group_id,
         sfu_url,
         hkdf_extra_info,
         audio_levels_interval,
         dred_duration,
-        Some(peer_connection_factory),
+        svc_config,
+        peer_connection_factory: Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
-        None,
-    )
+        incoming_video_sink: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -441,6 +457,7 @@ pub fn create_call_link_call_client(
     hkdf_extra_info: Vec<u8>,
     audio_levels_interval: Option<Duration>,
     dred_duration: u8,
+    svc_config: Option<SvcConfig>,
     native_peer_connection_factory: webrtc::ptr::OwnedRc<pcf::RffiPeerConnectionFactoryInterface>,
     native_audio_track: webrtc::ptr::OwnedRc<media::RffiAudioTrack>,
     native_video_track: webrtc::ptr::OwnedRc<media::RffiVideoTrack>,
@@ -462,20 +479,21 @@ pub fn create_call_link_call_client(
     );
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.create_call_link_call_client(
+    call_manager.create_call_link_call_client(CreateCallLinkCallParams {
         sfu_url,
-        &endorsement_public_key,
-        &auth_credential_presentation,
+        endorsement_public_key: &endorsement_public_key,
+        auth_presentation: &auth_credential_presentation,
         root_key,
         admin_passkey,
         hkdf_extra_info,
         audio_levels_interval,
         dred_duration,
-        Some(peer_connection_factory),
+        svc_config,
+        peer_connection_factory: Some(peer_connection_factory),
         outgoing_audio_track,
         outgoing_video_track,
-        None,
-    )
+        incoming_video_sink: None,
+    })
 }
 
 pub fn delete_group_call_client(

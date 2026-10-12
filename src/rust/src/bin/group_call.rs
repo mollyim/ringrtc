@@ -8,12 +8,11 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    thread,
-    time::Duration,
 };
 
 use log::info;
 use ringrtc::{
+    bin::utils::audio::set_default_audio_devices,
     common::{CallEndReason, units::DataRate},
     core::{
         assets::AssetRegistry,
@@ -256,25 +255,9 @@ fn main() {
         None,
     )
     .unwrap();
-    let mut done = false;
-    while !done {
-        // We may need to try a few times to get these; they're not necessarily
-        // populated instantly. Ideally we could use the callbacks to notify us
-        // when these are populated, but that's slightly tricky, because we might
-        // fetch the devices before callback registration, and they're device
-        // **change** callbacks.
-        thread::sleep(Duration::from_millis(100));
-        done = peer_connection_factory
-            .get_audio_playout_devices()
-            .is_ok_and(|d| !d.is_empty())
-            && peer_connection_factory
-                .get_audio_recording_devices()
-                .is_ok_and(|d| !d.is_empty())
-    }
-    peer_connection_factory.set_audio_playout_device(0).unwrap();
-    peer_connection_factory
-        .set_audio_recording_device(0)
-        .unwrap();
+
+    set_default_audio_devices(&mut peer_connection_factory).unwrap();
+
     let outgoing_audio_track = peer_connection_factory
         .create_outgoing_audio_track()
         .unwrap();
@@ -307,6 +290,7 @@ fn main() {
         dred_duration: 0,
         group_send_endorsement_cache: None,
         asset_registry: AssetRegistry::default(),
+        svc_config: None,
     })
     .unwrap();
 

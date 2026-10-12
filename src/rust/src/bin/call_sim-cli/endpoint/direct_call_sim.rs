@@ -47,15 +47,12 @@ impl CallStateHandler for CallEndpoint {
             if let CallState::Incoming(_call_media_type) | CallState::Outgoing(_call_media_type) =
                 call_state
             {
-                state
-                    .call_manager
-                    .proceed(
-                        call_id,
-                        state.direct_call.as_ref().unwrap().call_context.clone(),
-                        state.direct_call.as_ref().unwrap().call_config.clone(),
-                        None,
-                    )
-                    .expect("proceed with call");
+                state.call_manager.proceed(
+                    call_id,
+                    state.direct_call.as_ref().unwrap().call_context.clone(),
+                    state.direct_call.as_ref().unwrap().call_config.clone(),
+                    None,
+                );
             } else if let CallState::Ringing = call_state {
                 if let Some(ringing_sender) = &state.event_sync.ringing {
                     let _ = ringing_sender.send(());

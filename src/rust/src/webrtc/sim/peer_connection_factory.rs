@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::{ffi::CString, os::raw::c_char, ptr::copy_nonoverlapping};
+use std::os::raw::c_char;
 
 use crate::{
     webrtc,
@@ -85,73 +85,4 @@ pub unsafe fn Rust_createVideoTrack(
 ) -> webrtc::ptr::OwnedRc<RffiVideoTrack> {
     info!("Rust_createVideoTrack()");
     unsafe { webrtc::ptr::OwnedRc::from_ptr(&FAKE_VIDEO_TRACK) }
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_getAudioPlayoutDevices(
-    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
-) -> i16 {
-    1
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_getAudioPlayoutDeviceName(
-    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
-    index: u16,
-    name_out: *mut c_char,
-    uuid_out: *mut c_char,
-) -> i32 {
-    if index != 0 {
-        return -1;
-    }
-    unsafe {
-        copy_to_c_buffer("FakeSpeaker", name_out);
-        copy_to_c_buffer("FakeSpeakerUuid", uuid_out);
-    }
-    0
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_setAudioPlayoutDevice(
-    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
-    index: u16,
-) -> bool {
-    index == 0
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_getAudioRecordingDevices(
-    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
-) -> i16 {
-    1
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_getAudioRecordingDeviceName(
-    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
-    index: u16,
-    name_out: *mut c_char,
-    uuid_out: *mut c_char,
-) -> i32 {
-    if index != 0 {
-        return -1;
-    }
-    unsafe {
-        copy_to_c_buffer("FakeMicrophone", name_out);
-        copy_to_c_buffer("FakeMicrophoneUuid", uuid_out);
-    }
-    0
-}
-
-#[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_setAudioRecordingDevice(
-    _factory: webrtc::ptr::BorrowedRc<RffiPeerConnectionFactoryOwner>,
-    index: u16,
-) -> bool {
-    index == 0
-}
-
-unsafe fn copy_to_c_buffer(string: &str, dest: *mut c_char) {
-    let bytes = CString::new(string).unwrap();
-    unsafe { copy_nonoverlapping(bytes.as_ptr(), dest, string.len() + 1) }
 }

@@ -12,6 +12,9 @@ simulator = ["webrtc-sys-build/simulator"]
 [lib]
 crate-type = ["cdylib", "staticlib", "lib"]
 
+[lints]
+workspace = true
+
 [build-dependencies]
 anyhow = "1.0.100"
 webrtc-sys-build = { path = "./build" }

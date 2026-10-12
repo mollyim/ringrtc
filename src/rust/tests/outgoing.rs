@@ -58,8 +58,7 @@ fn start_outbound_and_proceed() -> TestContext {
     let mut cm = context.cm();
 
     let remote_peer = format!("REMOTE_PEER-{}", context.prng.generate::<u16>());
-    cm.call(remote_peer, CallMediaType::Audio, 1)
-        .expect(error_line!());
+    cm.call(remote_peer, CallMediaType::Audio, 1);
 
     cm.synchronize().expect(error_line!());
 
@@ -78,8 +77,7 @@ fn start_outbound_and_proceed() -> TestContext {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -116,8 +114,7 @@ fn start_outbound_n_remote_call(n_remotes: u16) -> TestContext {
     assert!(n_remotes < 20);
 
     let remote_peer = format!("REMOTE_PEER-{}", context.prng.generate::<u16>());
-    cm.call(remote_peer.clone(), CallMediaType::Audio, 1)
-        .expect(error_line!());
+    cm.call(remote_peer.clone(), CallMediaType::Audio, 1);
 
     cm.synchronize().expect(error_line!());
 
@@ -136,8 +133,7 @@ fn start_outbound_n_remote_call(n_remotes: u16) -> TestContext {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -148,15 +144,13 @@ fn start_outbound_n_remote_call(n_remotes: u16) -> TestContext {
             remote_peer.clone(),
             call_id,
             random_received_answer(&context.prng, i as DeviceId),
-        )
-        .expect(error_line!());
+        );
 
         cm.received_ice(
             remote_peer.clone(),
             call_id,
             random_received_ice_candidate(&context.prng),
-        )
-        .expect(error_line!());
+        );
 
         cm.synchronize().expect(error_line!());
         let connection = active_call
@@ -512,7 +506,7 @@ fn outbound_local_hang_up() {
     let active_call = context.active_call();
 
     info!("test: local hangup");
-    cm.hangup().expect(error_line!());
+    cm.hangup();
 
     cm.synchronize().expect(error_line!());
 
@@ -697,7 +691,7 @@ fn outbound_call_connected_local_hangup() {
 
     info!("test: local hangup");
 
-    cm.hangup().expect(error_line!());
+    cm.hangup();
 
     cm.synchronize().expect(error_line!());
 
@@ -792,7 +786,7 @@ fn outbound_ice_disconnected_after_call_connected_and_local_hangup() {
     assert_eq!(context.ended_count(), 0);
 
     // Hang up before reconnect happens
-    cm.hangup().expect(error_line!());
+    cm.hangup();
 
     cm.synchronize().expect(error_line!());
 
@@ -1153,8 +1147,7 @@ fn receive_remote_ice_candidate() {
         active_call.remote_peer().expect(error_line!()).clone(),
         call_id,
         random_received_ice_candidate(&context.prng),
-    )
-    .expect("receive_ice");
+    );
     cm.synchronize().expect(error_line!());
 
     assert_eq!(context.error_count(), 0);
@@ -1193,8 +1186,7 @@ fn ice_candidate_removal() {
             ice: last_sent.ice,
             sender_device_id: 1,
         },
-    )
-    .expect("receive_ice");
+    );
     cm.synchronize().expect(error_line!());
 
     assert_eq!(context.error_count(), 0);
@@ -1237,8 +1229,7 @@ fn ice_send_failures_cause_error_before_connection() {
     assert_eq!(context.ice_candidates_sent(), 1);
 
     // Now indicate that the signaling mechanism failed to send the message.
-    cm.message_send_failure(active_call.call_id())
-        .expect(error_line!());
+    cm.message_send_failure(active_call.call_id());
 
     // There should be a signaling failure.
     cm.synchronize().expect(error_line!());
@@ -1282,8 +1273,7 @@ fn ignore_ice_send_failures_after_connection() {
     assert_eq!(context.ice_candidates_sent(), 1);
 
     // Now indicate that the signaling mechanism failed to send the message.
-    cm.message_send_failure(active_call.call_id())
-        .expect(error_line!());
+    cm.message_send_failure(active_call.call_id());
 
     // There should not be any failures due to ICE messages not being sent
     // after we are connected.
@@ -1315,8 +1305,7 @@ fn received_remote_hangup_before_connection() {
             sender_device_id: 1,
             hangup: signaling::Hangup::Normal,
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -1360,8 +1349,7 @@ fn received_remote_hangup_before_connection_with_message_in_flight() {
             sender_device_id: 1,
             hangup: signaling::Hangup::Normal,
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -1369,7 +1357,7 @@ fn received_remote_hangup_before_connection_with_message_in_flight() {
     assert_eq!(context.end_reason_count(CallEndReason::RemoteHangup), 1);
 
     // Now free the message queue so that the next message can fly.
-    cm.message_sent(active_call.call_id()).expect(error_line!());
+    cm.message_sent(active_call.call_id());
 
     cm.synchronize().expect(error_line!());
 
@@ -1398,8 +1386,7 @@ fn received_remote_hangup_before_connection_for_permission() {
             sender_device_id: 1,
             hangup: signaling::Hangup::NeedPermission(Some(1)),
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -1448,8 +1435,7 @@ fn received_remote_hangup_before_connection_for_permission_with_message_in_fligh
             sender_device_id: 1,
             hangup: signaling::Hangup::NeedPermission(Some(1)),
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -1461,7 +1447,7 @@ fn received_remote_hangup_before_connection_for_permission_with_message_in_fligh
     );
 
     // Now free the message queue so that the next message can fly.
-    cm.message_sent(active_call.call_id()).expect(error_line!());
+    cm.message_sent(active_call.call_id());
 
     cm.synchronize().expect(error_line!());
 
@@ -1488,8 +1474,7 @@ fn received_remote_hangup_after_connection() {
             sender_device_id: 1,
             hangup: signaling::Hangup::Normal,
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -1514,8 +1499,7 @@ fn received_remote_needs_permission() {
             sender_device_id: 1,
             hangup: signaling::Hangup::NeedPermission(None),
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2197,8 +2181,7 @@ fn outbound_proceed_with_error() {
     let mut cm = context.cm();
 
     let remote_peer = format!("REMOTE_PEER-{}", context.prng.generate::<u16>());
-    cm.call(remote_peer, CallMediaType::Audio, 1)
-        .expect(error_line!());
+    cm.call(remote_peer, CallMediaType::Audio, 1);
 
     cm.synchronize().expect(error_line!());
 
@@ -2221,8 +2204,7 @@ fn outbound_proceed_with_error() {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2250,7 +2232,7 @@ fn outbound_call_connected_local_hangup_with_error() {
     // cause the sending of the hangup to fail.
     context.force_internal_fault(true);
 
-    cm.hangup().expect(error_line!());
+    cm.hangup();
 
     cm.synchronize().expect(error_line!());
 
@@ -2375,7 +2357,7 @@ fn outbound_multiple_remote_devices() {
     assert_eq!(context.accepted_hangups_sent(), 1);
     assert!(cm.busy());
 
-    cm.hangup().expect(error_line!());
+    cm.hangup();
 
     cm.synchronize().expect(error_line!());
 
@@ -2449,8 +2431,7 @@ fn glare_before_connect_winner() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2493,8 +2474,7 @@ fn glare_before_connect_loser() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2532,8 +2512,7 @@ fn glare_before_connect_equal() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2567,11 +2546,9 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_before_start() {
         remote_peer.clone(),
         incoming_call_id,
         random_received_ice_candidate(&context.prng),
-    )
-    .expect(error_line!());
+    );
 
-    cm.call(remote_peer.clone(), CallMediaType::Audio, 1)
-        .expect(error_line!());
+    cm.call(remote_peer.clone(), CallMediaType::Audio, 1);
 
     cm.synchronize().expect(error_line!());
 
@@ -2591,8 +2568,7 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_before_start() {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2600,14 +2576,12 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_before_start() {
         remote_peer.clone(),
         outgoing_call_id,
         random_received_answer(&context.prng, 1 as DeviceId),
-    )
-    .expect(error_line!());
+    );
     cm.received_ice(
         remote_peer,
         outgoing_call_id,
         random_received_ice_candidate(&context.prng),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2640,8 +2614,7 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_before_start() {
         remote_peer,
         incoming_call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2660,8 +2633,7 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_before_start() {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2690,8 +2662,7 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_after_start() {
         remote_peer.clone(),
         incoming_call_id,
         random_received_ice_candidate(&context.prng),
-    )
-    .expect(error_line!());
+    );
 
     // The incoming offer's call_id will be greater than the active call_id.
     assert!(
@@ -2704,8 +2675,7 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_after_start() {
         remote_peer,
         incoming_call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2724,8 +2694,7 @@ fn glare_before_connect_loser_with_incoming_ice_candidates_after_start() {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2764,8 +2733,7 @@ fn glare_after_connect_winner() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2808,8 +2776,7 @@ fn glare_after_connect_loser() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2847,8 +2814,7 @@ fn glare_after_connect_equal() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2893,8 +2859,7 @@ fn recall_when_connected() {
         remote_peer,
         call_id,
         random_received_offer(&context.prng, Duration::from_secs(0)),
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2919,8 +2884,7 @@ fn start_outbound_receive_busy() {
     let mut cm = context.cm();
 
     let remote_peer = format!("REMOTE_PEER-{}", context.prng.generate::<u16>());
-    cm.call(remote_peer.clone(), CallMediaType::Audio, 1)
-        .expect(error_line!());
+    cm.call(remote_peer.clone(), CallMediaType::Audio, 1);
 
     cm.synchronize().expect(error_line!());
 
@@ -2942,8 +2906,7 @@ fn start_outbound_receive_busy() {
         format!("CONTEXT-{}", context.prng.generate::<u16>()),
         CallConfig::default().with_data_mode(DataMode::Normal),
         None,
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -2954,8 +2917,7 @@ fn start_outbound_receive_busy() {
         signaling::ReceivedBusy {
             sender_device_id: 1,
         },
-    )
-    .expect(error_line!());
+    );
 
     cm.synchronize().expect(error_line!());
 
@@ -3074,8 +3036,7 @@ fn group_call_ring_accepted() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
 
     let group_call_id = context
@@ -3158,8 +3119,7 @@ fn group_call_ring_accepted_with_existing_call() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
 
     let messages = cm
@@ -3232,8 +3192,7 @@ fn group_call_ring_too_old() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
     cm.age_all_outstanding_group_rings(Duration::from_secs(600));
 
@@ -3279,8 +3238,7 @@ fn group_call_ring_message_age_does_not_affect_ring_expiration() {
         .expect("cannot fail encoding to Vec");
 
     // 45 seconds means the ring isn't expired yet...
-    cm.received_call_message(sender, 1, 2, buf, Duration::from_secs(45))
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::from_secs(45));
     cm.synchronize().expect(error_line!());
     // ...and adding another 45 won't make it expire, since the ages don't stack.
     cm.age_all_outstanding_group_rings(Duration::from_secs(45));
@@ -3350,8 +3308,7 @@ fn group_call_ring_last_ring_wins() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
 
     let second_message = protobuf::signaling::CallMessage {
@@ -3367,8 +3324,7 @@ fn group_call_ring_last_ring_wins() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
 
     let group_call_id = context
@@ -3435,8 +3391,7 @@ fn group_call_ring_cancelled_locally_before_join() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
     cm.cancel_group_ring(group_id.clone(), ring_id, None)
         .expect(error_line!());
@@ -3483,8 +3438,7 @@ fn group_call_ring_cancelled_by_ringer_before_join() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender.clone(), 1, 2, buf, Duration::ZERO);
 
     let cancel_message = protobuf::signaling::CallMessage {
         ring_intention: Some(protobuf::signaling::call_message::RingIntention {
@@ -3499,8 +3453,7 @@ fn group_call_ring_cancelled_by_ringer_before_join() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
 
     cm.synchronize().expect(error_line!());
 
@@ -3546,8 +3499,7 @@ fn group_call_ring_not_cancelled_by_different_sender() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(original_ringer, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(original_ringer, 1, 2, buf, Duration::ZERO);
 
     // Receive a cancellation from a different sender
     let cancel_message = protobuf::signaling::CallMessage {
@@ -3563,8 +3515,7 @@ fn group_call_ring_not_cancelled_by_different_sender() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(different_sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(different_sender, 1, 2, buf, Duration::ZERO);
 
     cm.synchronize().expect(error_line!());
 
@@ -3630,8 +3581,7 @@ fn group_call_ring_cancelled_by_another_device_before_join() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(sender, 1, 2, buf, Duration::ZERO);
 
     let cancel_message = protobuf::signaling::CallMessage {
         ring_response: Some(protobuf::signaling::call_message::RingResponse {
@@ -3646,8 +3596,7 @@ fn group_call_ring_cancelled_by_another_device_before_join() {
         .encode(&mut buf)
         .expect("cannot fail encoding to Vec");
 
-    cm.received_call_message(self_uuid, 1, 2, buf, Duration::ZERO)
-        .expect(error_line!());
+    cm.received_call_message(self_uuid, 1, 2, buf, Duration::ZERO);
     cm.synchronize().expect(error_line!());
 
     let group_call_id = context.create_group_call(group_id).expect(error_line!());
@@ -3662,4 +3611,158 @@ fn group_call_ring_cancelled_by_another_device_before_join() {
         &[] as &[ringrtc::sim::sim_platform::OutgoingCallMessage],
         &messages[..]
     );
+}
+
+// A failure notifying the app that the call ended must not abandon media teardown.
+#[test]
+fn hangup_when_call_ended_notification_fails() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+
+    context.force_call_ended_failure(true);
+
+    cm.hangup();
+    context.wait_for_teardown();
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    context.force_call_ended_failure(false);
+    cm.synchronize().expect(error_line!());
+}
+
+// A peer that floods the call's event queue must not be able to prevent a
+// local hangup from tearing the call down.
+#[test]
+fn hangup_with_saturated_call_fsm_queue() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+
+    context.pause_call_fsm();
+    assert!(context.fill_call_fsm_queue() > 0);
+
+    cm.hangup();
+    context.wait_for_teardown();
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    context.resume_call_fsm();
+
+    assert_eq!(context.end_reason_count(CallEndReason::LocalHangup), 1);
+    assert!(context.wait_for_call_concluded(1));
+}
+
+// The peer connection is closed on hangup even when the connection's event
+// queue is full and a Terminate event cannot be queued.
+#[test]
+fn hangup_with_saturated_connection_fsm_queue() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+
+    context.pause_connection_fsm();
+    assert!(context.fill_connection_fsm_queue() > 0);
+
+    cm.hangup();
+    context.wait_for_teardown();
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    context.resume_connection_fsm();
+
+    assert!(context.wait_for_call_concluded(1));
+}
+
+// A hangup that slips into the connection's event queue while full must
+// still tear the call all the way down.
+#[test]
+fn remote_hangup_with_full_connection_fsm_queue() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let peer_connection = context.active_connection().app_connection().unwrap();
+    let call_id = context.active_call().call_id();
+
+    context.pause_connection_fsm();
+    // The hangup lands in the queue, then the queue becomes full. Don't hold a
+    // Connection/Call clone past here, or the final drop can't conclude the call.
+    context
+        .active_connection()
+        .inject_received_hangup(call_id, signaling::Hangup::Normal)
+        .expect(error_line!());
+    assert!(context.fill_connection_fsm_queue() > 0);
+
+    context.resume_connection_fsm();
+
+    assert!(context.wait_for_call_concluded(1));
+
+    assert!(peer_connection.closed());
+    // Outgoing media stopped and the RTP sink cleared, not just close() called.
+    assert!(!peer_connection.outgoing_audio_enabled());
+    assert!(!peer_connection.rtp_sink_registered());
+
+    assert_eq!(context.end_reason_count(CallEndReason::RemoteHangup), 1);
+}
+
+// The connection FSM shuts down on hangup even though a Terminate event was
+// never delivered to it.
+#[test]
+fn connection_fsm_terminates_without_terminate_event() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let active_connection = context.active_connection();
+
+    context.pause_connection_fsm();
+    assert!(context.fill_connection_fsm_queue() > 0);
+
+    cm.hangup();
+    context.wait_for_teardown();
+
+    // Terminate cannot have been dequeued: the FSM is held and the queue is full.
+    assert!(!active_connection.fsm_terminated());
+
+    context.resume_connection_fsm();
+
+    assert!(context.wait_for_connection_fsm_terminated(&active_connection));
+}
+
+// The call FSM shuts down on hangup even though a Terminate event was never
+// delivered to it.
+#[test]
+fn call_fsm_terminates_without_terminate_event() {
+    test_init();
+
+    let context = connected_and_accepted_outbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+
+    context.pause_call_fsm();
+    assert!(context.fill_call_fsm_queue() > 0);
+
+    cm.hangup();
+    context.wait_for_teardown();
+
+    assert!(!active_call.fsm_terminated());
+
+    context.resume_call_fsm();
+
+    assert!(context.wait_for_call_fsm_terminated(&active_call));
 }

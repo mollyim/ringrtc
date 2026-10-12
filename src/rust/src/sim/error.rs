@@ -32,4 +32,6 @@ pub enum SimError {
     StartCallError,
     #[error("Simulation: Intentional: Call Concluded failed")]
     CallConcludedError,
+    #[error("Simulation: Intentional: Call Ended failed")]
+    CallEndedError,
 }

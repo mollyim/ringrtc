@@ -1,5 +1,122 @@
 # Changelog
 
+## v2.72.1
+
+- Update to webrtc 7871n
+  - If using adaptation use min/max bitrate values
+
+- Bound Linux virtual audio sink latency without rewinds
+
+- Protect stats observer lifetime and fields with mutexes
+
+- Process new ServerAddress message in SfuToDevice
+
+- Call Sim:
+  - Add audio twcc tests
+  - Parallelize analysis operations
+  - Make sure files exist before starting
+  - Fix workspace root lint reference
+  - Add local sfu support
+
+- CI: Remove baseline profiling comparisons
+
+- Integrate WebRTC FFI headers
+  - Fix ln invocation
+  - Remove git-move-helper.sh
+  - Create alias in WebRTC to headers in RingRTC
+
+- Do not allow unnecessary Return type in call termination
+
+## v2.72.0
+
+- Update webrtc version to 7871k
+  - Support setting min capture rate in CameraEnumerationAndroid
+  - Add video source frame count and resolution to stats
+  - Fix rffi translation of quality limitation reason kNone
+  - Avoid including webrtc-specific headers in api/
+  - Move non-FFI classes and methods out of api/
+  - Add logs when the audio recording route changes
+  - Return whether a response actually belongs to given TurnPort
+  - Update opus build to match upstream
+  - Remove unused declarations from peer_connection_factory.h
+  - Require non-static functions to have a prototype
+  - Initialize audio callback ptr ptr in Create
+  - Update audio callbacks to avoid global
+
+- Ensure calls terminate completely in corner cases
+
+- Add SvcConfig validation and auto-correction
+
+- Implement call link root key redaction
+
+- Add source fps & resolution stats, update call summary
+
+- Call Sim: Cleanup baseline configuration for dred
+
+- Add handlers for the Java ADM logging callbacks
+
+- Reapply "Fix direct test program"
+
+- Bump to cubeb 0.38
+
+## v2.71.0
+
+- Add SVC Support for group calls
+
+- Start callee audio recording before playout
+
+- Use server provided Vec<SocketAddr> from Join
+
+- Improve redaction utilities
+
+- Make device_id required for ADM operations
+
+- Improve build scripts and CI
+
+- Update dependencies
+  - Update rust dependencies
+  - Update to Rust 1.97.1
+  - Update cubeb to 0.37
+  - Update npm tar package
+
+- Remove lazy_static usage
+
+## v2.70.2
+
+- Trim string before checking LiteralPrefix redaction
+
+## v2.70.1
+
+- Build / test: Remove unused methods for call simulator
+
+- Build / test: Fix webrtc unit test execution
+
+- Fix VP9 flag handling in Android
+
+- Update stats reporter to log correct remote_fraction_lost
+
+- Update call sim logging format and send call sim cli logs to stdout
+
+- Desktop: Improve cubeb log redaction
+
+## v2.70.0
+
+- Add asymmetric video codec support for 1:1 calls
+
+- Android: Add VideoConfig to CallManager::proceed
+
+- Trigger an ICE regather when reconnecting during 1:1 calls
+
+- ADM: Internal enum cleanup and update to cubeb 0.36.0
+
+- Assets: Support disabling on specific platforms
+
+- CI: Update to a newer Xcode and iOS version
+
+- CI: Use curl for fetch-artifact.py
+
+- Build improvements
+
 ## v2.69.7
 
 - Update WebRTC version to 7871a (m150)

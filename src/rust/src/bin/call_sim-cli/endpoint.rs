@@ -6,10 +6,10 @@
 mod direct_call_sim;
 mod group_call_sim;
 
+use core::unimplemented;
 use std::{
     collections::{HashMap, HashSet},
     sync::mpsc::Sender,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -17,6 +17,7 @@ use direct_call_sim::DirectCall;
 use group_call_sim::GroupCall;
 use log::*;
 use ringrtc::{
+    bin::utils::audio::set_default_audio_devices,
     common::{
         CallConfig, CallId, CallMediaType, DeviceId, Result,
         actor::{Actor, Stopper},
@@ -133,33 +134,8 @@ impl CallEndpoint {
                     &field_trials,
                     None,
                 )?;
-                let mut done = false;
-                while !done {
-                    // We may need to try a few times to get these; they're not necessarily
-                    // populated instantly. Ideally we could use the callbacks to notify us
-                    // when these are populated, but that's slightly tricky, because we might
-                    // fetch the devices before callback registration, and they're device
-                    // **change** callbacks.
-                    thread::sleep(Duration::from_millis(100));
-                    done = peer_connection_factory
-                        .get_audio_playout_devices()
-                        .is_ok_and(|d| !d.is_empty())
-                        && peer_connection_factory
-                            .get_audio_recording_devices()
-                            .is_ok_and(|d| !d.is_empty())
-                }
-                info!(
-                    "Audio playout devices: {:?}",
-                    peer_connection_factory.get_audio_playout_devices()
-                );
-                info!(
-                    "Audio recording devices: {:?}",
-                    peer_connection_factory.get_audio_recording_devices()
-                );
-                peer_connection_factory.set_audio_playout_device(0).unwrap();
-                peer_connection_factory
-                    .set_audio_recording_device(0)
-                    .unwrap();
+
+                set_default_audio_devices(&mut peer_connection_factory).unwrap();
 
                 // Set up signaling/state
                 signaling_server.register(&endpoint);
@@ -309,25 +285,24 @@ impl CallEndpoint {
         let callee_id = callee_id.clone();
 
         self.actor.send(move |state| {
-            state
-                .call_manager
-                .create_outgoing_call(callee_id, call_id, media_type, local_device_id)
-                .expect("start outgoing call");
+            state.call_manager.create_outgoing_call(
+                callee_id,
+                call_id,
+                media_type,
+                local_device_id,
+            );
         });
     }
 
     pub fn accept_incoming_direct_call(&self, call_id: CallId) {
         self.actor.send(move |state| {
-            state
-                .call_manager
-                .accept_call(call_id)
-                .expect("accept incoming call");
+            state.call_manager.accept_call(call_id);
         });
     }
 
     pub fn hangup(&self) {
         self.actor.send(move |state| {
-            state.call_manager.hangup().expect("hangup");
+            state.call_manager.hangup();
         });
     }
 
@@ -359,8 +334,7 @@ impl CallEndpoint {
                             sender_identity_key,
                             receiver_identity_key,
                         },
-                    )
-                    .expect("receive offer");
+                    );
                 }
                 signaling::Message::Answer(answer) => {
                     cm.received_answer(
@@ -372,8 +346,7 @@ impl CallEndpoint {
                             sender_identity_key,
                             receiver_identity_key,
                         },
-                    )
-                    .expect("received answer");
+                    );
                 }
                 signaling::Message::Ice(ice) => {
                     cm.received_ice(
@@ -383,8 +356,7 @@ impl CallEndpoint {
                             ice,
                             sender_device_id,
                         },
-                    )
-                    .expect("received ice candidates");
+                    );
                 }
                 signaling::Message::Hangup(hangup) => {
                     cm.received_hangup(
@@ -394,16 +366,14 @@ impl CallEndpoint {
                             hangup,
                             sender_device_id,
                         },
-                    )
-                    .expect("received hangup");
+                    );
                 }
                 signaling::Message::Busy => {
                     cm.received_busy(
                         PeerId::from("dummy"),
                         call_id,
                         signaling::ReceivedBusy { sender_device_id },
-                    )
-                    .expect("received busy");
+                    );
                 }
             }
         });
@@ -424,17 +394,14 @@ impl CallEndpoint {
         let sender_uuid = util::string_to_uuid(sender_id).expect("sender_id is valid uuid");
         self.actor.send(move |state| {
             let local_device_id = state.device_id;
-            state
-                .call_manager
-                .received_call_message(
-                    sender_uuid,
-                    // these two arguments are ignored
-                    sender_device_id,
-                    local_device_id,
-                    group_message,
-                    received_at.elapsed(),
-                )
-                .expect("received valid call message");
+            state.call_manager.received_call_message(
+                sender_uuid,
+                // these two arguments are ignored
+                sender_device_id,
+                local_device_id,
+                group_message,
+                received_at.elapsed(),
+            );
         });
     }
 
@@ -480,10 +447,7 @@ impl SignalingSender for CallEndpoint {
                 call_id,
                 msg,
             );
-            state
-                .call_manager
-                .message_sent(call_id)
-                .expect("signaling message sent");
+            state.call_manager.message_sent(call_id);
         });
         Ok(())
     }
@@ -510,15 +474,48 @@ impl SignalingSender for CallEndpoint {
 
     fn send_call_message_to_group(
         &self,
-        _group_id: group_call::GroupId,
-        _message: Vec<u8>,
+        group_id: group_call::GroupId,
+        message: Vec<u8>,
         _urgency: group_call::SignalingMessageUrgency,
-        _recipients_override: HashSet<UserId>,
+        recipients_override: HashSet<UserId>,
     ) -> Result<()> {
-        error!("Asked to send call message to group, but is not implemented yet");
-        todo!("Implement so that this works with groups of greater size than 2")
+        let sender_id = self.peer_id();
+        let self_user_id = self.user_id.clone();
+
+        self.actor.send(move |state| {
+            let recipients: Vec<UserId> = if recipients_override.is_empty() {
+                match state.group_directory.get(&group_id) {
+                    Some(members) => members
+                        .iter()
+                        .filter(|member| Some(&member.user_id) != self_user_id.as_ref())
+                        .map(|member| member.user_id.clone())
+                        .collect(),
+                    None => {
+                        error!(
+                            "Could not resolve group members, group not found in directory; dropping message"
+                        );
+                        return;
+                    }
+                }
+            } else {
+                recipients_override.into_iter().collect()
+            };
+
+            let sender_device_id = state.device_id;
+            for recipient_id in recipients {
+                state.signaling_server.send_call_message(
+                    &sender_id,
+                    sender_device_id,
+                    recipient_id,
+                    message.clone(),
+                );
+            }
+        });
+
+        Ok(())
     }
 
+    #[allow(clippy::disallowed_macros)]
     fn send_call_message_to_adhoc_group(
         &self,
         _message: Vec<u8>,
@@ -526,8 +523,10 @@ impl SignalingSender for CallEndpoint {
         _expiration: u64,
         _recipients_to_endorsements: HashMap<UserId, Vec<u8>>,
     ) -> Result<()> {
+        // Dropping the message degrades the call; panicking here would tear down the
+        // PeerConnection and break the rest of the test run.
         error!("Asked to send call message adhoc group, but is not implemented yet");
-        todo!("Implement so that this works with call links")
+        unimplemented!("Have not implemented send_call_message_to_adhoc_group");
     }
 }
 

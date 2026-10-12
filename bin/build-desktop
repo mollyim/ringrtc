@@ -15,7 +15,7 @@ TARGET_ARCH=${TARGET_ARCH:-$(uname -m)}
 
 usage()
 {
-    echo 'usage: build-desktop [-d|-r|-c] [--webrtc-only|--ringrtc-only|--call-sim-cli-only] [--no-electron] [--no-call-sim-cli] [--archive-webrtc] [--test-ringrtc-adm]
+    echo 'usage: build-desktop [-d|-r|-c] [--webrtc-only|--ringrtc-only] [--archive-webrtc] [--test-ringrtc-adm] [--call_sim-cli|--gctc|--direct]
     where:
         -d to create a debug build (default)
         -r to create a release build
@@ -25,6 +25,10 @@ usage()
         --ringrtc-only builds libringrtc-ARCH.node only
         --webrtc-tests also builds webrtc tests
         --test-ringrtc-adm also tests the ringrtc ADM.
+
+        --call_sim-cli builds the call_sim-cli binary instead of the ringrtc library
+        --gctc builds the group_call binary instead of the ringrtc library
+        --direct builds the direct binary instead of the ringrtc library
 
         --archive-webrtc generates an archive suitable for later --ringrtc-only builds'
 }
@@ -38,13 +42,15 @@ clean()
     cargo clean
 }
 
-BUILD_TYPE=debug
-BUILD_WHAT=all
-SKIP_CALL_SIM_CLI=
-SKIP_ELECTRON=
+# Fall back to explicitly specified BUILD_TYPE and BUILD_WHAT if requested
+BUILD_TYPE="${BUILD_TYPE:-debug}"
+BUILD_WHAT="${BUILD_WHAT:-all}"
 ARCHIVE_WEBRTC=
-TEST_RINGRTC_ADM=
-TEST_RINGRTC_ADM_UTILS=
+TEST_RINGRTC_ADM="${TEST_RINGRTC_ADM:-""}"
+TEST_RINGRTC_ADM_UTILS="${TEST_RINGRTC_ADM_UTILS:-""}"
+# If BUILD_WHAT is set to ringrtc or all, build the specified binary or library.
+# e.g., "ringrtc", "call_sim-cli", "gctc", "direct"
+BINARY_OR_LIB="${BINARY_OR_LIB:-""}"
 
 while [ "$1" != "" ]; do
     case $1 in
@@ -63,14 +69,14 @@ while [ "$1" != "" ]; do
         --ringrtc-only )
             BUILD_WHAT=ringrtc
             ;;
-        --call-sim-cli-only )
-            BUILD_WHAT=call_sim-cli
+        --call_sim-cli )
+            BINARY_OR_LIB=call_sim-cli
             ;;
-        --no-electron )
-            SKIP_ELECTRON=yes
+        --gctc )
+            BINARY_OR_LIB=gctc
             ;;
-        --no-call-sim-cli )
-            SKIP_CALL_SIM_CLI=yes
+        --direct )
+            BINARY_OR_LIB=direct
             ;;
         --archive-webrtc )
             ARCHIVE_WEBRTC=yes
@@ -96,6 +102,10 @@ while [ "$1" != "" ]; do
     shift
 done
 
+if [ -z "${BINARY_OR_LIB}" ] && [ "${BUILD_WHAT}" != "webrtc" ]; then
+  BINARY_OR_LIB="ringrtc"
+fi
+
 case "$TARGET_ARCH" in
     "x64"|"x86_64")
         GN_ARCH=x64
@@ -119,6 +129,21 @@ case "$TARGET_ARCH" in
         ;;
 esac
 
+case "${BINARY_OR_LIB}" in
+    "ringrtc" | "call_sim-cli" | "gctc" | "direct" )
+      if [ "${BUILD_WHAT}" = "webrtc" ]; then
+        echo "Request to build ${BINARY_OR_LIB} while only building webrtc does not make sense, aborting"
+        exit 1
+      fi
+      ;;
+    *)
+      if [ "${BUILD_WHAT}" != "webrtc" ]; then
+        echo "Unsupported BINARY_OR_LIB: ${BINARY_OR_LIB}"
+        exit 1
+      fi
+      ;;
+esac
+
 export MACOSX_DEPLOYMENT_TARGET="10.15"
 
 # Build WebRTC.
@@ -126,13 +151,13 @@ if [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "webrtc" ]
 then
     echo "Building WebRTC for ${GN_ARCH}"
 
-    WEBRTC_ARGS="target_cpu=\"${GN_ARCH}\" rtc_build_examples=false rtc_build_tools=false rtc_use_x11=false rtc_enable_sctp=false rtc_libvpx_build_vp9=true rtc_disable_metrics=true rtc_disable_trace_events=true use_siso=true rtc_opus_support_dred=true"
+    WEBRTC_ARGS="target_cpu=\"${GN_ARCH}\" rtc_build_examples=false rtc_build_tools=false rtc_use_x11=false rtc_enable_sctp=false rtc_libvpx_build_vp9=true rtc_disable_trace_events=true use_siso=true rtc_opus_support_dred=true"
 
     if [ -n "${BUILD_WEBRTC_TESTS}" ]
     then
-      WEBRTC_ARGS="${WEBRTC_ARGS} rtc_include_tests=true rtc_enable_protobuf=true"
+      WEBRTC_ARGS="${WEBRTC_ARGS} rtc_include_tests=true rtc_enable_protobuf=true rtc_disable_metrics=false"
     else
-      WEBRTC_ARGS="${WEBRTC_ARGS} rtc_include_tests=false rtc_enable_protobuf=false"
+      WEBRTC_ARGS="${WEBRTC_ARGS} rtc_include_tests=false rtc_enable_protobuf=false rtc_disable_metrics=true"
     fi
 
     if [ "${BUILD_TYPE}" = "release" ]
@@ -187,7 +212,7 @@ then
     fi
 fi
 
-if [ -z "${SKIP_ELECTRON}" ] && [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "ringrtc" ]
+if [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "ringrtc" ]
 then
     hash rustup 2>/dev/null || { echo >&2 "Make sure you have rustup installed and properly configured! Aborting."; exit 1; }
 
@@ -217,86 +242,115 @@ then
 
     echo "Building for platform ${DEFAULT_PLATFORM}, TARGET_ARCH=${TARGET_ARCH}, CARGO_TARGET=${CARGO_TARGET}"
 
-    # Build and link the final RingRTC library.
-    (
-        INCLUDE_RELEASE_FLAG=
-        if [ "${BUILD_TYPE}" = "release" ]
-        then
-            INCLUDE_RELEASE_FLAG=yes
-        fi
+    # Build with debug line tables, but not full debug info.
+    export CARGO_PROFILE_RELEASE_DEBUG=1
 
-        # Build with debug line tables, but not full debug info.
-        export CARGO_PROFILE_RELEASE_DEBUG=1
-
-        copy_to_node() {
-            cp -f "$1" "$2"
-        }
-
-        if [ $DEFAULT_PLATFORM = "darwin" ]
-        then
-            # Save the debug info in dSYM format...
-            export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed
-            # ...then have Rust strip the library.
-            export CARGO_PROFILE_RELEASE_STRIP=symbols
-            OUTPUT_LIBRARY=libringrtc.dylib
-            DEBUG_PACKAGE=libringrtc.dylib.dSYM
-        elif [ $DEFAULT_PLATFORM = "win32" ]
-        then
-            # Save the debug info in PDB format...
-            export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed
-            # ...and DLLs don't have anything to strip.
-            # (If you turn on stripping the PDB doesn't get generated at all.)
-            OUTPUT_LIBRARY=ringrtc.dll
-            DEBUG_PACKAGE=ringrtc.pdb
-        elif [ $DEFAULT_PLATFORM = "linux" ]
-        then
-            # DWP files don't seem ready for everyday use.
-            # We'll just save the whole unstripped binary.
-            OUTPUT_LIBRARY=libringrtc.so
-            DEBUG_PACKAGE=libringrtc.so
-            # Manually strip on copy for release builds.
-            if [ "${BUILD_TYPE}" = "release" ]; then
-                OBJCOPY=$(command -v "${CARGO_ARCH}"-linux-gnu-objcopy || echo objcopy)
-                copy_to_node() {
-                    "${OBJCOPY}" -S "$1" "$2"
-                }
-            fi
-        else
-            echo 'should not get here; platforms checked above' >&2
-            exit 1 # unreachable
-        fi
-
-        # Propagate this cross-compilation request to child processes;
-        # e.g. cubeb rust libs.
-        export CARGO_BUILD_TARGET="${CARGO_TARGET}"
-        RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo rustc --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} --crate-type cdylib
-
-        if [ "${TEST_RINGRTC_ADM}" = "yes" ]; then
-          RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo test --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} -- --nocapture audio_device_module_tests
-        elif [ "${TEST_RINGRTC_ADM_UTILS}" = "yes" ]; then
-          RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo test --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} -- --nocapture audio_device_module_utils
-        fi
-
-
-        mkdir -p src/node/build/${DEFAULT_PLATFORM}
-        copy_to_node target/${CARGO_TARGET}/${BUILD_TYPE}/${OUTPUT_LIBRARY} src/node/build/${DEFAULT_PLATFORM}/libringrtc-"${TARGET_ARCH}".node
-
-        if [ "${BUILD_TYPE}" = "release" ] && [ "$(command -v dump_syms)" ];
-        then
-          dump_syms "target/${CARGO_TARGET}/${BUILD_TYPE}/${DEBUG_PACKAGE}" -o "${OUTPUT_DIR}"/${BUILD_TYPE}/libringrtc-"${PROJECT_VERSION}"-${DEFAULT_PLATFORM}-"${TARGET_ARCH}"-debuginfo.sym
-        fi
-    )
-fi
-
-if [ -z "${SKIP_CALL_SIM_CLI}" ] && [ "${BUILD_WHAT}" = "all" ] || [ "${BUILD_WHAT}" = "call_sim-cli" ]
-then
-    if [ "${BUILD_TYPE}" = "debug" ]
+    INCLUDE_RELEASE_FLAG=
+    if [ "${BUILD_TYPE}" = "release" ]
     then
-        OUTPUT_DIR="${OUTPUT_DIR}" cargo build --package ringrtc --bin call_sim-cli --features=call_sim
-        echo "Can run with target/debug/call_sim-cli"
-    else
-        # Build with debug line tables, but not full debug info.
-        CARGO_PROFILE_RELEASE_DEBUG=1 OUTPUT_DIR="${OUTPUT_DIR}" cargo build --package ringrtc --bin call_sim-cli --features=call_sim --release
-        echo "Can run with target/release/call_sim-cli"
+      INCLUDE_RELEASE_FLAG=yes
     fi
+    # Build and link the final RingRTC library, or requested binary
+    case "${BINARY_OR_LIB}" in
+        "ringrtc")
+            (
+                copy_to_node() {
+                    cp -f "$1" "$2"
+                }
+
+                if [ $DEFAULT_PLATFORM = "darwin" ]
+                then
+                    # Save the debug info in dSYM format...
+                    export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed
+                    # ...then have Rust strip the library.
+                    export CARGO_PROFILE_RELEASE_STRIP=symbols
+                    OUTPUT_LIBRARY=libringrtc.dylib
+                    DEBUG_PACKAGE=libringrtc.dylib.dSYM
+                elif [ $DEFAULT_PLATFORM = "win32" ]
+                then
+                    # Save the debug info in PDB format...
+                    export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed
+                    # ...and DLLs don't have anything to strip.
+                    # (If you turn on stripping the PDB doesn't get generated at all.)
+                    OUTPUT_LIBRARY=ringrtc.dll
+                    DEBUG_PACKAGE=ringrtc.pdb
+                elif [ $DEFAULT_PLATFORM = "linux" ]
+                then
+                    # DWP files don't seem ready for everyday use.
+                    # We'll just save the whole unstripped binary.
+                    OUTPUT_LIBRARY=libringrtc.so
+                    DEBUG_PACKAGE=libringrtc.so
+                    # Manually strip on copy for release builds.
+                    if [ "${BUILD_TYPE}" = "release" ]; then
+                        OBJCOPY=$(command -v "${CARGO_ARCH}"-linux-gnu-objcopy || echo objcopy)
+                        copy_to_node() {
+                            "${OBJCOPY}" -S "$1" "$2"
+                        }
+                    fi
+                else
+                    echo 'should not get here; platforms checked above' >&2
+                    exit 1 # unreachable
+                fi
+
+                # Propagate this cross-compilation request to child processes;
+                # e.g. cubeb rust libs.
+                export CARGO_BUILD_TARGET="${CARGO_TARGET}"
+                RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo rustc --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} --crate-type cdylib
+
+                if [ "${TEST_RINGRTC_ADM}" = "yes" ]; then
+                  RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo test --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} -- --nocapture audio_device_module_tests
+                elif [ "${TEST_RINGRTC_ADM_UTILS}" = "yes" ]; then
+                  RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo test --package ringrtc --target ${CARGO_TARGET} --features electron ${INCLUDE_RELEASE_FLAG:+"--release"} -- --nocapture audio_device_module_utils
+                fi
+
+
+                mkdir -p src/node/build/${DEFAULT_PLATFORM}
+                copy_to_node "target/${CARGO_TARGET}/${BUILD_TYPE}/${OUTPUT_LIBRARY}" "src/node/build/${DEFAULT_PLATFORM}/libringrtc-${TARGET_ARCH}.node"
+
+                if [ "${BUILD_TYPE}" = "release" ] && [ "$(command -v dump_syms)" ];
+                then
+                  dump_syms "target/${CARGO_TARGET}/${BUILD_TYPE}/${DEBUG_PACKAGE}" -o "${OUTPUT_DIR}/${BUILD_TYPE}/libringrtc-${PROJECT_VERSION}-${DEFAULT_PLATFORM}-${TARGET_ARCH}-debuginfo.sym"
+                fi
+            )
+            ;;
+        "call_sim-cli")
+            (
+                OUTPUT_DIR="${OUTPUT_DIR}" cargo build --package ringrtc --bin call_sim-cli --features=call_sim ${INCLUDE_RELEASE_FLAG:+"--release"}
+
+                if [ "${BUILD_TYPE}" = "debug" ]
+                then
+                    echo "Can run with target/debug/call_sim-cli"
+                else
+                    echo "Can run with target/release/call_sim-cli"
+                fi
+            )
+            ;;
+        "gctc")
+            (
+                OUTPUT_DIR="${OUTPUT_DIR}" cargo build --package ringrtc --bin group_call --features=native,sim_http ${INCLUDE_RELEASE_FLAG:+"--release"}
+
+                if [ "${BUILD_TYPE}" = "debug" ]
+                then
+                    echo "Can run with target/debug/group_call"
+                else
+                    echo "Can run with target/release/group_call"
+                fi
+            )
+            ;;
+        "direct")
+            (
+                RUSTFLAGS="${RUSTFLAGS}" OUTPUT_DIR="${OUTPUT_DIR}" cargo build --package ringrtc --bin direct --features=direct ${INCLUDE_RELEASE_FLAG:+"--release"}
+
+                if [ "${BUILD_TYPE}" = "debug" ]
+                then
+                    echo "Can run with target/debug/direct"
+                else
+                    echo "Can run with target/release/direct"
+                fi
+            )
+            ;;
+        *)
+            echo "Unsupported BINARY_OR_LIB: ${BINARY_OR_LIB}"
+            ;;
+    esac
 fi

@@ -96,7 +96,7 @@ impl IosMediaStream {
     }
 
     /// Return a reference to the Application RTCMediaStream object.
-    pub fn get_ref(&self) -> Result<webrtc::ptr::Borrowed<c_void>> {
-        Ok(self.app_media_stream)
+    pub fn get_ref(&self) -> webrtc::ptr::Borrowed<c_void> {
+        self.app_media_stream
     }
 }

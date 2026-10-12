@@ -98,10 +98,9 @@ impl EndorsementsCache {
         if let Some(endorsement_map) = self.endorsements.get(&expiration) {
             let mut found = Vec::with_capacity(recipients.len());
             for recipient in recipients {
-                if let Some(endorsement) = endorsement_map.get(&recipient) {
+                {
+                    let endorsement = endorsement_map.get(&recipient)?;
                     found.push(endorsement)
-                } else {
-                    return None;
                 }
             }
 
@@ -250,7 +249,7 @@ mod tests {
     use std::{sync::LazyLock, time::Duration};
 
     use libsignal_core::Aci;
-    use rand::{random, thread_rng};
+    use rand::random;
     use zkgroup::{
         RandomnessBytes, ServerSecretParams, Timestamp, UUID_LEN,
         call_links::CallLinkSecretParams,
@@ -278,7 +277,7 @@ mod tests {
         let expiration = day_aligned_now.add_seconds(24 * 60 * 60);
         let params = ServerSecretParams::generate(randomness);
         let public_params = params.get_public_params();
-        let root_key = CallLinkRootKey::generate(thread_rng());
+        let root_key = CallLinkRootKey::generate(rand::rng());
         let call_link_key = CallLinkSecretParams::derive_from_root_key(root_key.as_slice());
         // TODO switch to call link derived keys
         let today_key = GroupSendDerivedKeyPair::for_expiration(expiration, &params);

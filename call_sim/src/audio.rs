@@ -6,7 +6,9 @@
 use std::{ffi::OsStr, path::Path};
 
 use anyhow::Result;
+use futures_util::{FutureExt, StreamExt, TryStreamExt, stream};
 use itertools::Itertools;
+use log::{error, info};
 
 use crate::{
     common::AudioConfig,
@@ -28,7 +30,7 @@ pub fn chop_audio(
     ref_path: &str,
     ref_file: &str,
 ) -> Result<ChopAudioResult> {
-    println!("\nChopping audio for `{}`:", degraded_file);
+    info!("Chopping audio for `{}`:", degraded_file);
 
     let reference = hound::WavReader::open(format!("{}/{}", ref_path, ref_file))?;
     let reference_time_secs = reference.duration() / reference.spec().sample_rate;
@@ -62,7 +64,7 @@ pub fn chop_audio(
             if let Ok(sample) = sample {
                 writer.write_sample(sample)?;
             } else {
-                eprintln!("Error: sample was invalid for {}!", output_name);
+                error!("Error: sample was invalid for {}!", output_name);
                 break;
             }
         }
@@ -85,6 +87,30 @@ pub struct AudioFiles<'a> {
     pub ref_file: &'a str,
 }
 
+/// Analyzes the chopped segments and returns one MOS per segment, in segment order.
+async fn analyze_segments<F>(
+    file_names: &[String],
+    concurrency: u16,
+    analyze: F,
+) -> Result<Vec<f32>>
+where
+    F: AsyncFn(&str) -> Result<Option<f32>>,
+{
+    stream::iter(file_names.iter().map(String::as_str))
+        .map(|degraded_file| {
+            let analysis = analyze(degraded_file);
+            async move {
+                Ok(analysis.await?.unwrap_or_else(|| {
+                    error!("Error: mos value is missing for {}!", degraded_file);
+                    0f32
+                }))
+            }
+        })
+        .buffered(concurrency as usize)
+        .try_collect()
+        .await
+}
+
 /// This function chops a long audio file into smaller segments equal in length to the reference
 /// file and then analyzes the files to generate MOS values for each segment. Note: If the
 /// segments don't correlate to the reference, for example if the degraded files have a large delay,
@@ -94,6 +120,7 @@ pub async fn chop_audio_and_analyze(
     speech_files: &AudioFiles<'_>,
     client_name: &str,
     audio_config: &AudioConfig,
+    analysis_concurrency: u16,
     test_results: &mut AudioTestResults,
 ) -> Result<()> {
     if audio_config.visqol_audio_analysis {
@@ -108,28 +135,30 @@ pub async fn chop_audio_and_analyze(
         let mut data = StatsData::new_skip_n(0);
         data.set_period(chopped_result.reference_time_secs as f32);
 
-        for degraded_file in chopped_result.file_names.iter() {
-            analyze_visqol_mos(
-                audio_files.degraded_path,
-                degraded_file,
-                audio_files.ref_path,
-                audio_files.ref_file,
-                &extension,
-                false,
-            )
-            .await?;
+        for mos in analyze_segments(
+            &chopped_result.file_names,
+            analysis_concurrency,
+            async |degraded_file| {
+                analyze_visqol_mos(
+                    audio_files.degraded_path,
+                    degraded_file,
+                    audio_files.ref_path,
+                    audio_files.ref_file,
+                    &extension,
+                    false,
+                )
+                .await?;
 
-            if let Some(mos) = AnalysisReport::parse_visqol_mos_results(&format!(
-                "{}/{}.{}",
-                audio_files.degraded_path, degraded_file, &extension
-            ))
-            .await?
-            {
-                data.push(mos);
-            } else {
-                eprintln!("Error: mos value is missing for {}!", degraded_file);
-                data.push(0f32);
-            }
+                AnalysisReport::parse_visqol_mos_results(&format!(
+                    "{}/{}.{}",
+                    audio_files.degraded_path, degraded_file, extension
+                ))
+                .await
+            },
+        )
+        .await?
+        {
+            data.push(mos);
         }
 
         let stats = Stats {
@@ -165,28 +194,30 @@ pub async fn chop_audio_and_analyze(
             let mut data = StatsData::new_skip_n(0);
             data.set_period(chopped_result.reference_time_secs as f32);
 
-            for degraded_file in chopped_result.file_names.iter() {
-                analyze_visqol_mos(
-                    speech_files.degraded_path,
-                    degraded_file,
-                    speech_files.ref_path,
-                    speech_files.ref_file,
-                    &extension,
-                    false,
-                )
-                .await?;
+            for mos in analyze_segments(
+                &chopped_result.file_names,
+                analysis_concurrency,
+                async |degraded_file| {
+                    analyze_visqol_mos(
+                        speech_files.degraded_path,
+                        degraded_file,
+                        speech_files.ref_path,
+                        speech_files.ref_file,
+                        &extension,
+                        false,
+                    )
+                    .await?;
 
-                if let Some(mos) = AnalysisReport::parse_visqol_mos_results(&format!(
-                    "{}/{}.{}",
-                    speech_files.degraded_path, degraded_file, &extension
-                ))
-                .await?
-                {
-                    data.push(mos);
-                } else {
-                    eprintln!("Error: mos value is missing for {}!", degraded_file);
-                    data.push(0f32);
-                }
+                    AnalysisReport::parse_visqol_mos_results(&format!(
+                        "{}/{}.{}",
+                        speech_files.degraded_path, degraded_file, extension
+                    ))
+                    .await
+                },
+            )
+            .await?
+            {
+                data.push(mos);
             }
 
             let stats = Stats {
@@ -214,27 +245,29 @@ pub async fn chop_audio_and_analyze(
             let mut data = StatsData::new_skip_n(0);
             data.set_period(chopped_result.reference_time_secs as f32);
 
-            for degraded_file in chopped_result.file_names.iter() {
-                analyze_pesq_mos(
-                    speech_files.degraded_path,
-                    degraded_file,
-                    speech_files.ref_path,
-                    speech_files.ref_file,
-                    &extension,
-                )
-                .await?;
+            for mos in analyze_segments(
+                &chopped_result.file_names,
+                analysis_concurrency,
+                async |degraded_file| {
+                    analyze_pesq_mos(
+                        speech_files.degraded_path,
+                        degraded_file,
+                        speech_files.ref_path,
+                        speech_files.ref_file,
+                        &extension,
+                    )
+                    .await?;
 
-                if let Some(mos) = AnalysisReport::parse_pesq_mos_results(&format!(
-                    "{}/{}.{}",
-                    speech_files.degraded_path, degraded_file, &extension
-                ))
-                .await?
-                {
-                    data.push(mos);
-                } else {
-                    eprintln!("Error: mos value is missing for {}!", degraded_file);
-                    data.push(0f32);
-                }
+                    AnalysisReport::parse_pesq_mos_results(&format!(
+                        "{}/{}.{}",
+                        speech_files.degraded_path, degraded_file, extension
+                    ))
+                    .await
+                },
+            )
+            .await?
+            {
+                data.push(mos);
             }
 
             let stats = Stats {
@@ -262,20 +295,22 @@ pub async fn chop_audio_and_analyze(
             let mut data = StatsData::new_skip_n(0);
             data.set_period(chopped_result.reference_time_secs as f32);
 
-            for degraded_file in chopped_result.file_names.iter() {
-                analyze_plc_mos(speech_files.degraded_path, degraded_file, &extension).await?;
+            for mos in analyze_segments(
+                &chopped_result.file_names,
+                analysis_concurrency,
+                async |degraded_file| {
+                    analyze_plc_mos(speech_files.degraded_path, degraded_file, &extension).await?;
 
-                if let Some(mos) = AnalysisReport::parse_plc_mos_results(&format!(
-                    "{}/{}.{}",
-                    speech_files.degraded_path, degraded_file, &extension
-                ))
-                .await?
-                {
-                    data.push(mos);
-                } else {
-                    eprintln!("Error: mos value is missing for {}!", degraded_file);
-                    data.push(0f32);
-                }
+                    AnalysisReport::parse_plc_mos_results(&format!(
+                        "{}/{}.{}",
+                        speech_files.degraded_path, degraded_file, extension
+                    ))
+                    .await
+                },
+            )
+            .await?
+            {
+                data.push(mos);
             }
 
             let stats = Stats {
@@ -365,93 +400,117 @@ pub async fn get_audio_and_analyze(
     speech_files: &AudioFiles<'_>,
     client_name: &str,
     audio_config: &AudioConfig,
+    analysis_concurrency: u16,
     test_results: &mut AudioTestResults,
 ) -> Result<()> {
-    if audio_config.visqol_audio_analysis {
-        let extension = format!("{}.visqol_mos_audio.log", client_name);
+    let analyses = vec![
+        async {
+            if !audio_config.visqol_audio_analysis {
+                return Ok(None);
+            }
 
-        analyze_visqol_mos(
-            audio_files.degraded_path,
-            audio_files.degraded_file,
-            audio_files.ref_path,
-            audio_files.ref_file,
-            &extension,
-            false,
-        )
-        .await?;
+            let extension = format!("{}.visqol_mos_audio.log", client_name);
 
-        if let Some(mos) = AnalysisReport::parse_visqol_mos_results(&format!(
-            "{}/{}.{}",
-            audio_files.degraded_path, audio_files.degraded_file, &extension
-        ))
-        .await?
-        {
-            test_results.visqol_mos_audio = AnalysisReportMos::Single(mos);
+            analyze_visqol_mos(
+                audio_files.degraded_path,
+                audio_files.degraded_file,
+                audio_files.ref_path,
+                audio_files.ref_file,
+                &extension,
+                false,
+            )
+            .await?;
+
+            AnalysisReport::parse_visqol_mos_results(&format!(
+                "{}/{}.{}",
+                audio_files.degraded_path, audio_files.degraded_file, extension
+            ))
+            .await
         }
-    }
+        .boxed(),
+        async {
+            if !audio_config.visqol_speech_analysis {
+                return Ok(None);
+            }
 
-    if audio_config.visqol_speech_analysis {
-        let extension = format!("{}.visqol_mos_speech.log", client_name);
+            let extension = format!("{}.visqol_mos_speech.log", client_name);
 
-        analyze_visqol_mos(
-            speech_files.degraded_path,
-            speech_files.degraded_file,
-            speech_files.ref_path,
-            speech_files.ref_file,
-            &extension,
-            true,
-        )
-        .await?;
+            analyze_visqol_mos(
+                speech_files.degraded_path,
+                speech_files.degraded_file,
+                speech_files.ref_path,
+                speech_files.ref_file,
+                &extension,
+                true,
+            )
+            .await?;
 
-        if let Some(mos) = AnalysisReport::parse_visqol_mos_results(&format!(
-            "{}/{}.{}",
-            speech_files.degraded_path, speech_files.degraded_file, extension
-        ))
-        .await?
-        {
-            test_results.visqol_mos_speech = AnalysisReportMos::Single(mos);
+            AnalysisReport::parse_visqol_mos_results(&format!(
+                "{}/{}.{}",
+                speech_files.degraded_path, speech_files.degraded_file, extension
+            ))
+            .await
         }
-    }
+        .boxed(),
+        async {
+            if !audio_config.pesq_speech_analysis {
+                return Ok(None);
+            }
 
-    if audio_config.pesq_speech_analysis {
-        let extension = format!("{}.pesq_mos.log", client_name);
+            let extension = format!("{}.pesq_mos.log", client_name);
 
-        analyze_pesq_mos(
-            speech_files.degraded_path,
-            speech_files.degraded_file,
-            speech_files.ref_path,
-            speech_files.ref_file,
-            &extension,
-        )
-        .await?;
+            analyze_pesq_mos(
+                speech_files.degraded_path,
+                speech_files.degraded_file,
+                speech_files.ref_path,
+                speech_files.ref_file,
+                &extension,
+            )
+            .await?;
 
-        if let Some(mos) = AnalysisReport::parse_pesq_mos_results(&format!(
-            "{}/{}.{}",
-            speech_files.degraded_path, speech_files.degraded_file, extension
-        ))
-        .await?
-        {
-            test_results.pesq_mos = AnalysisReportMos::Single(mos);
+            AnalysisReport::parse_pesq_mos_results(&format!(
+                "{}/{}.{}",
+                speech_files.degraded_path, speech_files.degraded_file, extension
+            ))
+            .await
         }
-    }
+        .boxed(),
+        async {
+            if !audio_config.plc_speech_analysis {
+                return Ok(None);
+            }
 
-    if audio_config.plc_speech_analysis {
-        let extension = format!("{}.plc_mos.log", client_name);
+            let extension = format!("{}.plc_mos.log", client_name);
 
-        analyze_plc_mos(
-            speech_files.degraded_path,
-            speech_files.degraded_file,
-            &extension,
-        )
+            analyze_plc_mos(
+                speech_files.degraded_path,
+                speech_files.degraded_file,
+                &extension,
+            )
+            .await?;
+
+            AnalysisReport::parse_plc_mos_results(&format!(
+                "{}/{}.{}",
+                speech_files.degraded_path, speech_files.degraded_file, extension
+            ))
+            .await
+        }
+        .boxed(),
+    ];
+
+    let results: Vec<_> = stream::iter(analyses)
+        .buffered(analysis_concurrency as usize)
+        .try_collect()
         .await?;
 
-        if let Some(mos) = AnalysisReport::parse_plc_mos_results(&format!(
-            "{}/{}.{}",
-            speech_files.degraded_path, speech_files.degraded_file, extension
-        ))
-        .await?
-        {
-            test_results.plc_mos = AnalysisReportMos::Single(mos);
+    for (mos, result) in results.into_iter().zip([
+        &mut test_results.visqol_mos_audio,
+        &mut test_results.visqol_mos_speech,
+        &mut test_results.pesq_mos,
+        &mut test_results.plc_mos,
+    ]) {
+        if let Some(mos) = mos {
+            *result = AnalysisReportMos::Single(mos);
         }
     }
 

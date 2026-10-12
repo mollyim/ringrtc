@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use jni::{
-    EnvUnowned,
+    EnvUnowned, jni_sig, jni_str,
     objects::{JByteArray, JClass, JObject, JString},
+    signature::FieldSignature,
     sys::{jboolean, jbyte, jint, jlong, jobject},
 };
 
@@ -155,10 +156,8 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
     call_manager: jlong,
     call_id: jlong,
     jni_call_context: JObject,
-    data_mode: jint,
+    jni_call_config: JObject,
     audio_levels_interval_millis: jint,
-    dred_duration: jbyte,
-    enable_vp9: jboolean,
 ) {
     let audio_levels_interval = if audio_levels_interval_millis <= 0 {
         None
@@ -168,15 +167,54 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_CallManager_ringrtcProceed(
 
     unowned_env
         .with_env(|env| -> Result<()> {
+            const INT_TYPE: FieldSignature<'static> = jni_sig!(int);
+            const BYTE_TYPE: FieldSignature<'static> = jni_sig!(byte);
+            const BOOL_TYPE: FieldSignature<'static> = jni_sig!(boolean);
+            const INTEGER_TYPE: FieldSignature<'static> = jni_sig!(java.lang.Integer);
+
+            let data_mode = env
+                .get_field(&jni_call_config, jni_str!("dataMode"), &INT_TYPE)?
+                .into_int()?;
+            let dred_duration = env
+                .get_field(&jni_call_config, jni_str!("dredDuration"), &BYTE_TYPE)?
+                .into_byte()?;
+            let enable_vp9_encode = env
+                .get_field(&jni_call_config, jni_str!("enableVp9Encode"), &BOOL_TYPE)?
+                .into_bool()?;
+            let enable_vp9_decode = env
+                .get_field(&jni_call_config, jni_str!("enableVp9Decode"), &BOOL_TYPE)?
+                .into_bool()?;
+            let stats_interval_secs_obj = env
+                .get_field(
+                    &jni_call_config,
+                    jni_str!("statsIntervalSecs"),
+                    &INTEGER_TYPE,
+                )?
+                .into_object()?;
+
+            let mut call_config = CallConfig::default()
+                .with_data_mode(DataMode::from_i32(data_mode))
+                .with_dred_duration(dred_duration as u8)
+                .with_enable_vp9_encode(enable_vp9_encode)
+                .with_enable_vp9_decode(enable_vp9_decode);
+            if !stats_interval_secs_obj.is_null() {
+                let secs = env
+                    .call_method(
+                        &stats_interval_secs_obj,
+                        jni_str!("intValue"),
+                        jni_sig!(() -> int),
+                        &[],
+                    )?
+                    .into_int()? as u16;
+                call_config = call_config.with_stats_interval_secs(secs);
+            }
+
             call_manager::proceed(
                 env,
                 call_manager as *mut AndroidCallManager,
                 call_id,
                 jni_call_context,
-                CallConfig::default()
-                    .with_data_mode(DataMode::from_i32(data_mode))
-                    .with_dred_duration(dred_duration as u8)
-                    .with_enable_vp9(enable_vp9),
+                call_config,
                 audio_levels_interval,
             )
         })
@@ -789,6 +827,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCal
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
     dred_duration: jbyte,
+    svc_config: JObject,
     native_peer_connection_factory_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -804,6 +843,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCal
                 hkdf_extra_info,
                 audio_levels_interval_millis,
                 dred_duration,
+                svc_config,
                 native_peer_connection_factory_borrowed_rc,
                 native_audio_track_borrowed_rc,
                 native_video_track_borrowed_rc,
@@ -829,6 +869,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLink
     hkdf_extra_info: JByteArray,
     audio_levels_interval_millis: jint,
     dred_duration: jbyte,
+    svc_config: JObject,
     native_peer_connection_factory_borrowed_rc: jlong,
     native_audio_track_borrowed_rc: jlong,
     native_video_track_borrowed_rc: jlong,
@@ -847,6 +888,7 @@ pub unsafe extern "C" fn Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLink
                 hkdf_extra_info,
                 audio_levels_interval_millis,
                 dred_duration,
+                svc_config,
                 native_peer_connection_factory_borrowed_rc,
                 native_audio_track_borrowed_rc,
                 native_video_track_borrowed_rc,

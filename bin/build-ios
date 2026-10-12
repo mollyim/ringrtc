@@ -61,9 +61,9 @@ clean()
   rm -r -f "${OUTPUT_DIR}"/libringrtc
 }
 
-BUILD_WHAT=all
+BUILD_WHAT="${BUILD_WHAT:-all}"
 BUILD_TYPE=release
-HOST_SIM_ONLY=
+HOST_SIM_ONLY="${HOST_SIM_ONLY:-""}"
 ARCHIVE_WEBRTC=
 ARCHIVE_RINGRTC=
 

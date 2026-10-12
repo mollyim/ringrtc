@@ -182,7 +182,7 @@ impl_snapshot!(ConnectionStatsSnapshot, Connection);
 #[cfg(not(target_os = "android"))]
 impl_snapshot!(SystemStatsSnapshot, System);
 
-pub trait StatsSnapshotConsumer: Debug {
+pub trait StatsSnapshotConsumer: Debug + Send + Sync {
     fn on_stats_snapshot_ready(&self, stats: &StatsSnapshot);
 }
 
@@ -203,7 +203,7 @@ pub struct AudioSenderStatsSnapshot {
     pub packets_per_second: f32,
     pub average_packet_size: f32,
     pub bitrate: f32,
-    pub remote_packets_lost_pct: f32,
+    pub remote_packets_lost_pct: f64,
     pub remote_jitter: f64,
     pub remote_rtt: f64,
     pub audio_energy: f64,
@@ -254,7 +254,6 @@ impl AudioSenderStatsSnapshot {
         prev_stats: &AudioSenderStatistics,
         seconds_elapsed: f32,
     ) -> Self {
-        let packets_lost_delta = delta!(curr_stats, prev_stats, remote_packets_lost);
         let packets_sent_delta = delta!(curr_stats, prev_stats, packets_sent);
         let audio_energy_delta = delta!(curr_stats, prev_stats, total_audio_energy);
         let bytes_sent_delta = delta!(curr_stats, prev_stats, bytes_sent);
@@ -264,9 +263,8 @@ impl AudioSenderStatsSnapshot {
             .naive_checked_div(packets_sent_delta as f32)
             .unwrap_or(0.0);
         let bitrate = compute_bitrate(bytes_sent_delta, seconds_elapsed);
-        let remote_packets_lost_pct =
-            compute_packets_lost_pct(packets_lost_delta.max(0) as u32, packets_sent_delta);
 
+        let remote_packets_lost_pct = curr_stats.remote_fraction_lost * 100.0;
         let remote_jitter = 1000.0 * curr_stats.remote_jitter;
         let remote_rtt = 1000.0 * curr_stats.remote_round_trip_time;
 
@@ -447,11 +445,14 @@ pub struct VideoSenderStatsSnapshot {
     pub pli_count: u32,
     pub quality_limitation_reason: Cow<'static, str>,
     pub quality_limitation_resolution_changes: u32,
-    pub remote_packets_lost_pct: f32,
+    pub remote_packets_lost_pct: f64,
     pub remote_jitter: f64,
     pub remote_round_trip_time: f64,
     pub codec: StatsVideoCodecType,
     pub encoder_implementation: Option<String>,
+    pub source_framerate: f32,
+    pub source_width: u32,
+    pub source_height: u32,
 }
 
 impl Display for VideoSenderStatsSnapshot {
@@ -478,6 +479,9 @@ impl Display for VideoSenderStatsSnapshot {
             remote_round_trip_time,
             codec,
             encoder_implementation,
+            source_framerate,
+            source_width,
+            source_height,
         } = self;
         let encoder_impl_str = encoder_implementation.as_deref().unwrap_or("ImplNone");
         write!(
@@ -487,10 +491,12 @@ impl Display for VideoSenderStatsSnapshot {
             {packets_per_second:.1},\
             {average_packet_size:.1},\
             {bitrate:.0}bps,\
+            {source_width}x{source_height},\
+            {source_framerate:.1}fps,\
+            {width}x{height},\
             {framerate:.1}fps,\
             {key_frames_encoded},\
             {encode_time_per_frame:.1}ms,\
-            {width}x{height},\
             {retransmitted_packets_sent},\
             {retransmitted_bitrate:.1}bps,\
             {send_delay_per_packet:.1}ms,\
@@ -517,10 +523,12 @@ impl VideoSenderStatsSnapshot {
                  packets_per_second,\
                  average_packet_size,\
                  bitrate,\
+                 source_resolution,\
+                 source_framerate,\
+                 resolution,\
                  framerate,\
                  key_frames_encoded,\
                  encode_time_per_frame,\
-                 resolution,\
                  retransmitted_packets_sent,\
                  retransmitted_bitrate,\
                  send_delay_per_packet,\
@@ -539,11 +547,11 @@ impl VideoSenderStatsSnapshot {
         prev_stats: &VideoSenderStatistics,
         seconds_elapsed: f32,
     ) -> Self {
-        let packets_lost_delta = delta!(curr_stats, prev_stats, remote_packets_lost);
         let packets_sent_delta = delta!(curr_stats, prev_stats, packets_sent);
         let bytes_sent_delta = delta!(curr_stats, prev_stats, bytes_sent);
         let retransmitted_bytes_sent_delta =
             delta!(curr_stats, prev_stats, retransmitted_bytes_sent);
+        let source_frames_delta = delta!(curr_stats, prev_stats, source_frames);
         let frames_encoded_delta = delta!(curr_stats, prev_stats, frames_encoded);
         let key_frames_encoded_delta = delta!(curr_stats, prev_stats, key_frames_encoded);
         let total_encode_time_delta = delta!(curr_stats, prev_stats, total_encode_time);
@@ -566,6 +574,9 @@ impl VideoSenderStatsSnapshot {
         let bitrate = compute_bitrate(bytes_sent_delta, seconds_elapsed);
         let retransmitted_bitrate =
             compute_bitrate(retransmitted_bytes_sent_delta, seconds_elapsed);
+        let source_framerate = (source_frames_delta as f32)
+            .naive_checked_div(seconds_elapsed)
+            .unwrap_or(0.0);
         let framerate = (frames_encoded_delta as f32)
             .naive_checked_div(seconds_elapsed)
             .unwrap_or(0.0);
@@ -577,8 +588,7 @@ impl VideoSenderStatsSnapshot {
             * total_packets_send_delay_delta
                 .naive_checked_div(frames_encoded_delta as f64)
                 .unwrap_or(0.0);
-        let remote_packets_lost_pct =
-            compute_packets_lost_pct(packets_lost_delta.max(0) as u32, packets_sent_delta);
+        let remote_packets_lost_pct = curr_stats.remote_fraction_lost * 100.0;
         let remote_jitter = 1000.0 * curr_stats.remote_jitter;
         let remote_round_trip_time = 1000.0 * curr_stats.remote_round_trip_time;
 
@@ -616,6 +626,9 @@ impl VideoSenderStatsSnapshot {
             remote_round_trip_time,
             codec: curr_stats.codec,
             encoder_implementation,
+            source_framerate,
+            source_width: curr_stats.source_frame_width,
+            source_height: curr_stats.source_frame_height,
         }
     }
 }
@@ -896,6 +909,13 @@ struct Stats {
     connections: HashMap<String, (Instant, ConnectionStatistics)>,
     report_json: Mutex<String>,
 }
+
+#[derive(Debug, Default)]
+struct NetworkRouteInfo {
+    to_report_network_route: Option<NetworkRoute>,
+    next_network_route: Option<NetworkRoute>,
+}
+
 /// Collector object for obtaining statistics.
 #[derive(Debug)]
 pub struct StatsObserver {
@@ -904,11 +924,10 @@ pub struct StatsObserver {
     stats: Stats,
     stats_initial_offset: Duration,
     stats_received_count: u32,
-    stats_snapshot_consumer: Box<dyn StatsSnapshotConsumer>,
+    stats_snapshot_consumer: Mutex<Box<dyn StatsSnapshotConsumer>>,
     #[cfg(not(target_os = "android"))]
     system_stats: sysinfo::System,
-    to_report_network_route: Option<NetworkRoute>,
-    next_network_route: Option<NetworkRoute>,
+    network_route_info: Mutex<NetworkRouteInfo>,
 }
 
 impl StatsObserver {
@@ -934,24 +953,26 @@ impl StatsObserver {
             stats
         };
 
-        let stats_snapshot_consumer = Box::new(DefaultStatsSnapshotConsumer);
+        let default_consumer = Box::new(DefaultStatsSnapshotConsumer);
 
         Self {
             call_id,
             rffi: webrtc::Arc::null(),
             stats: Default::default(),
             stats_initial_offset,
+            stats_snapshot_consumer: Mutex::new(default_consumer),
             stats_received_count: 0,
-            stats_snapshot_consumer,
             #[cfg(not(target_os = "android"))]
             system_stats,
-            to_report_network_route: None,
-            next_network_route: None,
+            network_route_info: Default::default(),
         }
     }
 
-    pub fn set_network_route(&mut self, route: NetworkRoute) {
-        self.next_network_route = Some(route);
+    pub fn set_network_route(&self, route: NetworkRoute) {
+        match self.network_route_info.lock() {
+            Ok(mut info) => info.next_network_route = Some(route),
+            Err(e) => error!("Failed to set network route info: {e}"),
+        }
     }
 
     /// Invoked when statistics are received via the stats observer callback.
@@ -967,8 +988,15 @@ impl StatsObserver {
         *stats_report_json = report_json;
         drop(stats_report_json);
 
-        self.stats_snapshot_consumer
-            .on_stats_snapshot_ready(&StatsSnapshot::Begin);
+        let stats_snapshot_consumer = match self.stats_snapshot_consumer.lock() {
+            Ok(stats_snapshot_consumer) => stats_snapshot_consumer,
+            Err(e) => {
+                error!("Failed to acquire the stats snapshot consumer: {e}");
+                return;
+            }
+        };
+
+        stats_snapshot_consumer.on_stats_snapshot_ready(&StatsSnapshot::Begin);
 
         // System
 
@@ -977,27 +1005,34 @@ impl StatsObserver {
             self.system_stats.refresh_cpu_usage();
             let system_stats_snapshot = SystemStatsSnapshot::derive(&self.system_stats);
             info!("{system_stats_snapshot}");
-            self.stats_snapshot_consumer
-                .on_stats_snapshot_ready(&system_stats_snapshot.into());
+            stats_snapshot_consumer.on_stats_snapshot_ready(&system_stats_snapshot.into());
         }
 
         // Connection
 
-        if self.to_report_network_route.is_none() {
-            self.to_report_network_route = self.next_network_route;
-        }
+        let network_route = match self.network_route_info.lock() {
+            Ok(mut info) => {
+                if info.to_report_network_route.is_none() {
+                    info.to_report_network_route = info.next_network_route;
+                }
+                let network_route = info.to_report_network_route;
+                info.to_report_network_route = info.next_network_route;
+                network_route
+            }
+            Err(e) => {
+                error!("Failed to get network route info: {e}");
+                None
+            }
+        };
 
         let connection_stats_snapshot = ConnectionStatsSnapshot::derive(
             self.call_id,
             media_statistics.timestamp_us,
             &media_statistics.nominated_connection_statistics,
-            self.to_report_network_route,
+            network_route,
         );
-        self.to_report_network_route = self.next_network_route;
-
         info!("{connection_stats_snapshot}");
-        self.stats_snapshot_consumer
-            .on_stats_snapshot_ready(&connection_stats_snapshot.into());
+        stats_snapshot_consumer.on_stats_snapshot_ready(&connection_stats_snapshot.into());
 
         // Audio senders
 
@@ -1009,8 +1044,7 @@ impl StatsObserver {
                 seconds_elapsed,
             );
             info!("{audio_sender_stats_snapshot}");
-            self.stats_snapshot_consumer
-                .on_stats_snapshot_ready(&audio_sender_stats_snapshot.into());
+            stats_snapshot_consumer.on_stats_snapshot_ready(&audio_sender_stats_snapshot.into());
             *prev_audio_send_stats = audio_sender.clone();
         }
 
@@ -1027,8 +1061,7 @@ impl StatsObserver {
                 seconds_elapsed,
             );
             info!("{video_sender_stats_snapshot}");
-            self.stats_snapshot_consumer
-                .on_stats_snapshot_ready(&video_sender_stats_snapshot.into());
+            stats_snapshot_consumer.on_stats_snapshot_ready(&video_sender_stats_snapshot.into());
             *prev_video_send_stats = video_sender.clone();
         }
 
@@ -1050,8 +1083,7 @@ impl StatsObserver {
             info!("{audio_receiver_stats_snapshot}");
             *prev_jb_delay = audio_receiver_stats_snapshot.jitter_buffer_delay;
             *prev_jb_target_delay = audio_receiver_stats_snapshot.jitter_buffer_target_delay;
-            self.stats_snapshot_consumer
-                .on_stats_snapshot_ready(&audio_receiver_stats_snapshot.into());
+            stats_snapshot_consumer.on_stats_snapshot_ready(&audio_receiver_stats_snapshot.into());
             *updated_at = Instant::now();
             *prev_audio_recv_stats = audio_receiver.clone();
         }
@@ -1070,14 +1102,14 @@ impl StatsObserver {
                 seconds_elapsed,
             );
             info!("{video_receiver_stats_snapshot}");
-            self.stats_snapshot_consumer
-                .on_stats_snapshot_ready(&video_receiver_stats_snapshot.into());
+            stats_snapshot_consumer.on_stats_snapshot_ready(&video_receiver_stats_snapshot.into());
             *updated_at = Instant::now();
             *prev_video_recv_stats = video_receiver.clone();
         }
 
-        self.stats_snapshot_consumer
-            .on_stats_snapshot_ready(&StatsSnapshot::End);
+        stats_snapshot_consumer.on_stats_snapshot_ready(&StatsSnapshot::End);
+
+        drop(stats_snapshot_consumer);
 
         self.stats.timestamp_us = media_statistics.timestamp_us;
         self.stats_received_count += 1;
@@ -1130,8 +1162,11 @@ impl StatsObserver {
         }
     }
 
-    pub fn set_stats_snapshot_consumer(&mut self, consumer: Box<dyn StatsSnapshotConsumer>) {
-        self.stats_snapshot_consumer = consumer;
+    pub fn set_stats_snapshot_consumer(&self, consumer: Box<dyn StatsSnapshotConsumer>) {
+        match self.stats_snapshot_consumer.lock() {
+            Ok(mut stats_snapshot_consumer) => *stats_snapshot_consumer = consumer,
+            Err(e) => error!("Failed to set the stats snapshot consumer: {e}"),
+        }
     }
 
     pub fn set_collect_raw_stats_report(&self, collect_raw_stats_report: bool) {
@@ -1147,6 +1182,7 @@ pub struct AudioSenderStatistics {
     pub ssrc: u32,
     pub packets_sent: u32,
     pub bytes_sent: u64,
+    pub remote_fraction_lost: f64,
     pub remote_packets_lost: i32,
     pub remote_jitter: f64,
     pub remote_round_trip_time: f64,
@@ -1171,11 +1207,16 @@ pub struct VideoSenderStatistics {
     pub pli_count: u32,
     pub quality_limitation_reason: u32,
     pub quality_limitation_resolution_changes: u32,
+    pub remote_fraction_lost: f64,
     pub remote_packets_lost: i32,
     pub remote_jitter: f64,
     pub remote_round_trip_time: f64,
     pub codec: StatsVideoCodecType,
     pub raw_encoder_implementation: webrtc::ptr::Borrowed<std::os::raw::c_char>,
+    /// Cumulative frames produced by the capture source
+    pub source_frames: u32,
+    pub source_frame_width: u32,
+    pub source_frame_height: u32,
 }
 
 impl Default for VideoSenderStatistics {
@@ -1196,11 +1237,15 @@ impl Default for VideoSenderStatistics {
             pli_count: Default::default(),
             quality_limitation_reason: Default::default(),
             quality_limitation_resolution_changes: Default::default(),
+            remote_fraction_lost: Default::default(),
             remote_packets_lost: Default::default(),
             remote_jitter: Default::default(),
             remote_round_trip_time: Default::default(),
             codec: Default::default(),
             raw_encoder_implementation: webrtc::ptr::Borrowed::null(),
+            source_frames: Default::default(),
+            source_frame_width: Default::default(),
+            source_frame_height: Default::default(),
         }
     }
 }

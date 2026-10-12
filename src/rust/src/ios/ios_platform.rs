@@ -659,7 +659,7 @@ impl Platform for IosPlatform {
             .ok_or_else(|| anyhow!("No call object available"))?;
 
         let ios_media_stream = incoming_media as &IosMediaStream;
-        let app_media_stream = ios_media_stream.get_ref()?;
+        let app_media_stream = ios_media_stream.get_ref();
 
         (self.app_interface.onConnectMedia)(
             self.app_interface.object,
@@ -1022,10 +1022,10 @@ impl sfu::Delegate for IosPlatform {
 
 impl IosPlatform {
     /// Create a new IOSPlatform object.
-    pub fn new(app_interface: AppInterface) -> Result<Self> {
+    pub fn new(app_interface: AppInterface) -> Self {
         debug!("IOSPlatform::new: {:?}", app_interface);
 
-        Ok(Self { app_interface })
+        Self { app_interface }
     }
 }
 

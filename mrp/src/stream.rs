@@ -155,7 +155,7 @@ where
         packet: ReceiveData,
     ) -> std::result::Result<Vec<ReceiveData>, MrpReceiveError> {
         if let Some(ack_num) = header.ack_num {
-            self.update_send_window(ack_num)?;
+            self.update_send_window(ack_num);
             Ok(vec![])
         } else if header.seqnum.is_some() {
             let ready = self.update_receiver_window(header, packet)?;
@@ -181,8 +181,10 @@ where
             };
 
             // drop packets abandoned due to a previous merge conflict
-            if self.merge_end_seqnum.is_some() && self.merge_buffer.is_none() {
-                if self.merge_end_seqnum.unwrap() < seqnum {
+            if let Some(merge_end_seqnum) = self.merge_end_seqnum
+                && self.merge_buffer.is_none()
+            {
+                if merge_end_seqnum < seqnum {
                     self.merge_buffer = None;
                 } else {
                     continue;
@@ -459,7 +461,7 @@ impl<SendData, ReceiveData> MrpStream<SendData, ReceiveData> {
         packet: ReceiveData,
     ) -> std::result::Result<Vec<ReceiveData>, MrpReceiveError> {
         if let Some(ack_num) = header.ack_num {
-            self.update_send_window(ack_num)?;
+            self.update_send_window(ack_num);
             Ok(vec![])
         } else if header.seqnum.is_some() {
             let ready = self.update_receiver_window(header, packet)?;
@@ -478,10 +480,7 @@ impl<SendData, ReceiveData> MrpStream<SendData, ReceiveData> {
         self.receive_buffer.len()
     }
 
-    fn update_send_window(
-        &mut self,
-        received_ack_num: u64,
-    ) -> std::result::Result<(), MrpReceiveError> {
+    fn update_send_window(&mut self, received_ack_num: u64) {
         // Peer sent impossible ACK, which in TCP would cause a reset
         // Currently we do not support resets, so we ignore this case
         if received_ack_num > self.next_seqnum() {
@@ -490,19 +489,17 @@ impl<SendData, ReceiveData> MrpStream<SendData, ReceiveData> {
                 received_ack_num,
                 self.send_buffer.left_bounds()
             );
-            return Ok(());
+            return;
         }
         // Assuming no wrapping, this must be an old ACK since we only ever increase
         // seqnums. So we ignore
         if received_ack_num < self.send_buffer.left_bounds() {
-            return Ok(());
+            return;
         }
         if received_ack_num >= self.send_buffer.left_bounds() {
             let old = received_ack_num - self.send_buffer.left_bounds();
             self.send_buffer.drop_front(old as usize);
         }
-
-        Ok(())
     }
 
     fn update_receiver_window(
@@ -551,10 +548,10 @@ mod tests {
     };
 
     use rand::{
-        Rng, SeedableRng,
+        RngExt, SeedableRng,
         distr::{Iter, Uniform},
         rng,
-        rngs::StdRng,
+        rngs::{StdRng, SysRng},
         seq::SliceRandom,
     };
 
@@ -1605,7 +1602,7 @@ mod tests {
     impl<T: Debug + PartialEq> DelayReceiver<T> {
         fn new(recv_channel: Receiver<T>, low: u64, high: u64) -> Self {
             // unfortunately no poisson distribution
-            let rng: StdRng = SeedableRng::from_os_rng();
+            let rng: StdRng = StdRng::try_from_rng(&mut SysRng).unwrap();
             let delay_iter = rng.sample_iter(Uniform::new(low, high).unwrap());
             DelayReceiver {
                 delay_iter,

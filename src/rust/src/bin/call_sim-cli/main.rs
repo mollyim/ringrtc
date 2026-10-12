@@ -265,7 +265,10 @@ fn main() -> Result<()> {
         .level(LevelFilter::Debug);
 
     if let Some(log_file) = args.log_file {
-        fern_logger.chain(fern::log_file(log_file)?).apply()?;
+        fern_logger
+            .chain(std::io::stdout())
+            .chain(fern::log_file(log_file)?)
+            .apply()?;
     } else {
         fern_logger.chain(std::io::stdout()).apply()?;
     }
@@ -273,7 +276,7 @@ fn main() -> Result<()> {
     // Show WebRTC logs via application Logger while debugging.
     ringrtc::webrtc::logging::set_logger(log::LevelFilter::Debug);
 
-    info!("Setting field trials to {}", &args.field_trials);
+    info!("Setting field trials to {}", args.field_trials);
 
     let ice_servers = if args.relay_urls.is_empty() && args.relay_ips.is_empty() {
         vec![IceServer::none()]
@@ -348,7 +351,8 @@ fn main() -> Result<()> {
             fast_accelerate: args.audio_jitter_buffer_fast_accelerate,
         },
         audio_rtcp_report_interval_ms: args.audio_rtcp_report_interval_ms,
-        enable_vp9: args.vp9,
+        enable_vp9_encode: args.vp9,
+        enable_vp9_decode: args.vp9,
     };
 
     let mut scenario = ScenarioManager::new()?;
@@ -403,12 +407,14 @@ fn parse_uuid(id: &str) -> Result<UserId, String> {
 /// parses base64 encoded, then formatted as `{base 64 userId}:{base64 memberId}`
 fn parse_group_member_info(s: &str) -> Result<GroupMember, String> {
     let splits = s.split(':').collect::<Vec<_>>();
-    assert_eq!(splits.len(), 2);
+    if splits.len() != 2 {
+        return Err(format!("expected `<userId>:<memberId>`, got `{s}`"));
+    }
     let user_id = BASE64_STANDARD
         .decode(splits[0])
-        .expect("could not base64 decode user_id");
+        .map_err(|e| format!("could not base64 decode user_id: {e}"))?;
     let member_id = BASE64_STANDARD
         .decode(splits[1])
-        .expect("could not base64 decode user_id");
+        .map_err(|e| format!("could not base64 decode member_id: {e}"))?;
     Ok(GroupMember { user_id, member_id })
 }

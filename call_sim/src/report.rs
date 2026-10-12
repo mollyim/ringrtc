@@ -7,6 +7,7 @@ use std::{collections::HashMap, fmt::Write, str::FromStr};
 
 use anyhow::{Result, anyhow};
 use itertools::Itertools;
+use log::{error, info};
 use plotters::{
     backend::SVGBackend,
     chart::ChartBuilder,
@@ -25,9 +26,10 @@ use tokio::{
 
 use crate::{
     common::{
-        ChartDimension, GroupConfig, NetworkConfigWithOffset, NetworkProfile, TestCaseConfig,
+        CallConfig, ChartDimension, GroupConfig, NetworkConfigWithOffset, NetworkProfile,
+        TestCaseConfig,
     },
-    test::{AudioTestResults, GroupRun, Sound, TestCase},
+    test::{AudioTestResults, Client, GroupRun, Sound, TestCase},
 };
 
 // Chart colors.
@@ -455,6 +457,8 @@ pub struct VideoSendStats {
     pub packets_per_second: Stats,
     pub average_packet_size: Stats,
     pub bitrate: Stats,
+    pub source_framerate: Stats,
+    pub source_resolution: Stats,
     pub framerate: Stats,
     pub key_frames_encoded: Stats,
     pub retransmitted_packets_sent: Stats,
@@ -471,6 +475,10 @@ pub struct VideoSendStats {
 #[derive(Debug, Default)]
 pub struct AudioReceiveStats {
     pub ssrc: String,
+    /// The name of the client this stream came from, once it can be resolved. The SFU forwards
+    /// audio without rewriting the SSRC, so a receiver's inbound SSRC is the sender's outbound
+    /// SSRC, which is how the two get matched up.
+    pub sender_name: Option<String>,
     pub packets_per_second: Stats,
     pub packet_loss: Stats,
     pub bitrate: Stats,
@@ -487,6 +495,9 @@ pub struct AudioReceiveStats {
 #[derive(Debug, Default)]
 pub struct VideoReceiveStats {
     pub ssrc: String,
+    /// The name of the client this stream came from, once it can be resolved. See
+    /// `AudioReceiveStats::sender_name`.
+    pub sender_name: Option<String>,
     pub packets_per_second: Stats,
     pub packet_loss: Stats,
     pub bitrate: Stats,
@@ -536,9 +547,9 @@ impl ClientLogReport {
             r".*ringrtc_stats!,audio,send,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<average_packet_size>[-+]?[0-9]*\.?[0-9]+),(?P<bitrate>[-+]?[0-9]*\.?[0-9]+)bps,(?P<remote_packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<remote_jitter>\d+)ms,(?P<remote_round_trip_time>\d+)ms,(?P<audio_energy>[-+]?[0-9]*\.?[0-9]+)",
         )?;
 
-        // Example: ringrtc_stats!,video,send,2003,8.0,1052.9,67430bps,2.0fps,0,4.0ms,1280x720,0,0.0bps,162.4ms,0,0,bandwidth,0,0.0%,170.2ms,1.0ms
+        // Example: ringrtc_stats!,video,send,2003,8.0,1052.9,67430bps,1280x720,8.0fps,1280x720,2.0fps,0,4.0ms,0,0.0bps,162.4ms,0,0,bandwidth,0,0.0%,170.2ms,1.0ms
         let re_video_send_line = Regex::new(
-            r".*ringrtc_stats!,video,send,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<average_packet_size>[-+]?[0-9]*\.?[0-9]+),(?P<bitrate>[-+]?[0-9]*\.?[0-9]+)bps,(?P<framerate>[0-9]*\.?[0-9]+)fps,(?P<key_frames_encoded>\d+),(?P<encode_time_per_frame>[0-9]*\.?[0-9]+)ms,(?P<resolution>\d+x\d+),(?P<retransmitted_packets_sent>\d+),(?P<retransmitted_bitrate>[0-9]*\.?[0-9]+)bps,(?P<send_delay_per_packet>[0-9]*\.?[0-9]+)ms,(?P<nack_count>\d+),(?P<pli_count>\d+),(?P<quality_limitation_reason>\w+),(?P<quality_limitation_resolution_changes>\d+),(?P<remote_packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<remote_jitter>[0-9]*\.?[0-9]+)ms,(?P<remote_round_trip_time>[0-9]*\.?[0-9]+)ms",
+            r".*ringrtc_stats!,video,send,(?P<ssrc>\d+),(?P<packets_per_second>[-+]?[0-9]*\.?[0-9]+),(?P<average_packet_size>[-+]?[0-9]*\.?[0-9]+),(?P<bitrate>[-+]?[0-9]*\.?[0-9]+)bps,(?P<source_resolution>\d+x\d+),(?P<source_framerate>[0-9]*\.?[0-9]+)fps,(?P<resolution>\d+x\d+),(?P<framerate>[0-9]*\.?[0-9]+)fps,(?P<key_frames_encoded>\d+),(?P<encode_time_per_frame>[0-9]*\.?[0-9]+)ms,(?P<retransmitted_packets_sent>\d+),(?P<retransmitted_bitrate>[0-9]*\.?[0-9]+)bps,(?P<send_delay_per_packet>[0-9]*\.?[0-9]+)ms,(?P<nack_count>\d+),(?P<pli_count>\d+),(?P<quality_limitation_reason>\w+),(?P<quality_limitation_resolution_changes>\d+),(?P<remote_packet_loss>[-+]?[0-9]*\.?[0-9]+)%,(?P<remote_jitter>[0-9]*\.?[0-9]+)ms,(?P<remote_round_trip_time>[0-9]*\.?[0-9]+)ms",
         )?;
 
         // Example: ringrtc_stats!,audio,recv,1002,40.0,0.00%,32000.0bps,0ms,0.000,50ms,40ms,0,0.00%,0,0ms
@@ -638,6 +649,10 @@ impl ClientLogReport {
                     .data
                     .push(f32::from_str(&cap["bitrate"])? / 1000.0);
                 video_send_stats
+                    .source_framerate
+                    .data
+                    .push(f32::from_str(&cap["source_framerate"])?);
+                video_send_stats
                     .framerate
                     .data
                     .push(f32::from_str(&cap["framerate"])?);
@@ -677,6 +692,13 @@ impl ClientLogReport {
                     .remote_round_trip_time
                     .data
                     .push(f32::from_str(&cap["remote_round_trip_time"])?);
+
+                let res = &cap["source_resolution"];
+                let res: usize = res
+                    .split('x')
+                    .map(|n| n.parse::<usize>().unwrap())
+                    .product();
+                video_send_stats.source_resolution.data.push(res as f32);
 
                 let res = &cap["resolution"];
                 let res: usize = res
@@ -938,10 +960,12 @@ impl ClientLogReport {
 
         let mut video_send_stats_list = Vec::with_capacity(video_send_stats_map.len());
         for (ssrc, video_send_stats) in video_send_stats_map {
+            let chart =
+                |metric: &str| format!("{client_name}.log.video.send.{metric}.ssrc-{ssrc}.svg");
             let packets_per_second = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Packet Rate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.packet_rate.svg", client_name),
+                    chart_name: chart("packet_rate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Packets/Second".to_string(),
                     ..Default::default()
@@ -952,7 +976,7 @@ impl ClientLogReport {
             let average_packet_size = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Packet Size (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.packet_size.svg", client_name),
+                    chart_name: chart("packet_size"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Average Size Per Period".to_string(),
                     ..Default::default()
@@ -963,7 +987,7 @@ impl ClientLogReport {
             let bitrate = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Bitrate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.bitrate.svg", client_name),
+                    chart_name: chart("bitrate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Kbps".to_string(),
                     ..Default::default()
@@ -971,10 +995,22 @@ impl ClientLogReport {
                 data: video_send_stats.bitrate.data,
             };
 
+            let source_framerate = Stats {
+                config: StatsConfig {
+                    title: format!("Video Source Framerate (ssrc={ssrc})"),
+                    chart_name: format!("{}.log.video.send.source_framerate.svg", client_name),
+                    x_label: "Test Seconds".to_string(),
+                    y_label: "fps".to_string(),
+                    y_max: Some(32.0),
+                    ..Default::default()
+                },
+                data: video_send_stats.source_framerate.data,
+            };
+
             let framerate = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Framerate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.framerate.svg", client_name),
+                    chart_name: chart("framerate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "fps".to_string(),
                     y_max: Some(32.0),
@@ -986,7 +1022,7 @@ impl ClientLogReport {
             let key_frames_encoded = Stats {
                 config: StatsConfig {
                     title: format!("Video Key Frames Encoded (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.key_frames_encoded.svg", client_name),
+                    chart_name: chart("key_frames_encoded"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "# frames".to_string(),
                     ..Default::default()
@@ -997,7 +1033,7 @@ impl ClientLogReport {
             let retransmitted_packets_sent = Stats {
                 config: StatsConfig {
                     title: format!("Video Retransmitted Packets (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.retransmitted_packets.svg", client_name),
+                    chart_name: chart("retransmitted_packets"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "# Packets".to_string(),
                     ..Default::default()
@@ -1008,7 +1044,7 @@ impl ClientLogReport {
             let retransmitted_bitrate = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Retransmitted Bitrate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.retransmitted_bitrate.svg", client_name),
+                    chart_name: chart("retransmitted_bitrate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Kbps".to_string(),
                     ..Default::default()
@@ -1019,7 +1055,7 @@ impl ClientLogReport {
             let send_delay_per_packet = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Send Delay Per Packet (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.delay_per_packet.svg", client_name),
+                    chart_name: chart("delay_per_packet"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "ms".to_string(),
                     ..Default::default()
@@ -1030,7 +1066,7 @@ impl ClientLogReport {
             let nack_count = Stats {
                 config: StatsConfig {
                     title: format!("Video Received NACK Count (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.nack_count.svg", client_name),
+                    chart_name: chart("nack_count"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "# NACKs".to_string(),
                     ..Default::default()
@@ -1041,7 +1077,7 @@ impl ClientLogReport {
             let pli_count = Stats {
                 config: StatsConfig {
                     title: format!("Video Received PLI Count (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.pli_count.svg", client_name),
+                    chart_name: chart("pli_count"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "# PLIs".to_string(),
                     ..Default::default()
@@ -1052,7 +1088,7 @@ impl ClientLogReport {
             let remote_packet_loss = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Remote Packet Loss (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.remote_loss.svg", client_name),
+                    chart_name: chart("remote_loss"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "%".to_string(),
                     ..Default::default()
@@ -1063,7 +1099,7 @@ impl ClientLogReport {
             let remote_jitter = Stats {
                 config: StatsConfig {
                     title: format!("Video Send Remote Jitter (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.send.remote_jitter.svg", client_name),
+                    chart_name: chart("remote_jitter"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "milliseconds".to_string(),
                     ..Default::default()
@@ -1074,7 +1110,7 @@ impl ClientLogReport {
             let remote_round_trip_time = Stats {
                 config: StatsConfig {
                     title: "Video Send Remote Round Trip Time".to_string(),
-                    chart_name: format!("{}.log.video.send.remote_rtt.svg", client_name),
+                    chart_name: chart("remote_rtt"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "milliseconds".to_string(),
                     ..Default::default()
@@ -1082,10 +1118,21 @@ impl ClientLogReport {
                 data: video_send_stats.remote_round_trip_time.data,
             };
 
+            let source_resolution = Stats {
+                config: StatsConfig {
+                    title: "Video Source Resolution".to_string(),
+                    chart_name: format!("{}.log.video.send.source_resolution.svg", client_name),
+                    x_label: "Test Seconds".to_string(),
+                    y_label: "Resolution (sq. pixels)".to_string(),
+                    ..Default::default()
+                },
+                data: video_send_stats.source_resolution.data,
+            };
+
             let resolution = Stats {
                 config: StatsConfig {
                     title: "Video Send Resolution".to_string(),
-                    chart_name: format!("{}.log.video.send.resolution.svg", client_name),
+                    chart_name: chart("resolution"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Resolution (sq. pixels)".to_string(),
                     ..Default::default()
@@ -1098,6 +1145,8 @@ impl ClientLogReport {
                 packets_per_second,
                 average_packet_size,
                 bitrate,
+                source_framerate,
+                source_resolution,
                 framerate,
                 key_frames_encoded,
                 retransmitted_packets_sent,
@@ -1114,10 +1163,14 @@ impl ClientLogReport {
 
         let mut audio_receive_stats_list = Vec::with_capacity(audio_receive_stats_map.len());
         for (ssrc, audio_receive_stats) in audio_receive_stats_map {
+            // One chart per stream. Without the ssrc in the file name, streams from different
+            // senders overwrite each other and whichever renders last wins.
+            let chart =
+                |metric: &str| format!("{client_name}.log.audio.receive.{metric}.ssrc-{ssrc}.svg");
             let packets_per_second = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Packet Rate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.audio.receive.packet_rate.svg", client_name),
+                    chart_name: chart("packet_rate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Packets/Second".to_string(),
                     ..Default::default()
@@ -1128,7 +1181,7 @@ impl ClientLogReport {
             let packet_loss = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Packet Loss (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.audio.receive.loss.svg", client_name),
+                    chart_name: chart("loss"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "%".to_string(),
                     ..Default::default()
@@ -1139,7 +1192,7 @@ impl ClientLogReport {
             let bitrate = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Bitrate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.audio.receive.bitrate.svg", client_name),
+                    chart_name: chart("bitrate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Kbps".to_string(),
                     ..Default::default()
@@ -1150,7 +1203,7 @@ impl ClientLogReport {
             let jitter = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Jitter (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.audio.receive.jitter.svg", client_name),
+                    chart_name: chart("jitter"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "milliseconds".to_string(),
                     ..Default::default()
@@ -1161,7 +1214,7 @@ impl ClientLogReport {
             let audio_energy = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Audio Energy (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.audio.receive.audio_energy.svg", client_name),
+                    chart_name: chart("audio_energy"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "dB".to_string(),
                     y_max: Some(1.0),
@@ -1173,10 +1226,7 @@ impl ClientLogReport {
             let jitter_buffer_delay = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Jitter Buffer Delay (ssrc={ssrc})"),
-                    chart_name: format!(
-                        "{}.log.audio.receive.jitter_buffer_delay.svg",
-                        client_name
-                    ),
+                    chart_name: chart("jitter_buffer_delay"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "milliseconds".to_string(),
                     ..Default::default()
@@ -1187,10 +1237,7 @@ impl ClientLogReport {
             let jitter_buffer_target_delay = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Jitter Buffer Target Delay (ssrc={ssrc})"),
-                    chart_name: format!(
-                        "{}.log.audio.receive.jitter_buffer_target_delay.svg",
-                        client_name
-                    ),
+                    chart_name: chart("jitter_buffer_target_delay"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "milliseconds".to_string(),
                     ..Default::default()
@@ -1201,10 +1248,7 @@ impl ClientLogReport {
             let jitter_buffer_flushes = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Jitter Buffer Flushes (ssrc={ssrc})"),
-                    chart_name: format!(
-                        "{}.log.audio.receive.jitter_buffer_flushes.svg",
-                        client_name
-                    ),
+                    chart_name: chart("jitter_buffer_flushes"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Flushes".to_string(),
                     show_total: true,
@@ -1216,10 +1260,7 @@ impl ClientLogReport {
             let concealed_samples_pct = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Concealed Samples (ssrc={ssrc})"),
-                    chart_name: format!(
-                        "{}.log.audio.receive.concealed_samples_pct.svg",
-                        client_name
-                    ),
+                    chart_name: chart("concealed_samples_pct"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "%".to_string(),
                     ..Default::default()
@@ -1230,10 +1271,7 @@ impl ClientLogReport {
             let fec_packets_received = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive FEC Packets Received (ssrc={ssrc})"),
-                    chart_name: format!(
-                        "{}.log.audio.receive.fec_packets_received.svg",
-                        client_name
-                    ),
+                    chart_name: chart("fec_packets_received"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Packets".to_string(),
                     show_total: true,
@@ -1245,10 +1283,7 @@ impl ClientLogReport {
             let relative_arrival_delay_per_packet = Stats {
                 config: StatsConfig {
                     title: format!("Audio Receive Relative Arrival Delay Per Packet (ssrc={ssrc})"),
-                    chart_name: format!(
-                        "{}.log.audio.receive.relative_arrival_delay_per_packet.svg",
-                        client_name
-                    ),
+                    chart_name: chart("relative_arrival_delay_per_packet"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "milliseconds".to_string(),
                     ..Default::default()
@@ -1258,6 +1293,8 @@ impl ClientLogReport {
 
             audio_receive_stats_list.push(AudioReceiveStats {
                 ssrc: audio_receive_stats.ssrc,
+                // Resolved later, once every client's outbound SSRC is known.
+                sender_name: None,
                 packets_per_second,
                 packet_loss,
                 bitrate,
@@ -1274,10 +1311,12 @@ impl ClientLogReport {
 
         let mut video_receive_stats_list = Vec::with_capacity(video_receive_stats_map.len());
         for (ssrc, video_receive_stats) in video_receive_stats_map {
+            let chart =
+                |metric: &str| format!("{client_name}.log.video.receive.{metric}.ssrc-{ssrc}.svg");
             let packets_per_second = Stats {
                 config: StatsConfig {
                     title: format!("Video Receive Packet Rate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.receive.packet_rate.svg", client_name),
+                    chart_name: chart("packet_rate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Packets/Second".to_string(),
                     ..Default::default()
@@ -1288,7 +1327,7 @@ impl ClientLogReport {
             let packet_loss = Stats {
                 config: StatsConfig {
                     title: format!("Video Receive Packet Loss (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.receive.loss.svg", client_name),
+                    chart_name: chart("loss"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "%".to_string(),
                     ..Default::default()
@@ -1299,7 +1338,7 @@ impl ClientLogReport {
             let bitrate = Stats {
                 config: StatsConfig {
                     title: format!("Video Receive Bitrate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.receive.bitrate.svg", client_name),
+                    chart_name: chart("bitrate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Kbps".to_string(),
                     ..Default::default()
@@ -1310,7 +1349,7 @@ impl ClientLogReport {
             let framerate = Stats {
                 config: StatsConfig {
                     title: format!("Video Receive Framerate (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.receive.framerate.svg", client_name),
+                    chart_name: chart("framerate"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "fps".to_string(),
                     y_max: Some(32.0),
@@ -1322,7 +1361,7 @@ impl ClientLogReport {
             let key_frames_decoded = Stats {
                 config: StatsConfig {
                     title: format!("Video Key Frames Decoded (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.receive.key_frames_decoded.svg", client_name),
+                    chart_name: chart("key_frames_decoded"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "# frames".to_string(),
                     ..Default::default()
@@ -1333,7 +1372,7 @@ impl ClientLogReport {
             let resolution = Stats {
                 config: StatsConfig {
                     title: format!("Video Receive Resolution (ssrc={ssrc})"),
-                    chart_name: format!("{}.log.video.receive.resolution.svg", client_name),
+                    chart_name: chart("resolution"),
                     x_label: "Test Seconds".to_string(),
                     y_label: "Resolution (sq. pixels)".to_string(),
                     ..Default::default()
@@ -1343,6 +1382,8 @@ impl ClientLogReport {
 
             video_receive_stats_list.push(VideoReceiveStats {
                 ssrc: video_receive_stats.ssrc,
+                // Resolved later, once every client's outbound SSRCs are known.
+                sender_name: None,
                 packets_per_second,
                 packet_loss,
                 bitrate,
@@ -1421,7 +1462,11 @@ pub struct Report {
 
 impl Report {
     /// Build a report from client_b's perspective.
-    pub async fn build_b(
+    /// Builds the report for a single client. Video analysis is only ever produced for clients
+    /// other than A, since client A's sound is the reference everyone else is measured against.
+    pub async fn build(
+        client: &Client<'_>,
+        client_config: &CallConfig,
         test_case: &TestCase<'_>,
         test_case_config: &TestCaseConfig,
         audio_test_results: AudioTestResults,
@@ -1431,8 +1476,7 @@ impl Report {
                 AnalysisReport::build(
                     // Note: _Move_ the audio_test_results to the report.
                     audio_test_results,
-                    test_case
-                        .client_b
+                    client
                         .output_yuv
                         .as_ref()
                         .map(|output_yuv| format!("{}/{}.json", test_case.test_path, output_yuv))
@@ -1444,45 +1488,72 @@ impl Report {
             None
         };
         let docker_stats_report = DockerStatsReport::build(
-            &format!(
-                "{}/{}_stats.log",
-                test_case.test_path, test_case.client_b.name
-            ),
-            test_case.client_b.name,
+            &format!("{}/{}_stats.log", test_case.test_path, client.name),
+            &client.name,
         )
         .await?;
         let client_log_report = ClientLogReport::build(
-            &format!("{}/{}.log", test_case.test_path, test_case.client_b.name),
-            test_case.client_b.name,
+            &format!("{}/{}.log", test_case.test_path, client.name),
+            &client.name,
         )
         .await?;
 
-        let test_report = Report {
+        Ok(Report {
             report_name: test_case.report_name.to_string(),
             test_path: test_case.test_path.to_string(),
             test_case_name: test_case.test_case_name.to_string(),
-            sound_name: test_case.client_a.sound.name.to_string(),
+            sound_name: test_case.client_a().sound.name.to_string(),
             video_name: test_case
-                .client_a
+                .client_a()
                 .video
                 .map(|v| v.name.clone())
                 .unwrap_or_default(),
             network_profile: test_case.network_profile.clone(),
-            client_name: test_case.client_b.name.to_string(),
-            client_name_wav: test_case.client_b.output_wav.to_string(),
+            client_name: client.name.to_string(),
+            client_name_wav: client.output_wav.to_string(),
             analysis_report,
             docker_stats_report,
             client_log_report,
-            show_video: test_case_config.client_a_config.video.input_name.is_some()
-                || test_case_config.client_b_config.video.input_name.is_some(),
+            // Video columns are shown if anyone in the call is sending video.
+            show_video: test_case_config
+                .usable_client_configs()
+                .iter()
+                .any(|config| config.video.input_name.is_some())
+                || client_config.video.input_name.is_some(),
             iterations: test_case_config.iterations,
-        };
+        })
+    }
 
-        if test_case_config.create_charts {
-            test_report.create_charts(&test_case.test_path).await;
+    /// Resolves each inbound audio stream to the client that sent it, using the map of every
+    /// client's outbound audio SSRC. Streams with no match keep a `None` sender and are
+    /// reported by raw SSRC.
+    pub fn label_senders(&mut self, sender_name_by_ssrc: &HashMap<String, String>) {
+        for stats in &mut self.client_log_report.audio_receive_stats_list {
+            stats.sender_name = sender_name_by_ssrc.get(&stats.ssrc).cloned();
         }
+        for stats in &mut self.client_log_report.video_receive_stats_list {
+            stats.sender_name = sender_name_by_ssrc.get(&stats.ssrc).cloned();
+        }
+    }
 
-        Ok(test_report)
+    /// Identifies an inbound stream by SSRC and the client that sent it. The sender reads
+    /// `unknown` when it could not be resolved, for example if that sender's own report failed
+    /// to build.
+    fn stream_label(sender_name: Option<&str>, ssrc: &str) -> String {
+        format!("(ssrc={ssrc},sender={})", sender_name.unwrap_or("unknown"))
+    }
+
+    /// Every SSRC this client sends on. The SFU forwards media without rewriting the SSRC, so a
+    /// receiver's inbound SSRC is the sender's outbound SSRC, which is how the two get matched
+    /// up. Video is simulcast over several SSRCs and the receiver only sees whichever layer was
+    /// forwarded, so all of them are included.
+    pub fn send_ssrcs(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.client_log_report.audio_send_stats.ssrc.as_str()).chain(
+            self.client_log_report
+                .video_send_stats
+                .iter()
+                .map(|stats| stats.ssrc.as_str()),
+        )
     }
 
     fn create_bar_chart(
@@ -1664,6 +1735,7 @@ impl Report {
                     &per_ssrc.packets_per_second,
                     &per_ssrc.average_packet_size,
                     &per_ssrc.bitrate,
+                    &per_ssrc.source_framerate,
                     &per_ssrc.framerate,
                     &per_ssrc.key_frames_encoded,
                     &per_ssrc.retransmitted_packets_sent,
@@ -1674,6 +1746,7 @@ impl Report {
                     &per_ssrc.remote_packet_loss,
                     &per_ssrc.remote_jitter,
                     &per_ssrc.remote_round_trip_time,
+                    &per_ssrc.source_resolution,
                     &per_ssrc.resolution,
                 ]
             }));
@@ -1712,28 +1785,76 @@ impl Report {
             let stats = stats.clone();
             set.spawn_blocking(move || {
                 if let Err(err) = Report::create_line_chart(&path, &stats) {
-                    println!("create_line_chart() error: {}", err);
+                    error!("create_line_chart() error: {}", err);
                 }
             });
         }
         while (set.join_next().await).is_some() {}
     }
 
+    /// Writes the report page for a test case, with a section per client.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_test_case_report(
-        &self,
+        reports: &[Report],
         set_name: &str,
         reference_spectrogram: &str,
         network_configs: &Vec<NetworkConfigWithOffset>,
         test_case_config: &TestCaseConfig,
+        client_names: &[&str],
     ) -> Result<()> {
-        let mut buf = vec![];
+        let Some(first) = reports.first() else {
+            return Ok(());
+        };
         let html = Html::new();
 
+        let mut buf = vec![];
         buf.extend_from_slice(
-            html.header(&format!("{}/{} Report", set_name, self.report_name))
+            html.header(&format!("{}/{} Report", set_name, first.report_name))
+                .as_bytes(),
+        );
+        buf.extend_from_slice(html.network_config_section(network_configs).as_bytes());
+        buf.extend_from_slice(
+            html.call_config_section(test_case_config, client_names)
                 .as_bytes(),
         );
 
+        for report in reports {
+            buf.extend_from_slice(&report.client_report_section(
+                &html,
+                set_name,
+                reference_spectrogram,
+                test_case_config,
+            ));
+        }
+
+        buf.extend_from_slice(html.footer().as_bytes());
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&format!("{}/report.html", first.test_path))
+            .await?;
+
+        if let Err(err) = file.write_all(buf.as_slice()).await {
+            error!("Error writing file! {err}");
+        }
+
+        Ok(())
+    }
+
+    /// The report sections for a single client. Accordion ids are prefixed with the client name
+    /// so that sections from different clients on the same page stay independent.
+    fn client_report_section(
+        &self,
+        html: &Html,
+        set_name: &str,
+        reference_spectrogram: &str,
+        test_case_config: &TestCaseConfig,
+    ) -> Vec<u8> {
+        let id = |name: &str| format!("{}-{}", self.client_name, name);
+
+        let mut buf = vec![];
         buf.extend_from_slice(
             html.report_heading(
                 set_name,
@@ -1744,8 +1865,6 @@ impl Report {
             )
             .as_bytes(),
         );
-        buf.extend_from_slice(html.network_config_section(network_configs).as_bytes());
-        buf.extend_from_slice(html.call_config_section(test_case_config).as_bytes());
 
         // Add charts for audio mos results if they represent a series to the "Audio Core" section.
         let mut audio_core_stats: Vec<&Stats> = vec![];
@@ -1775,10 +1894,10 @@ impl Report {
         }
 
         if !audio_core_stats.is_empty() {
-            let audio_core_stats = Self::build_stats_rows(&html, &audio_core_stats);
+            let audio_core_stats = Self::build_stats_rows(html, &audio_core_stats);
             buf.extend_from_slice(
                 html.accordion_section(
-                    "audioCore",
+                    &id("audioCore"),
                     vec![HtmlAccordionItem {
                         label: "Call Audio Core".to_string(),
                         body: audio_core_stats,
@@ -1789,10 +1908,14 @@ impl Report {
             );
         }
 
-        if test_case_config.client_b_config.audio.generate_spectrogram {
+        if test_case_config
+            .client_b_config()
+            .audio
+            .generate_spectrogram
+        {
             buf.extend_from_slice(
                 html.accordion_section(
-                    "spectrograms",
+                    &id("spectrograms"),
                     vec![HtmlAccordionItem {
                         label: "Call Audio Spectrograms".to_string(),
                         body: html.two_image_section(
@@ -1810,7 +1933,7 @@ impl Report {
         }
 
         let container_stats = Self::build_stats_rows(
-            &html,
+            html,
             &[
                 &self.docker_stats_report.cpu_usage,
                 &self.docker_stats_report.mem_usage,
@@ -1820,7 +1943,7 @@ impl Report {
         );
         buf.extend_from_slice(
             html.accordion_section(
-                "dockerStats",
+                &id("dockerStats"),
                 vec![HtmlAccordionItem {
                     label: "Docker Stats".to_string(),
                     body: container_stats,
@@ -1830,15 +1953,15 @@ impl Report {
             .as_bytes(),
         );
 
-        if test_case_config.client_b_config.audio.adaptation > 0 {
+        if test_case_config.client_b_config().audio.adaptation > 0 {
             let audio_adaptation = &self.client_log_report.audio_adaptation;
             let audio_adaptation = Self::build_stats_rows(
-                &html,
+                html,
                 &[&audio_adaptation.bitrate, &audio_adaptation.packet_length],
             );
             buf.extend_from_slice(
                 html.accordion_section(
-                    "audioAdaptation",
+                    &id("audioAdaptation"),
                     vec![HtmlAccordionItem {
                         label: "Audio Adaptation".to_string(),
                         body: audio_adaptation,
@@ -1851,7 +1974,7 @@ impl Report {
 
         let connection_stats = &self.client_log_report.connection_stats;
         let connection_stats = Self::build_stats_rows(
-            &html,
+            html,
             &[
                 &connection_stats.current_round_trip_time,
                 &connection_stats.available_outgoing_bitrate,
@@ -1859,7 +1982,7 @@ impl Report {
         );
         buf.extend_from_slice(
             html.accordion_section(
-                "connectionStats",
+                &id("connectionStats"),
                 vec![HtmlAccordionItem {
                     label: "Client Connection Stats".to_string(),
                     body: connection_stats,
@@ -1871,7 +1994,7 @@ impl Report {
 
         let audio_send_stats = &self.client_log_report.audio_send_stats;
         let audio_send_stats_body = Self::build_stats_rows(
-            &html,
+            html,
             &[
                 &audio_send_stats.packets_per_second,
                 &audio_send_stats.average_packet_size,
@@ -1884,7 +2007,7 @@ impl Report {
         );
         buf.extend_from_slice(
             html.accordion_section(
-                "audioSendStats",
+                &id("audioSendStats"),
                 vec![HtmlAccordionItem {
                     label: format!("Client Audio Send Stats (SSRC={})", audio_send_stats.ssrc),
                     body: audio_send_stats_body,
@@ -1896,8 +2019,9 @@ impl Report {
 
         for audio_receive_stats in &self.client_log_report.audio_receive_stats_list {
             let ssrc = &audio_receive_stats.ssrc;
+            let sender_name = audio_receive_stats.sender_name.as_deref();
             let audio_receive_stats = Self::build_stats_rows(
-                &html,
+                html,
                 &[
                     &audio_receive_stats.packets_per_second,
                     &audio_receive_stats.packet_loss,
@@ -1914,9 +2038,12 @@ impl Report {
             );
             buf.extend_from_slice(
                 html.accordion_section(
-                    &format!("audioReceiveStats-{ssrc}"),
+                    &id(&format!("audioReceiveStats-{ssrc}")),
                     vec![HtmlAccordionItem {
-                        label: "Client Audio Receive Stats".to_string(),
+                        label: format!(
+                            "Client Audio Receive Stats {}",
+                            Self::stream_label(sender_name, ssrc)
+                        ),
                         body: audio_receive_stats,
                         collapsed: true,
                     }],
@@ -1929,11 +2056,12 @@ impl Report {
             for video_send_stats in &self.client_log_report.video_send_stats {
                 let ssrc = &video_send_stats.ssrc;
                 let video_send_stats = Self::build_stats_rows(
-                    &html,
+                    html,
                     &[
                         &video_send_stats.packets_per_second,
                         &video_send_stats.average_packet_size,
                         &video_send_stats.bitrate,
+                        &video_send_stats.source_framerate,
                         &video_send_stats.framerate,
                         &video_send_stats.key_frames_encoded,
                         &video_send_stats.retransmitted_packets_sent,
@@ -1949,7 +2077,7 @@ impl Report {
 
                 buf.extend_from_slice(
                     html.accordion_section(
-                        &format!("videoSendStats-{ssrc}"),
+                        &id(&format!("videoSendStats-{ssrc}")),
                         vec![HtmlAccordionItem {
                             label: format!("Client Video Send Stats (ssrc={ssrc})"),
                             body: video_send_stats,
@@ -1962,8 +2090,9 @@ impl Report {
 
             for video_receive_stats in &self.client_log_report.video_receive_stats_list {
                 let ssrc = &video_receive_stats.ssrc;
+                let sender_name = video_receive_stats.sender_name.as_deref();
                 let video_receive_stats = Self::build_stats_rows(
-                    &html,
+                    html,
                     &[
                         &video_receive_stats.packets_per_second,
                         &video_receive_stats.packet_loss,
@@ -1975,9 +2104,12 @@ impl Report {
 
                 buf.extend_from_slice(
                     html.accordion_section(
-                        &format!("videoReceiveStats-{ssrc}"),
+                        &id(&format!("videoReceiveStats-{ssrc}")),
                         vec![HtmlAccordionItem {
-                            label: format!("Client Video Receive Stats (ssrc={ssrc})"),
+                            label: format!(
+                                "Client Video Receive Stats {}",
+                                Self::stream_label(sender_name, ssrc)
+                            ),
                             body: video_receive_stats,
                             collapsed: true,
                         }],
@@ -1987,20 +2119,7 @@ impl Report {
             }
         }
 
-        buf.extend_from_slice(html.footer().as_bytes());
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&format!("{}/report.html", self.test_path))
-            .await?;
-
-        if let Err(err) = file.write_all(buf.as_slice()).await {
-            println!("Error writing file! {err}");
-        }
-
-        Ok(())
+        buf
     }
 
     fn build_stats_rows(html: &Html, stats_charts: &[&Stats]) -> String {
@@ -2339,7 +2458,7 @@ impl Report {
         group_reports: &[GroupRun],
         sounds: &HashMap<String, Sound>,
     ) -> Result<()> {
-        println!("\nCreating summary report for {}", set_name);
+        info!("Creating summary report for {}", set_name);
 
         let mut buf = vec![];
         let html = Html::new();
@@ -2389,10 +2508,12 @@ impl Report {
                     } else {
                         // For now, the default is a combination of the test case name and the
                         // network profile name, since the sound is usually constant for groups
-                        // of tests.
+                        // of tests. The client name is included because there is one report per
+                        // client, so without it every client of a test case shares a label.
                         format!(
-                            "{}@{}",
+                            "{}/{}@{}",
                             test_report.test_case_name,
+                            test_report.client_name,
                             test_report.network_profile.get_name()
                         )
                     };
@@ -2422,7 +2543,7 @@ impl Report {
                 );
 
                 if let Err(err) = Report::create_bar_chart(set_path, &stats, domain, data) {
-                    println!("create_line_chart() error: {}", err);
+                    error!("create_line_chart() error: {}", err);
                 }
 
                 stats_charts.push(stats);
@@ -2501,7 +2622,7 @@ impl Report {
             .await?;
 
         if let Err(err) = file.write_all(buf.as_slice()).await {
-            println!("Error writing file! {err}");
+            error!("Error writing file! {err}");
         }
 
         Ok(())
@@ -2519,8 +2640,17 @@ enum SummaryRowType {
 
 /// A convenience struct for tracking the averaged values for a row in the summary report. This
 /// is particularly useful when aggregating values from several rows.
-#[derive(Copy, Clone)]
+///
+/// There is one row per inbound audio stream, so a client receiving from two senders gets two
+/// rows. Loss and concealment are percentages and must not be summed across streams; keeping
+/// them separate is what makes them readable.
+// Carries owned identity strings, so it cannot be Copy.
+#[derive(Clone)]
 struct SummaryRow {
+    /// The client that sent this inbound stream, when it could be resolved.
+    pub sender_name: Option<String>,
+    /// The inbound stream's ssrc. None when the client received nothing.
+    pub ssrc: Option<String>,
     pub audio_send_packet_size: f32,
     pub audio_send_packet_rate: f32,
     pub audio_send_bitrate: f32,
@@ -2555,8 +2685,42 @@ struct SummaryRow {
 }
 
 impl SummaryRow {
-    pub fn new(report: &Report) -> Self {
-        // sum average across all SSRCs to get true mixed average
+    /// One row per inbound audio stream. A client that received nothing still gets a single row
+    /// with the receive columns zeroed, so it is not dropped from the summary entirely.
+    pub fn rows_for(report: &Report) -> Vec<Self> {
+        if report.client_log_report.audio_receive_stats_list.is_empty() {
+            return vec![Self::new(report, None)];
+        }
+        // The stats list comes out of a HashMap, so sort for a stable row order - otherwise both
+        // the ordering and which row carries the client's MOS would vary between runs.
+        let mut streams: Vec<&AudioReceiveStats> = report
+            .client_log_report
+            .audio_receive_stats_list
+            .iter()
+            .collect();
+        streams.sort_by(|a, b| (&a.sender_name, &a.ssrc).cmp(&(&b.sender_name, &b.ssrc)));
+        streams
+            .into_iter()
+            .enumerate()
+            .map(|(index, stats)| {
+                let mut row = Self::new(report, Some(stats));
+                if index > 0 {
+                    // MOS is measured on the client's recording as a whole, not per inbound
+                    // stream, so it is shown once - on the client's first row. Repeating it
+                    // would read as a per-stream score.
+                    row.visqol_mos_speech = None;
+                    row.visqol_mos_audio = None;
+                    row.pesq_mos = None;
+                    row.plc_mos = None;
+                    row.mos_average = None;
+                    row.vmaf = None;
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn new(report: &Report, stream: Option<&AudioReceiveStats>) -> Self {
         let (
             audio_receive_packet_rate,
             audio_receive_bitrate,
@@ -2564,21 +2728,19 @@ impl SummaryRow {
             audio_receive_loss_std_dev,
             concealed_samples_pct,
             fec_packets_received_total,
-        ) = report
-            .client_log_report
-            .audio_receive_stats_list
-            .iter()
-            .fold((0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |acc, stats| {
-                (
-                    acc.0 + stats.packets_per_second.data.ave,
-                    acc.1 + stats.bitrate.data.ave,
-                    acc.2 + stats.packet_loss.data.ave,
-                    acc.3 + stats.packet_loss.data.std_dev,
-                    acc.4 + stats.concealed_samples_pct.data.ave,
-                    acc.5 + stats.fec_packets_received.data.total,
-                )
-            });
+        ) = stream.map_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |stats| {
+            (
+                stats.packets_per_second.data.ave,
+                stats.bitrate.data.ave,
+                stats.packet_loss.data.ave,
+                stats.packet_loss.data.std_dev,
+                stats.concealed_samples_pct.data.ave,
+                stats.fec_packets_received.data.total,
+            )
+        });
         Self {
+            sender_name: stream.and_then(|s| s.sender_name.clone()),
+            ssrc: stream.map(|s| s.ssrc.clone()),
             audio_send_packet_size: report
                 .client_log_report
                 .audio_send_stats
@@ -2653,8 +2815,9 @@ impl SummaryRow {
         }
     }
 
-    pub fn new_aggregate(report: &Report) -> Self {
-        let mut aggregate = Self::new(report);
+    /// Seeded from the first sample of a stream, so the aggregate keeps that stream's identity.
+    pub fn new_aggregate(row: &Self) -> Self {
+        let mut aggregate = row.clone();
         aggregate.row_type = SummaryRowType::Aggregate;
         aggregate
     }
@@ -2761,12 +2924,6 @@ impl SummaryCallAudioCoreRow {
         } else {
             None
         }
-    }
-
-    pub fn new_aggregate(report: &Report) -> Option<Self> {
-        let mut aggregate = Self::new(report)?;
-        aggregate.row_type = SummaryRowType::Aggregate;
-        Some(aggregate)
     }
 
     pub fn set_aggregate_item(&mut self, row_index: usize) {
@@ -2969,7 +3126,7 @@ impl Html {
         let text_emphasis = Html::get_emphasis_for_mos(mos_average);
 
         if test_case_config
-            .client_b_config
+            .client_b_config()
             .audio
             .visqol_speech_analysis
         {
@@ -2984,7 +3141,11 @@ impl Html {
             );
         }
 
-        if test_case_config.client_b_config.audio.visqol_audio_analysis {
+        if test_case_config
+            .client_b_config()
+            .audio
+            .visqol_audio_analysis
+        {
             let visqol_mos_audio_string = visqol_mos_audio
                 .map(|mos| format!("{:.3}", mos))
                 .unwrap_or_else(|| "None".to_string());
@@ -2996,7 +3157,11 @@ impl Html {
             );
         }
 
-        if test_case_config.client_b_config.audio.pesq_speech_analysis {
+        if test_case_config
+            .client_b_config()
+            .audio
+            .pesq_speech_analysis
+        {
             let pesq_mos_string = pesq_mos
                 .map(|mos| format!("{:.3}", mos))
                 .unwrap_or_else(|| "None".to_string());
@@ -3008,7 +3173,7 @@ impl Html {
             );
         }
 
-        if test_case_config.client_b_config.audio.plc_speech_analysis {
+        if test_case_config.client_b_config().audio.plc_speech_analysis {
             let plc_mos_string = plc_mos
                 .map(|mos| format!("{:.3}", mos))
                 .unwrap_or_else(|| "None".to_string());
@@ -3077,32 +3242,85 @@ impl Html {
         buf
     }
 
-    pub fn call_config_section(&self, test_case_config: &TestCaseConfig) -> String {
+    /// Renders every client's call config side by side, one column each, with any line that is
+    /// not identical across all of them highlighted. Falls back to plain dumps when the configs
+    /// do not have the same shape, since `field_trials` and `extra_cli_args` are variable length
+    /// and a line-by-line comparison would be misaligned rather than merely unhelpful.
+    pub fn call_config_section(
+        &self,
+        test_case_config: &TestCaseConfig,
+        client_names: &[&str],
+    ) -> String {
         let mut buf = String::new();
 
         buf.push_str("<div class=\"p-3 row\">\n");
-
         buf.push_str("<div class=\"col-md-12\">\n");
         buf.push_str("<h3>Call Configuration</h3>\n");
-        buf.push_str("</div>\n");
 
-        buf.push_str("<div class=\"col-md-6\">\n");
-        buf.push_str("<h4>Client A</h4>\n");
-        let _ = writeln!(
-            buf,
-            "<p><code><pre>\n{:#?}</pre></code></p>",
-            &test_case_config.client_a_config
-        );
-        buf.push_str("</div>\n");
+        let configs = test_case_config.usable_client_configs();
+        let dumps: Vec<Vec<String>> = configs
+            .iter()
+            .map(|config| format!("{config:#?}").lines().map(str::to_string).collect())
+            .collect();
+        let label_for = |index: usize| -> String {
+            client_names
+                .get(index)
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| format!("Client {}", index + 1))
+        };
 
-        buf.push_str("<div class=\"col-md-6\">\n");
-        buf.push_str("<h4>Client B</h4>\n");
-        let _ = writeln!(
-            buf,
-            "<p><code><pre>\n{:#?}</pre></code></p>",
-            &test_case_config.client_b_config
-        );
-        buf.push_str("</div>\n");
+        let comparable = dumps
+            .first()
+            .is_some_and(|first| dumps.iter().all(|lines| lines.len() == first.len()));
+
+        if comparable {
+            buf.push_str("<p class=\"text-muted\">Highlighted rows differ between clients.</p>\n");
+            buf.push_str("<div class=\"table-responsive\">\n");
+            buf.push_str("<table class=\"table table-sm table-bordered font-monospace\">\n");
+
+            buf.push_str("<thead>\n<tr>\n");
+            for index in 0..dumps.len() {
+                let _ = writeln!(buf, "<th>{}</th>", label_for(index));
+            }
+            buf.push_str("</tr>\n</thead>\n");
+
+            buf.push_str("<tbody>\n");
+            for line_index in 0..dumps[0].len() {
+                let line = &dumps[0][line_index];
+                let differs = dumps
+                    .iter()
+                    .any(|lines| lines[line_index].trim() != line.trim());
+
+                if differs {
+                    buf.push_str("<tr class=\"table-warning\">\n");
+                } else {
+                    buf.push_str("<tr>\n");
+                }
+                for lines in &dumps {
+                    let _ = writeln!(
+                        buf,
+                        "<td style=\"white-space: pre\">{}</td>",
+                        lines[line_index]
+                    );
+                }
+                buf.push_str("</tr>\n");
+            }
+            buf.push_str("</tbody>\n</table>\n</div>\n");
+            buf.push_str("</div>\n");
+        } else {
+            buf.push_str(
+                "<p class=\"text-muted\">Configs have different shapes, so they are not \
+                 compared line by line.</p>\n",
+            );
+            buf.push_str("</div>\n");
+
+            for (index, lines) in dumps.iter().enumerate() {
+                buf.push_str("<div class=\"col-md-6\">\n");
+                let _ = writeln!(buf, "<h4>{}</h4>", label_for(index));
+                let _ = writeln!(buf, "<p><code><pre>\n{}</pre></code></p>", lines.join("\n"));
+                buf.push_str("</div>\n");
+            }
+        }
 
         buf.push_str("</div>\n");
 
@@ -3300,6 +3518,17 @@ impl Html {
         };
 
         let _ = writeln!(buf, "<td>{}{}</td>", indent, report.test_case_name);
+        let _ = writeln!(buf, "<td>{}{}</td>", indent, report.client_name);
+        let _ = writeln!(
+            buf,
+            "<td>{}{}</td>",
+            indent,
+            match (&summary_row.sender_name, &summary_row.ssrc) {
+                (Some(name), Some(ssrc)) => format!("{name} ({ssrc})"),
+                (None, Some(ssrc)) => format!("unknown ({ssrc})"),
+                _ => "-".to_string(),
+            }
+        );
         let _ = writeln!(buf, "<td>{}{}</td>", indent, report.sound_name);
         if group_config.summary_report_columns.show_video {
             let _ = writeln!(buf, "<td>{}{}</td>", indent, report.video_name);
@@ -3498,9 +3727,9 @@ impl Html {
         buf.push_str("<thead>\n");
         buf.push_str("<tr>\n");
         if group_config.summary_report_columns.show_video {
-            buf.push_str("<th colspan=\"4\" style=\"width: 33%\">Test Case</th>\n");
+            buf.push_str("<th colspan=\"6\" style=\"width: 33%\">Test Case</th>\n");
         } else {
-            buf.push_str("<th colspan=\"3\" style=\"width: 33%\">Test Case</th>\n");
+            buf.push_str("<th colspan=\"5\" style=\"width: 33%\">Test Case</th>\n");
         }
         if group_config.summary_report_columns.show_send_stats {
             let send_colspan = if group_config.summary_report_columns.show_video {
@@ -3559,6 +3788,8 @@ impl Html {
         buf.push_str("</tr>\n");
         buf.push_str("<tr>\n");
         buf.push_str("<th>Name</th>\n");
+        buf.push_str("<th>Client</th>\n");
+        buf.push_str("<th>From</th>\n");
         buf.push_str("<th>Sound</th>\n");
         if group_config.summary_report_columns.show_video {
             buf.push_str("<th>Video</th>\n");
@@ -3615,83 +3846,35 @@ impl Html {
 
         buf.push_str("<tbody>\n");
 
-        let mut summary_rows: Vec<SummaryRow> = vec![];
-        let mut aggregate_summary_row: Option<SummaryRow> = None;
+        // Rows are grouped by identity rather than by position in the list. Reports arrive
+        // ordered profile -> iteration -> client, and each client contributes one row per
+        // inbound stream, so counting `iterations` reports off the front would group unrelated
+        // clients and streams together.
+        #[derive(PartialEq, Eq, Hash, Clone)]
+        struct RowKey {
+            test_case_name: String,
+            network_profile: String,
+            client_name: String,
+            stream: String,
+        }
 
-        // Keep track of the number of iterable items there are for the group so that we
-        // can make sure class names are unique.
-        let mut iteration_count_for_group = 0;
+        let mut ordered_keys: Vec<RowKey> = vec![];
+        let mut samples_by_key: HashMap<RowKey, Vec<(&Report, SummaryRow)>> = HashMap::new();
 
         for result in reports {
-            // Each report will result in a row in the summary. Each row can be either for
-            // a specific test case or an aggregate of several iterations, and then the
-            // actual aggregated items themselves. The aggregated items are hidden by default.
             match result {
                 Ok(report) => {
-                    let mut current_summary_row = SummaryRow::new(report);
-
-                    if report.iterations > 1 {
-                        if !summary_rows.is_empty() {
-                            // We are already aggregating the test iterations.
-                            if let Some(aggregate) = &mut aggregate_summary_row {
-                                aggregate.update(&current_summary_row, summary_rows.len() + 1);
-                                current_summary_row.set_aggregate_item(summary_rows.len() + 1);
-                                summary_rows.push(current_summary_row);
-
-                                if summary_rows.len() == report.iterations as usize {
-                                    // This is the end. Show the aggregate summary row first. Use
-                                    // the current report for naming.
-                                    buf.push_str(&self.summary_report_row(
-                                        group_config,
-                                        report,
-                                        aggregate,
-                                        iteration_count_for_group,
-                                    ));
-
-                                    // Show all the iterations.
-                                    summary_rows.iter().for_each(|summary_line| {
-                                        buf.push_str(&self.summary_report_row(
-                                            group_config,
-                                            report,
-                                            summary_line,
-                                            iteration_count_for_group,
-                                        ));
-                                    });
-
-                                    summary_rows.clear();
-                                    aggregate_summary_row = None;
-                                    iteration_count_for_group += 1;
-                                }
-                            } else {
-                                // This would be a bad state, warn and reset.
-                                println!(
-                                    "There are summary_lines but averaged_summary_line is None!"
-                                );
-                                summary_rows.clear();
-                                aggregate_summary_row = None;
-                                iteration_count_for_group += 1;
-                            }
-                        } else {
-                            // This is the first of N iterations to track.
-
-                            // Make a new aggregate for all rows in the test iteration.
-                            aggregate_summary_row = Some(SummaryRow::new_aggregate(report));
-
-                            // Set the current row as the first iteration item.
-                            current_summary_row.set_aggregate_item(1);
-
-                            // Add the current row to our list for display once all rows in the
-                            // test iterations are aggregated.
-                            summary_rows.push(current_summary_row);
+                    for row in SummaryRow::rows_for(report) {
+                        let key = RowKey {
+                            test_case_name: report.test_case_name.clone(),
+                            network_profile: report.network_profile.get_name().to_string(),
+                            client_name: report.client_name.clone(),
+                            stream: row.ssrc.clone().unwrap_or_default(),
+                        };
+                        if !samples_by_key.contains_key(&key) {
+                            ordered_keys.push(key.clone());
                         }
-                    } else {
-                        // Display the report normally, one measurement for the line.
-                        buf.push_str(&self.summary_report_row(
-                            group_config,
-                            report,
-                            &current_summary_row,
-                            iteration_count_for_group,
-                        ));
+                        samples_by_key.entry(key).or_default().push((report, row));
                     }
                 }
                 Err(err) => {
@@ -3699,6 +3882,66 @@ impl Html {
                     let _ = writeln!(buf, "<td>{:?}</td>", err);
                     buf.push_str("</tr>\n");
                 }
+            }
+        }
+
+        // Keeps collapse class names unique per aggregated group.
+        let mut iteration_count_for_group = 0;
+
+        for key in &ordered_keys {
+            let samples = &samples_by_key[key];
+            let (report, _) = samples[0];
+
+            if samples.len() != report.iterations as usize {
+                // Aggregation is driven by how many samples actually arrived rather than by the
+                // configured count, so a failed iteration still renders - but it is worth
+                // saying so, since the aggregate then covers fewer runs than requested.
+                info!(
+                    "Summary for {}/{} has {} of {} configured iterations",
+                    report.test_case_name,
+                    report.client_name,
+                    samples.len(),
+                    report.iterations
+                );
+            }
+
+            if samples.len() > 1 {
+                // Several iterations of the same stream: show the aggregate, then the
+                // individual iterations collapsed beneath it.
+                let mut aggregate = SummaryRow::new_aggregate(&samples[0].1);
+                let mut items = vec![];
+                for (index, (_, row)) in samples.iter().enumerate() {
+                    let count = index + 1;
+                    if count > 1 {
+                        aggregate.update(row, count);
+                    }
+                    let mut item = row.clone();
+                    item.set_aggregate_item(count);
+                    items.push(item);
+                }
+
+                buf.push_str(&self.summary_report_row(
+                    group_config,
+                    report,
+                    &aggregate,
+                    iteration_count_for_group,
+                ));
+                for item in &items {
+                    buf.push_str(&self.summary_report_row(
+                        group_config,
+                        report,
+                        item,
+                        iteration_count_for_group,
+                    ));
+                }
+                iteration_count_for_group += 1;
+            } else {
+                buf.push_str(&self.summary_report_row(
+                    group_config,
+                    report,
+                    &samples[0].1,
+                    iteration_count_for_group,
+                ));
             }
         }
 
@@ -3758,6 +4001,7 @@ impl Html {
         };
 
         let _ = writeln!(buf, "<td>{}{}</td>", indent, report.test_case_name);
+        let _ = writeln!(buf, "<td>{}{}</td>", indent, report.client_name);
 
         for timestamp in timestamp_columns {
             if let Some((_, mos)) = summary_row
@@ -3765,6 +4009,17 @@ impl Html {
                 .iter()
                 .find(|(time, _)| time == timestamp)
             {
+                let _ = writeln!(buf, "<td>{}{:.3}</td>", indent, mos);
+            } else {
+                buf.push_str("<td></td>\n");
+            }
+        }
+
+        let values = summary_row.mos_over_time.iter().map(|(_, mos)| *mos);
+        let min = values.clone().reduce(f32::min);
+        let max = values.reduce(f32::max);
+        for value in [min, max, summary_row.mos_average] {
+            if let Some(mos) = value {
                 let _ = writeln!(buf, "<td>{}{:.3}</td>", indent, mos);
             } else {
                 buf.push_str("<td></td>\n");
@@ -3807,84 +4062,103 @@ impl Html {
         buf.push_str("<thead>\n");
         buf.push_str("<tr>\n");
         buf.push_str("<th style=\"width: 16%\">Name</th>\n");
+        buf.push_str("<th>Client</th>\n");
         for timestamp in &timestamp_columns {
             let _ = writeln!(buf, "<th>{:.1}</th>", *timestamp as f32 / 10.0);
         }
+        buf.push_str("<th>Min</th>\n");
+        buf.push_str("<th>Max</th>\n");
+        buf.push_str("<th>Ave</th>\n");
         buf.push_str("</tr>\n");
         buf.push_str("</thead>\n");
 
         buf.push_str("<tbody>\n");
 
-        let mut summary_rows: Vec<SummaryCallAudioCoreRow> = vec![];
-        let mut aggregate_summary_row: Option<SummaryCallAudioCoreRow> = None;
-        let mut iteration_count_for_group = 0;
+        // Grouped by identity for the same reason as the main summary table: reports arrive
+        // ordered profile -> iteration -> client, so counting `iterations` off the front would
+        // aggregate different clients together. MOS is per client, so there is no stream
+        // component to the key here.
+        #[derive(PartialEq, Eq, Hash, Clone)]
+        struct CoreKey {
+            test_case_name: String,
+            network_profile: String,
+            client_name: String,
+        }
+
+        let mut ordered_keys: Vec<CoreKey> = vec![];
+        let mut samples_by_key: HashMap<CoreKey, Vec<(&Report, SummaryCallAudioCoreRow)>> =
+            HashMap::new();
 
         for result in reports {
             match result {
                 Ok(report) => {
-                    if let Some(mut current_summary_row) = SummaryCallAudioCoreRow::new(report) {
-                        if report.iterations > 1 {
-                            if !summary_rows.is_empty() {
-                                if let Some(aggregate) = &mut aggregate_summary_row {
-                                    aggregate.update(&current_summary_row, summary_rows.len() + 1);
-                                    current_summary_row.set_aggregate_item(summary_rows.len() + 1);
-                                    summary_rows.push(current_summary_row);
-
-                                    if summary_rows.len() == report.iterations as usize {
-                                        buf.push_str(&self.summary_call_audio_core_row(
-                                            group_config,
-                                            report,
-                                            aggregate,
-                                            iteration_count_for_group,
-                                            &timestamp_columns,
-                                        ));
-
-                                        summary_rows.iter().for_each(|summary_line| {
-                                            buf.push_str(&self.summary_call_audio_core_row(
-                                                group_config,
-                                                report,
-                                                summary_line,
-                                                iteration_count_for_group,
-                                                &timestamp_columns,
-                                            ));
-                                        });
-
-                                        summary_rows.clear();
-                                        aggregate_summary_row = None;
-                                        iteration_count_for_group += 1;
-                                    }
-                                } else {
-                                    summary_rows.clear();
-                                    aggregate_summary_row = None;
-                                    iteration_count_for_group += 1;
-                                }
-                            } else {
-                                aggregate_summary_row =
-                                    SummaryCallAudioCoreRow::new_aggregate(report);
-                                current_summary_row.set_aggregate_item(1);
-                                summary_rows.push(current_summary_row);
-                            }
-                        } else {
-                            buf.push_str(&self.summary_call_audio_core_row(
-                                group_config,
-                                report,
-                                &current_summary_row,
-                                iteration_count_for_group,
-                                &timestamp_columns,
-                            ));
+                    // Only clients with a MOS series appear in this table.
+                    if let Some(row) = SummaryCallAudioCoreRow::new(report) {
+                        let key = CoreKey {
+                            test_case_name: report.test_case_name.clone(),
+                            network_profile: report.network_profile.get_name().to_string(),
+                            client_name: report.client_name.clone(),
+                        };
+                        if !samples_by_key.contains_key(&key) {
+                            ordered_keys.push(key.clone());
                         }
-                    } else if !summary_rows.is_empty() {
-                        summary_rows.clear();
-                        aggregate_summary_row = None;
-                        iteration_count_for_group += 1;
+                        samples_by_key.entry(key).or_default().push((report, row));
                     }
                 }
                 Err(err) => {
-                    let column_count = timestamp_columns.len() + 1;
+                    let column_count = timestamp_columns.len() + 4;
                     buf.push_str("<tr class=\"table-dark\">\n");
                     let _ = writeln!(buf, "<td colspan=\"{}\">{:?}</td>", column_count, err);
                     buf.push_str("</tr>\n");
                 }
+            }
+        }
+
+        let mut iteration_count_for_group = 0;
+
+        for key in &ordered_keys {
+            let samples = &samples_by_key[key];
+            let (report, _) = samples[0];
+
+            if samples.len() > 1 {
+                let mut aggregate = samples[0].1.clone();
+                aggregate.row_type = SummaryRowType::Aggregate;
+                let mut items = vec![];
+                for (index, (_, row)) in samples.iter().enumerate() {
+                    let count = index + 1;
+                    if count > 1 {
+                        aggregate.update(row, count);
+                    }
+                    let mut item = row.clone();
+                    item.set_aggregate_item(count);
+                    items.push(item);
+                }
+
+                buf.push_str(&self.summary_call_audio_core_row(
+                    group_config,
+                    report,
+                    &aggregate,
+                    iteration_count_for_group,
+                    &timestamp_columns,
+                ));
+                for item in &items {
+                    buf.push_str(&self.summary_call_audio_core_row(
+                        group_config,
+                        report,
+                        item,
+                        iteration_count_for_group,
+                        &timestamp_columns,
+                    ));
+                }
+                iteration_count_for_group += 1;
+            } else {
+                buf.push_str(&self.summary_call_audio_core_row(
+                    group_config,
+                    report,
+                    &samples[0].1,
+                    iteration_count_for_group,
+                    &timestamp_columns,
+                ));
             }
         }
 

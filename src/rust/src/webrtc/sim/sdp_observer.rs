@@ -99,7 +99,7 @@ pub unsafe fn Rust_disableDtlsAndSetSrtpKey(
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_sessionDescriptionToV4(
+pub unsafe fn Rust_sessionDescriptionToV4Legacy(
     _session_description: webrtc::ptr::Borrowed<RffiSessionDescription>,
     _enable_vp9: bool,
 ) -> webrtc::ptr::Owned<RffiConnectionParametersV4> {
@@ -108,8 +108,33 @@ pub unsafe fn Rust_sessionDescriptionToV4(
         webrtc::ptr::Owned::from_ptr(Box::leak(Box::new(RffiConnectionParametersV4 {
             ice_ufrag: webrtc::ptr::Borrowed::null(),
             ice_pwd: webrtc::ptr::Borrowed::null(),
-            receive_video_codecs: webrtc::ptr::Borrowed::null(),
-            receive_video_codecs_size: 0,
+            bidirectional_video_codecs: webrtc::ptr::Borrowed::null(),
+            bidirectional_video_codecs_size: 0,
+            encode_only_video_codecs: webrtc::ptr::Borrowed::null(),
+            encode_only_video_codecs_size: 0,
+            decode_only_video_codecs: webrtc::ptr::Borrowed::null(),
+            decode_only_video_codecs_size: 0,
+        })))
+    }
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_sessionDescriptionToV4(
+    _session_description: webrtc::ptr::Borrowed<RffiSessionDescription>,
+    _enable_vp9_encode: bool,
+    _enable_vp9_decode: bool,
+) -> webrtc::ptr::Owned<RffiConnectionParametersV4> {
+    info!("Rust_sessionDescriptionToV4(): ");
+    unsafe {
+        webrtc::ptr::Owned::from_ptr(Box::leak(Box::new(RffiConnectionParametersV4 {
+            ice_ufrag: webrtc::ptr::Borrowed::null(),
+            ice_pwd: webrtc::ptr::Borrowed::null(),
+            bidirectional_video_codecs: webrtc::ptr::Borrowed::null(),
+            bidirectional_video_codecs_size: 0,
+            encode_only_video_codecs: webrtc::ptr::Borrowed::null(),
+            encode_only_video_codecs_size: 0,
+            decode_only_video_codecs: webrtc::ptr::Borrowed::null(),
+            decode_only_video_codecs_size: 0,
         })))
     }
 }
@@ -120,7 +145,7 @@ pub unsafe fn Rust_deleteV4(_v4: webrtc::ptr::Owned<RffiConnectionParametersV4>)
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
-pub unsafe fn Rust_sessionDescriptionFromV4(
+pub unsafe fn Rust_sessionDescriptionFromV4Legacy(
     offer: bool,
     _v4: webrtc::ptr::Borrowed<RffiConnectionParametersV4>,
     _enable_tcc_audio: bool,
@@ -137,6 +162,25 @@ pub unsafe fn Rust_sessionDescriptionFromV4(
 }
 
 #[allow(non_snake_case, clippy::missing_safety_doc)]
+pub unsafe fn Rust_sessionDescriptionFromV4(
+    offer: bool,
+    _v4: webrtc::ptr::Borrowed<RffiConnectionParametersV4>,
+    _enable_tcc_audio: bool,
+    _enable_vp9_encode: bool,
+    _enable_vp9_decode: bool,
+    _is_v4_local: bool,
+) -> webrtc::ptr::Owned<RffiSessionDescription> {
+    info!("Rust_sessionDescriptionFromV4(): ");
+    unsafe {
+        if offer {
+            webrtc::ptr::Owned::from_ptr(addr_of!(FAKE_SDP_OFFER))
+        } else {
+            webrtc::ptr::Owned::from_ptr(addr_of!(FAKE_SDP_ANSWER))
+        }
+    }
+}
+
+#[allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
 pub unsafe fn Rust_localDescriptionForGroupCall(
     _ice_ufrag: webrtc::ptr::Borrowed<c_char>,
     _ice_pwd: webrtc::ptr::Borrowed<c_char>,
@@ -144,12 +188,15 @@ pub unsafe fn Rust_localDescriptionForGroupCall(
     _local_demux_id: u32,
     _remote_demux_ids_data: webrtc::ptr::Borrowed<u32>,
     _remote_demux_ids_len: size_t,
+    _remote_demux_ids_require_svc: webrtc::ptr::Borrowed<u32>,
+    _remote_demux_ids_require_svc_len: size_t,
+    _enable_svc: bool,
 ) -> webrtc::ptr::Owned<RffiSessionDescription> {
     info!("Rust_localDescriptionForGroupCall(): ");
     unsafe { webrtc::ptr::Owned::from_ptr(addr_of!(FAKE_SDP_OFFER)) }
 }
 
-#[allow(non_snake_case, clippy::missing_safety_doc)]
+#[allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
 pub unsafe fn Rust_remoteDescriptionForGroupCall(
     _ice_ufrag: webrtc::ptr::Borrowed<c_char>,
     _ice_pwd: webrtc::ptr::Borrowed<c_char>,
@@ -157,6 +204,9 @@ pub unsafe fn Rust_remoteDescriptionForGroupCall(
     _local_demux_id: u32,
     _remote_demux_ids_data: webrtc::ptr::Borrowed<u32>,
     _remote_demux_ids_len: size_t,
+    _remote_demux_ids_require_svc: webrtc::ptr::Borrowed<u32>,
+    _remote_demux_ids_require_svc_len: size_t,
+    _enable_svc: bool,
 ) -> webrtc::ptr::Owned<RffiSessionDescription> {
     info!("Rust_remoteDescriptionForGroupCall(): ");
     unsafe { webrtc::ptr::Owned::from_ptr(addr_of!(FAKE_SDP_ANSWER)) }

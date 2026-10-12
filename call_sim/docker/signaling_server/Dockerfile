@@ -23,6 +23,9 @@ RUN cat <<'EOF' > Cargo.toml
 resolver = "2"
 members = ["protobuf"]
 
+[workspace.lints.clippy]
+unnecessary_wraps = "warn"
+
 [workspace.package]
 version = "0.0.0"
 authors = []

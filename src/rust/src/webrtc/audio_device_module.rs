@@ -7,6 +7,7 @@ use core::convert::AsRef;
 use std::{
     collections::VecDeque,
     ffi::{CStr, c_uchar, c_void},
+    fmt::Display,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -18,18 +19,21 @@ use std::{
 };
 
 use anyhow::{Context as AnyhowContext, anyhow, bail};
-use cubeb::{Context, DeviceId, DeviceType, MonoFrame, StereoFrame, Stream, StreamPrefs};
+use cubeb::{Context, DeviceId, MonoFrame, StereoFrame, Stream, StreamPrefs};
 use cubeb_core::{InputProcessingParams, LogLevel, log_enabled, set_logging};
-use lazy_static::lazy_static;
-use regex::Regex;
+#[cfg(not(feature = "sim"))]
+use webrtc::ffi::audio_device_module::{Rust_needMorePlayData, Rust_recordedDataIsAvailable};
+#[cfg(feature = "sim")]
+use webrtc::sim::audio_device_module::{Rust_needMorePlayData, Rust_recordedDataIsAvailable};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com;
 
 use crate::{
+    core::util::truncate_for_logging,
     webrtc,
     webrtc::{
         audio_device_module_utils::{
-            DeviceCollectionWrapper, copy_and_truncate_string, redact_by_regex, redact_for_logging,
+            DeviceCollectionWrapper, copy_and_truncate_string, do_cubeb_redactions,
         },
         peer_connection_factory::{AudioDevice, AudioDeviceObserver},
     },
@@ -67,6 +71,24 @@ struct PlayData {
     ntp_time: Option<Duration>,
 }
 
+/// Restricted version of cubeb's DeviceType enum that only has input and output.
+/// Basically a convenience type to avoid having to add fallback cases for matches, since we
+/// only use Input or Output, never a combination (or neither)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceType {
+    Input,
+    Output,
+}
+
+impl DeviceType {
+    fn to_cubeb(self) -> cubeb::DeviceType {
+        match self {
+            Self::Input => cubeb::DeviceType::INPUT,
+            Self::Output => cubeb::DeviceType::OUTPUT,
+        }
+    }
+}
+
 type Frame = MonoFrame<i16>;
 type OutFrame = StereoFrame<i16>;
 
@@ -88,6 +110,36 @@ enum Event {
     PlayoutDelay,
     Terminate,
     RegisterAudioObserver(Box<dyn AudioDeviceObserver>),
+    SetCallbackIndirect(usize),
+}
+
+// Print the enum branch without the associated data for logging.
+impl Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Event::RefreshCache(_) => "RefreshCache",
+                Event::SetPlayoutDevice(_) => "SetPlayoutDevice",
+                Event::SetPlayoutDeviceById(_) => "SetPlayoutDeviceById",
+                Event::SetRecordingDevice(_) => "SetRecordingDevice",
+                Event::SetRecordingDeviceById(_) => "SetRecordingDeviceById",
+                Event::InitPlayout => "InitPlayout",
+                Event::StartPlayout => "StartPlayout",
+                Event::StopPlayout => "StopPlayout",
+                Event::InitRecording => "InitRecording",
+                Event::StartRecording => "StartRecording",
+                Event::WarmupRecording => "WarmupRecording",
+                Event::SetInputProcessing(_) => "SetInputProcessing",
+                Event::StopRecording => "StopRecording",
+                Event::PlayoutDelay => "PlayoutDelay",
+                Event::Terminate => "Terminate",
+                Event::RegisterAudioObserver(_) => "RegisterAudioObserver",
+                Event::SetCallbackIndirect(_) => "SetCallbackIndirect",
+            }
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +171,7 @@ struct Worker {
     send_to_webrtc: Arc<AtomicBool>,
     should_play: bool,
     should_record: bool,
+    opaque_callback_data: Option<usize>,
 }
 
 impl Worker {
@@ -127,13 +180,12 @@ impl Worker {
         let devices = {
             // Pause logging because enumeration is noisy
             let _guard = LogDisableGuard::new();
-            self.ctx.enumerate_devices(device_type)?
+            self.ctx.enumerate_devices(device_type.to_cubeb())?
         };
 
         let last = match device_type {
-            DeviceType::INPUT => &self.input_device_cache,
-            DeviceType::OUTPUT => &self.output_device_cache,
-            _ => bail!("Bad device type {:?}", device_type),
+            DeviceType::Input => &self.input_device_cache,
+            DeviceType::Output => &self.output_device_cache,
         };
         let collection = DeviceCollectionWrapper::new(&devices);
         if &collection == last {
@@ -152,7 +204,7 @@ impl Worker {
         let names = collection.extract_names();
 
         match device_type {
-            DeviceType::INPUT => {
+            DeviceType::Input => {
                 if let Some(ado) = &self.audio_device_observer {
                     ado.input_changed(names.clone());
                 }
@@ -167,7 +219,7 @@ impl Worker {
                 self.input_device_cache = collection;
                 *self.input_device_names.lock().unwrap() = names;
             }
-            DeviceType::OUTPUT => {
+            DeviceType::Output => {
                 if let Some(ado) = &self.audio_device_observer {
                     ado.output_changed(names.clone());
                 }
@@ -182,7 +234,6 @@ impl Worker {
                 self.output_device_cache = collection;
                 *self.output_device_names.lock().unwrap() = names;
             }
-            _ => bail!("Bad device type {:?}", device_type),
         }
         Ok(())
     }
@@ -205,12 +256,11 @@ impl Worker {
             // Safety: |device_changed| will remain a valid pointer for the lifetime of the program.
             // |input_data| and |output_data| will live until after the callback is unregistered.
             Ok(self.ctx.register_device_collection_changed(
-                device_type,
+                device_type.to_cubeb(),
                 Some(Worker::device_changed),
                 match device_type {
-                    DeviceType::INPUT => &mut self.input_data,
-                    DeviceType::OUTPUT => &mut self.output_data,
-                    _ => bail!("Bad device type {:?}", device_type),
+                    DeviceType::Input => &mut self.input_data,
+                    DeviceType::Output => &mut self.output_data,
                 } as *mut UpdateCallbackData as *mut c_void,
             )?)
         }
@@ -225,7 +275,7 @@ impl Worker {
             // Safety: We are calling this with None, which will unset the callback,
             // so passing null is safe.
             Ok(self.ctx.register_device_collection_changed(
-                device_type,
+                device_type.to_cubeb(),
                 None,
                 std::ptr::null_mut(),
             )?)
@@ -257,10 +307,10 @@ impl Worker {
         self.input_device_names = Arc::new(Mutex::new(Vec::new()));
         self.output_device_names = Arc::new(Mutex::new(Vec::new()));
 
-        if let Err(e) = self.deregister_device_collection_changed(DeviceType::INPUT) {
+        if let Err(e) = self.deregister_device_collection_changed(DeviceType::Input) {
             warn!("failed to clear input callback: {}", e);
         }
-        if let Err(e) = self.deregister_device_collection_changed(DeviceType::OUTPUT) {
+        if let Err(e) = self.deregister_device_collection_changed(DeviceType::Output) {
             warn!("failed to clear output callback: {}", e);
         }
         // Now safe to invalidate the ctx (note that any references to it, like `DeviceId`s,
@@ -304,6 +354,9 @@ impl Worker {
         // This buffer tracks any extra data that would not fit in `output`,
         // if `output.len()` is not an exact multiple of WEBRTC_WINDOW.
         let mut buffer = VecDeque::<i16>::new();
+        let Some(opaque_callback_data) = self.opaque_callback_data else {
+            bail!("Opaque callback data wasn't initialized");
+        };
         buffer.reserve(WEBRTC_WINDOW);
         builder
             .name("ringrtc output")
@@ -333,8 +386,12 @@ impl Worker {
 
                 // Then, request more data from WebRTC.
                 while written < output.len() {
-                    let play_data =
-                        Worker::need_more_play_data(WEBRTC_WINDOW, NUM_CHANNELS, SAMPLE_FREQUENCY);
+                    let play_data = Worker::need_more_play_data(
+                        opaque_callback_data,
+                        WEBRTC_WINDOW,
+                        NUM_CHANNELS,
+                        SAMPLE_FREQUENCY,
+                    );
                     if play_data.success < 0 {
                         // C function failed; propagate error and don't continue.
                         return play_data.success as isize;
@@ -468,6 +525,9 @@ impl Worker {
         // if `input.len()` is not an exact multiple of WEBRTC_WINDOW.
         let mut buffer = VecDeque::<i16>::new();
         let send_to_webrtc = self.send_to_webrtc.clone();
+        let Some(opaque_callback_data) = self.opaque_callback_data else {
+            bail!("Opaque callback data wasn't initialized");
+        };
         buffer.reserve(WEBRTC_WINDOW);
         builder
             .name("ringrtc input")
@@ -494,6 +554,7 @@ impl Worker {
                         break;
                     }
                     let (ret, _new_mic_level) = Worker::recorded_data_is_available(
+                        opaque_callback_data,
                         chunk.to_vec(),
                         NUM_CHANNELS,
                         SAMPLE_FREQUENCY,
@@ -646,6 +707,7 @@ impl Worker {
         playout_delay_sender: mpsc::Sender<anyhow::Result<u16>>,
     ) {
         for received in receiver {
+            let log_str = received.to_string();
             if let Err(e) = match received {
                 Event::RefreshCache(d) => self.refresh_device_cache(d),
                 Event::SetPlayoutDevice(index) => {
@@ -660,16 +722,12 @@ impl Worker {
                     }
                 }
                 Event::SetPlayoutDeviceById(ref id) => {
-                    if let Some(d) = self.output_device_cache.iter().find(|d| {
-                        d.device_id
-                            .as_ref()
-                            .is_some_and(|actual_id| actual_id == id)
-                    }) {
+                    if let Some(d) = self.output_device_cache.iter().find(|d| &d.device_id == id) {
                         self.update_playout_device(d.devid)
                     } else {
                         Err(anyhow!(
                             "Invalid playout device id {} requested",
-                            redact_for_logging(id)
+                            truncate_for_logging(id)
                         ))
                     }
                 }
@@ -685,16 +743,12 @@ impl Worker {
                     }
                 }
                 Event::SetRecordingDeviceById(ref id) => {
-                    if let Some(d) = self.input_device_cache.iter().find(|d| {
-                        d.device_id
-                            .as_ref()
-                            .is_some_and(|actual_id| actual_id == id)
-                    }) {
+                    if let Some(d) = self.input_device_cache.iter().find(|d| &d.device_id == id) {
                         self.update_recording_device(d.devid)
                     } else {
                         Err(anyhow!(
                             "Invalid recording device id {} requested",
-                            redact_for_logging(id)
+                            truncate_for_logging(id)
                         ))
                     }
                 }
@@ -723,14 +777,19 @@ impl Worker {
                     self.audio_device_observer = Some(audio_device_observer);
                     continue;
                 }
+                Event::SetCallbackIndirect(opaque_callback_data) => {
+                    self.opaque_callback_data = Some(opaque_callback_data);
+                    Ok(())
+                }
             } {
-                warn!("{:?} failed: {:?}", received, e);
+                warn!("{} failed: {:?}", log_str, e);
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn recorded_data_is_available(
+        opauque_callback_data: usize,
         samples: Vec<i16>,
         channels: u32,
         samples_per_sec: u32,
@@ -749,7 +808,8 @@ impl Worker {
         // * The local new_mic_level pointer is valid and this function is synchronous, so it'll
         //   remain valid while it runs.
         let ret = unsafe {
-            crate::webrtc::ffi::audio_device_module::Rust_recordedDataIsAvailable(
+            Rust_recordedDataIsAvailable(
+                opauque_callback_data,
                 samples.as_ptr() as *const c_void,
                 samples.len(),
                 std::mem::size_of::<i16>(),
@@ -766,7 +826,12 @@ impl Worker {
         (ret, new_mic_level)
     }
 
-    fn need_more_play_data(samples: usize, channels: u32, samples_per_sec: u32) -> PlayData {
+    fn need_more_play_data(
+        opaque_callback_data: usize,
+        samples: usize,
+        channels: u32,
+        samples_per_sec: u32,
+    ) -> PlayData {
         let mut data = vec![0i16; samples];
         let mut samples_out = 0usize;
         let mut elapsed_time_ms = 0i64;
@@ -778,7 +843,8 @@ impl Worker {
         // * The local variable pointers are all valid and this function is synchronous, so they'll
         //   remain valid while it runs.
         let ret = unsafe {
-            crate::webrtc::ffi::audio_device_module::Rust_needMorePlayData(
+            Rust_needMorePlayData(
+                opaque_callback_data,
                 samples,
                 std::mem::size_of::<i16>(),
                 channels.try_into().unwrap(), // constant, so unwrap is safe
@@ -850,11 +916,11 @@ impl Worker {
             let mut worker = Worker {
                 ctx,
                 input_data: UpdateCallbackData {
-                    device_type: DeviceType::INPUT,
+                    device_type: DeviceType::Input,
                     sender: sender.clone(),
                 },
                 output_data: UpdateCallbackData {
-                    device_type: DeviceType::OUTPUT,
+                    device_type: DeviceType::Output,
                     sender: sender.clone(),
                 },
                 playout_device: None,
@@ -870,15 +936,16 @@ impl Worker {
                 send_to_webrtc: Arc::new(AtomicBool::new(true)),
                 should_play: false,
                 should_record: false,
+                opaque_callback_data: None,
             };
-            if let Err(e) = worker.register_device_collection_changed(DeviceType::INPUT) {
+            if let Err(e) = worker.register_device_collection_changed(DeviceType::Input) {
                 error!("Failed to register input device callback: {}", e);
                 if let Err(e) = started_signal.send(None) {
                     error!("Further, failed to notify about start failure: {}", e);
                 }
                 return;
             }
-            if let Err(e) = worker.register_device_collection_changed(DeviceType::OUTPUT) {
+            if let Err(e) = worker.register_device_collection_changed(DeviceType::Output) {
                 error!("Failed to register output device callback: {}", e);
                 if let Err(e) = started_signal.send(None) {
                     error!("Further, failed to notify about start failure: {}", e);
@@ -888,13 +955,13 @@ impl Worker {
 
             // Refresh both caches before we signal a successful start so that callers can
             // immediately enumerate devices.
-            if let Err(e) = sender.send(Event::RefreshCache(DeviceType::INPUT)) {
+            if let Err(e) = sender.send(Event::RefreshCache(DeviceType::Input)) {
                 error!("Failed to request initial input device refresh: {}", e);
                 if let Err(e) = started_signal.send(None) {
                     error!("Further, failed to notify about start failure: {}", e);
                 }
             }
-            if let Err(e) = sender.send(Event::RefreshCache(DeviceType::OUTPUT)) {
+            if let Err(e) = sender.send(Event::RefreshCache(DeviceType::Output)) {
                 error!("Failed to request initial output device refresh: {}", e);
                 if let Err(e) = started_signal.send(None) {
                     error!("Further, failed to notify about start failure: {}", e);
@@ -1008,69 +1075,15 @@ impl Drop for LogDisableGuard {
 }
 
 fn log_c_str(s: &CStr) {
-    lazy_static! {
-        static ref LINE_RE: Regex = Regex::new(r"(?<ident>[^\s]+:\d+)(?<message>.*)").unwrap();
-    }
-    // These patterns describe the places friendly_name, device_id, and group_id are logged,
-    // for the backends where those are potentially sensitive.
-    //
-    // The capture groups will be redacted.
-    //
-    // Note that there's another one that isn't here: cubeb.c logs something like:
-    //   LOG("DeviceID: \"%s\"%s\n"
-    //       "\tName:\t\"%s\"\n"
-    //       ...
-    // But we just ignore this line altogether.
-    lazy_static! {
-        static ref REDACTION_RES: Vec<Regex> = vec![
-            // cubeb_wasapi.cpp: wasapi_find_bt_handsfree_output_device
-            Regex::new(r"Found matching device for (.*): (.*)").unwrap(),
-            // cubeb_wasapi.cpp: wasapi_collection_notification_client::OnDefaultDeviceChanged
-            Regex::new(r"collection: Audio device default changed, id = (.*)\.").unwrap(),
-            // cubeb_wasapi.cpp: wasapi_collection_notification_client::OnDeviceStateChanged
-            Regex::new(r"collection: Audio device state changed, id = (.*), state = .*\.").unwrap(),
-            // cubeb_wasapi.cpp: wasapi_endpoint_notification_client::OnDefaultDeviceChanged
-            Regex::new(r"endpoint: Audio device default changed flow=.* role=.* new_device_id=(.*)\.").unwrap(),
-            // cubeb-coreaudio-rs src/backend/mod.rs audiounit_get_devices_of_type
-            Regex::new(r"Device \d+ \((.*)\) has \d+.*channels").unwrap(),
-            // cubeb-coreaudio-rs src/backend/mod.rs should_block_vpio_for_device_pair
-            Regex::new(r#".* uid="(.*)", model_uid="(.*)", transport_type=.*, source=.*, source_name="(.*)", name="(.*)", manufacturer=".*""#).unwrap(),
-        ];
-    }
     if PAUSE_LOGGING.load(Ordering::SeqCst) {
         return;
     }
 
     match s.to_str() {
         Ok(msg) => {
-            if msg.contains("DeviceID") && msg.contains("Name") {
-                // Shortcut:
-                // Entirely suppress spammy lines that log all devices (we already do this)
-                // See `log_device` in cubeb.c
-                return;
+            if let Some(s) = do_cubeb_redactions(msg) {
+                info!("cubeb: {s}");
             }
-
-            // Assume valid lines are formatted "file:lineno" and ignore anything
-            // not matching
-            let Some(caps) = LINE_RE.captures(msg) else {
-                return;
-            };
-            let ident = &caps["ident"];
-            let contents = &caps["message"];
-
-            let to_log = if cfg!(debug_assertions) {
-                contents.to_string()
-            } else {
-                let mut out = contents.to_string();
-                for re in REDACTION_RES.iter() {
-                    if let Some(new) = redact_by_regex(re, contents) {
-                        out = new;
-                        break;
-                    }
-                }
-                out
-            };
-            info!("cubeb: {}{}", ident, to_log);
         }
         Err(e) => {
             warn!("cubeb log message not UTF-8: {:?}", e);
@@ -1130,8 +1143,16 @@ impl AudioDeviceModule {
     }
 
     // Main initialization and termination
-    pub fn init(&mut self) -> i32 {
-        // Don't bother re-initializing -- new handled it.
+    pub fn init(&mut self, opaque_callback_data: usize) -> i32 {
+        // Don't need to fully initialize (new did most of it), but *do* pass
+        // this data from the C++ layer
+        if let Err(e) = self
+            .mpsc_sender
+            .send(Event::SetCallbackIndirect(opaque_callback_data))
+        {
+            error!("Failed to request SetCallbackIndirect: {}", e);
+            return -1;
+        }
         0
     }
 
@@ -1152,19 +1173,18 @@ impl AudioDeviceModule {
         device_type: DeviceType,
     ) -> anyhow::Result<Vec<Option<AudioDevice>>> {
         let collection = match device_type {
-            DeviceType::INPUT => self
+            DeviceType::Input => self
                 .input_device_names
                 .as_ref()
                 .lock()
                 .map_err(|_| anyhow!("failed to lock"))?
                 .clone(),
-            DeviceType::OUTPUT => self
+            DeviceType::Output => self
                 .output_device_names
                 .as_ref()
                 .lock()
                 .map_err(|_| anyhow!("failed to lock"))?
                 .clone(),
-            _ => bail!("Bad device type {:?}", device_type),
         };
         Ok(collection)
     }
@@ -1179,9 +1199,9 @@ impl AudioDeviceModule {
             ),
             device.devid(),
             // Truncate these fields, as they can contain e.g. mac addresses or user-specified names.
-            device.device_id().map(redact_for_logging),
-            device.friendly_name().map(redact_for_logging),
-            device.group_id().map(redact_for_logging),
+            device.device_id().map(truncate_for_logging),
+            device.friendly_name().map(truncate_for_logging),
+            device.group_id().map(truncate_for_logging),
             device.vendor_name(),
             device.device_type(),
             device.state(),
@@ -1199,7 +1219,7 @@ impl AudioDeviceModule {
 
     // Device enumeration
     pub fn playout_devices(&mut self) -> i16 {
-        let raw = match self.enumerate_devices(DeviceType::OUTPUT) {
+        let raw = match self.enumerate_devices(DeviceType::Output) {
             Ok(devices) => devices.len().try_into().unwrap_or(-1),
             Err(e) => {
                 error!("Failed to get playout device count: {}", e);
@@ -1214,7 +1234,7 @@ impl AudioDeviceModule {
     }
 
     pub fn recording_devices(&mut self) -> i16 {
-        let raw = match self.enumerate_devices(DeviceType::INPUT) {
+        let raw = match self.enumerate_devices(DeviceType::Input) {
             Ok(devices) => devices.len().try_into().unwrap_or(-1),
             Err(e) => {
                 error!("Failed to get recording device count: {}", e);
@@ -1253,7 +1273,7 @@ impl AudioDeviceModule {
         name_out: webrtc::ptr::Borrowed<c_uchar>,
         guid_out: webrtc::ptr::Borrowed<c_uchar>,
     ) -> i32 {
-        match self.enumerate_devices(DeviceType::OUTPUT) {
+        match self.enumerate_devices(DeviceType::Output) {
             Ok(devices) => {
                 match AudioDeviceModule::copy_name_and_id(index, &devices, name_out, guid_out) {
                     Ok(_) => 0,
@@ -1276,7 +1296,7 @@ impl AudioDeviceModule {
         name_out: webrtc::ptr::Borrowed<c_uchar>,
         guid_out: webrtc::ptr::Borrowed<c_uchar>,
     ) -> i32 {
-        match self.enumerate_devices(DeviceType::INPUT) {
+        match self.enumerate_devices(DeviceType::Input) {
             Ok(devices) => {
                 match AudioDeviceModule::copy_name_and_id(index, &devices, name_out, guid_out) {
                     Ok(_) => 0,
@@ -1583,11 +1603,11 @@ impl AudioDeviceModule {
     }
 
     pub fn get_audio_playout_devices(&mut self) -> anyhow::Result<Vec<Option<AudioDevice>>> {
-        self.enumerate_devices(DeviceType::OUTPUT)
+        self.enumerate_devices(DeviceType::Output)
     }
 
     pub fn get_audio_recording_devices(&mut self) -> anyhow::Result<Vec<Option<AudioDevice>>> {
-        self.enumerate_devices(DeviceType::INPUT)
+        self.enumerate_devices(DeviceType::Input)
     }
 
     pub fn warmup_recording(&mut self) -> anyhow::Result<()> {
@@ -1597,12 +1617,7 @@ impl AudioDeviceModule {
         Ok(())
     }
 
-    fn set_device_by_id(
-        &mut self,
-        id: &str,
-        device_type: DeviceType,
-        event: Event,
-    ) -> anyhow::Result<()> {
+    fn set_device_by_id(&mut self, id: &str, device_type: DeviceType) -> anyhow::Result<()> {
         let devices = self.enumerate_devices(device_type)?;
         // Do a quick plausibility check to see if we know about this device.
         // Of course, the worker will still have to check again in case the device gets unplugged,
@@ -1611,49 +1626,46 @@ impl AudioDeviceModule {
             .iter()
             .any(|dopt| dopt.as_ref().is_some_and(|d| d.unique_id == id))
         {
+            let event = match device_type {
+                DeviceType::Output => Event::SetPlayoutDeviceById(id.to_string()),
+                DeviceType::Input => Event::SetRecordingDeviceById(id.to_string()),
+            };
+            let event_str = event.to_string();
             if let Err(e) = self.mpsc_sender.send(event) {
-                bail!("Failed to request Set*DeviceById {}", e);
+                bail!("Failed to request {event_str}: {e}");
             }
         } else {
             if devices.is_empty() {
-                info!("Likely failed to get device due to benign startup race");
+                info!("Likely failed to get {device_type:?} device due to benign startup race");
+                return Ok(());
             }
-            bail!("No device with ID {}", redact_for_logging(id));
+            bail!(
+                "No {device_type:?} device with ID {}",
+                truncate_for_logging(id)
+            );
         }
         Ok(())
     }
 
     pub fn set_playout_device_by_id(&mut self, id: &str) -> anyhow::Result<()> {
-        self.set_device_by_id(
-            id,
-            DeviceType::OUTPUT,
-            Event::SetPlayoutDeviceById(id.to_string()),
-        )
+        self.set_device_by_id(id, DeviceType::Output)
     }
 
     pub fn set_recording_device_by_id(&mut self, id: &str) -> anyhow::Result<()> {
-        self.set_device_by_id(
-            id,
-            DeviceType::INPUT,
-            Event::SetRecordingDeviceById(id.to_string()),
-        )
+        self.set_device_by_id(id, DeviceType::Input)
     }
 
     fn set_device_by_index(&mut self, index: usize, device_type: DeviceType) -> anyhow::Result<()> {
-        let event = match device_type {
-            DeviceType::INPUT => Event::SetRecordingDevice(index),
-            DeviceType::OUTPUT => Event::SetPlayoutDevice(index),
-            _ => bail!("Unsupported device type: {:?}", device_type),
-        };
         match self.enumerate_devices(device_type) {
             Ok(devices) => match devices.get(index) {
                 Some(_) => {
+                    let event = match device_type {
+                        DeviceType::Input => Event::SetRecordingDevice(index),
+                        DeviceType::Output => Event::SetPlayoutDevice(index),
+                    };
+                    let event_str = event.to_string();
                     if let Err(e) = self.mpsc_sender.send(event) {
-                        Err(anyhow!(
-                            "Failed to send {:?} device change event: {}",
-                            device_type,
-                            e
-                        ))
+                        Err(anyhow!("Failed to send {event_str}: {e}"))
                     } else {
                         Ok(())
                     }
@@ -1687,7 +1699,7 @@ impl AudioDeviceModule {
     }
 
     pub fn set_playout_device(&mut self, index: usize) -> anyhow::Result<()> {
-        let out = self.set_device_by_index(index, DeviceType::OUTPUT);
+        let out = self.set_device_by_index(index, DeviceType::Output);
         if out.is_ok() {
             self.has_playout_device = true;
         }
@@ -1695,7 +1707,7 @@ impl AudioDeviceModule {
     }
 
     pub fn set_recording_device(&mut self, index: usize) -> anyhow::Result<()> {
-        let out = self.set_device_by_index(index, DeviceType::INPUT);
+        let out = self.set_device_by_index(index, DeviceType::Input);
         if out.is_ok() {
             self.has_recording_device = true;
         }
@@ -1729,7 +1741,7 @@ mod audio_device_module_tests {
         )
         .expect("failed to set logging");
         let mut adm = AudioDeviceModule::new().unwrap();
-        assert_eq!(adm.init(), 0);
+        assert_eq!(adm.init(0), 0);
 
         assert_eq!(adm.backend_name(), expected_backend.to_string());
     }
