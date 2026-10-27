@@ -13,7 +13,7 @@ use log::*;
 
 use crate::{
     common::Result,
-    webrtc::peer_connection_factory::{AudioDevice, PeerConnectionFactory},
+    webrtc::peer_connection_factory::{AudioDeviceList, DefaultAudioDevice, PeerConnectionFactory},
 };
 
 // We may need to try a few times to get audio devices; they're not necessarily
@@ -24,13 +24,26 @@ use crate::{
 // Only try for up to AUDIO_DEVICE_TIMEOUT before giving up.
 const AUDIO_DEVICE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Does the specified device list contain **any** devices?
+fn has_any_devices(device_list: &AudioDeviceList) -> bool {
+    if !device_list.list.is_empty() {
+        return true;
+    }
+    match &device_list.default {
+        DefaultAudioDevice::Windows(defaults) => {
+            defaults.communications_device.is_some() || defaults.console_device.is_some()
+        }
+        DefaultAudioDevice::NonWindows(default) => default.is_some(),
+    }
+}
+
 fn wait_for_playout_devices(
     peer_connection_factory: &mut PeerConnectionFactory,
-) -> Result<Vec<AudioDevice>> {
+) -> Result<AudioDeviceList> {
     let start = Instant::now();
     while start.elapsed() < AUDIO_DEVICE_TIMEOUT {
         if let Ok(device_list) = peer_connection_factory.get_audio_playout_devices()
-            && !device_list.is_empty()
+            && has_any_devices(&device_list)
         {
             return Ok(device_list);
         }
@@ -41,11 +54,11 @@ fn wait_for_playout_devices(
 
 fn wait_for_recording_devices(
     peer_connection_factory: &mut PeerConnectionFactory,
-) -> Result<Vec<AudioDevice>> {
+) -> Result<AudioDeviceList> {
     let start = Instant::now();
     while start.elapsed() < AUDIO_DEVICE_TIMEOUT {
         if let Ok(device_list) = peer_connection_factory.get_audio_recording_devices()
-            && !device_list.is_empty()
+            && has_any_devices(&device_list)
         {
             return Ok(device_list);
         }
@@ -62,7 +75,16 @@ pub fn set_default_audio_devices(
     let recording_devices = wait_for_recording_devices(peer_connection_factory)?;
     info!("Audio recording devices: {:?}", recording_devices);
 
-    peer_connection_factory.set_audio_playout_device(0)?;
-    peer_connection_factory.set_audio_recording_device(0)?;
+    let default_playout = playout_devices
+        .default
+        .default_for_voip()
+        .ok_or(anyhow!("No default playout device"))?;
+    let default_recording = recording_devices
+        .default
+        .default_for_voip()
+        .ok_or(anyhow!("No default recording device"))?;
+
+    peer_connection_factory.set_audio_playout_device_by_id(&default_playout.unique_id, 0)?;
+    peer_connection_factory.set_audio_recording_device_by_id(&default_recording.unique_id, 0)?;
     Ok(())
 }
