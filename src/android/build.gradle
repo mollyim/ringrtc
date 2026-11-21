@@ -60,8 +60,12 @@ android {
     }
 
     publishing {
-        singleVariant("release")
-        singleVariant("debug")
+        singleVariant("release") {
+            withSourcesJar()
+        }
+        singleVariant("debug") {
+            withSourcesJar()
+        }
     }
 }
 
@@ -80,6 +84,13 @@ tasks.register('javadoc', Javadoc) {
     if (project.hasProperty('docsDir')) {
         destinationDir = new File(docsDir, 'javadoc')
     }
+    options.addBooleanOption('notimestamp', true)
+}
+
+tasks.register('javadocJar', Jar) {
+    dependsOn tasks.named('javadoc')
+    from tasks.named('javadoc').map { it.destinationDir }
+    archiveClassifier.set('javadoc')
 }
 
 androidComponents {
@@ -96,10 +107,16 @@ afterEvaluate {
         pom.packaging = 'aar'
         pom.url = 'https://github.com/mollyim/ringrtc/'
 
+        pom.developers {
+            developer {
+                organizationUrl = 'https://molly.im'
+            }
+        }
+
         pom.scm {
             url = 'https://github.com/mollyim/ringrtc/'
-            connection = 'scm:git:git://github.com/mollyim/ringrtc.git'
-            developerConnection = 'scm:git:git@github.com:mollyim/ringrtc.git'
+            connection = 'scm:git:https://github.com/mollyim/ringrtc.git'
+            developerConnection = 'scm:git:ssh://git@github.com/mollyim/ringrtc.git'
         }
 
         pom.licenses {
@@ -115,6 +132,7 @@ afterEvaluate {
         publications {
             mavenJava(MavenPublication) {
                 from components.release
+                artifact javadocJar
 
                 group = 'im.molly'
                 artifactId = base.archivesName.get()
@@ -129,6 +147,7 @@ afterEvaluate {
 
             mavenJavaDebug(MavenPublication) {
                 from components.debug
+                artifact javadocJar
 
                 group = 'im.molly'
                 artifactId = base.archivesName.get() + '-debug'

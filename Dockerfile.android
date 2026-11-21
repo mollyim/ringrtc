@@ -121,7 +121,7 @@ FROM scratch AS artifacts
 # Stage 6: artifacts
 # Build outputs only, laid out exactly as consumers expect.
 
-COPY --from=assemble /root/.m2/repository/ /
+COPY --from=assemble --exclude='**/maven-metadata-local.xml' /root/.m2/repository/ /
 
 FROM deps-overlay AS default
 
