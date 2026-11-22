@@ -164,6 +164,8 @@ class NativeCallManager {
 (NativeCallManager.prototype as any).processEvents = Native.cm_processEvents;
 (NativeCallManager.prototype as any).setRtcStatsInterval =
   Native.cm_setRtcStatsInterval;
+(NativeCallManager.prototype as any).logBookmarkMessage =
+  Native.cm_logBookmarkMessage;
 
 type GroupId = Uint8Array<ArrayBuffer>;
 type GroupCallUserId = Uint8Array<ArrayBuffer>;
@@ -2092,6 +2094,14 @@ export class RingRTCType {
     }
     return promise;
   }
+
+  /**
+   * Log a unique "marker" message. Can be used to expose a button to users to indicate
+   * when in the call they are experiencing a problem.
+   */
+  logBookmarkMessage(): void {
+    this.callManager.logBookmarkMessage();
+  }
 }
 
 type CallConfig = {
@@ -3408,6 +3418,7 @@ export type CallManager = {
   getAudioOutputs(): AudioDeviceList | undefined;
   setAudioOutputById(id: string, requestId: number): void;
   setVoiceProcessingEnabled(enabled: boolean, requestId: number): void;
+  logBookmarkMessage(): void;
 };
 
 export type CallManagerCallbacks = {

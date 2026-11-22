@@ -38,8 +38,10 @@ jobs:
         cache-targets: "false"
     - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --component clippy --target aarch64-linux-android,aarch64-apple-ios
     - name: Install extra Rust tools
-      run: cargo +stable install --version 0.8.4 --locked cargo-about
-    - run: shellcheck **/*.sh bin/build-aar bin/build-desktop bin/build-ios bin/build-javadoc bin/build-rustdoc bin/fetch-artifact bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check bin/set-up-for-cocoapods src/rust/scripts/run-tests
+      run: |
+        cargo +stable install --version 0.8.4 --locked cargo-about
+        cargo +stable install --version $(cat config/cbindgen-version) --locked cbindgen
+    - run: shellcheck **/*.sh bin/build-aar bin/build-desktop bin/build-ios bin/build-javadoc bin/build-rustdoc bin/check-ffi-version bin/check-swift-package bin/fetch-artifact bin/generate-ffi-header bin/gsync-webrtc bin/prepare-workspace bin/run-ios-tests bin/rust-lint-check src/rust/scripts/run-tests
     # Skip the Python scripts not written with flake8 style. (Try not to add more.)
     # We ignore 503; it's contradictory with 504!
     # https://www.flake8rules.com/rules/W503.html, https://www.flake8rules.com/rules/W504.html
@@ -51,8 +53,14 @@ jobs:
     - run: python3 -m mypy --python-version 3.13 --strict bin/convert_webrtc_acknowledgments.py bin/fetch-artifact.py
     - name: Check acknowledgments
       run: ./bin/regenerate_acknowledgments.sh && git diff --name-status --exit-code acknowledgments
+    - name: Check FFI header
+      run: ./bin/generate-ffi-header --verify
+    - name: Check FFI version marker
+      run: ./bin/check-ffi-version
+    - name: Check Swift package
+      run: ./bin/check-swift-package
     - name: Clippy
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
     - name: Clippy (with sim)
       run: cargo clippy --all-targets --features sim -- -D warnings
     - name: Clippy (Android)

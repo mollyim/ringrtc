@@ -1371,6 +1371,10 @@ pub fn raise_hand(
     Ok(())
 }
 
+pub fn log_bookmark_message() {
+    CallManager::<AndroidPlatform>::log_bookmark_message();
+}
+
 fn jint_to_restrictions(raw_restrictions: jint) -> Option<CallLinkRestrictions> {
     match raw_restrictions {
         0 => Some(CallLinkRestrictions::None),

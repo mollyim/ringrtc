@@ -6,6 +6,7 @@
 package org.signal.ringrtc;
 
 import android.content.Context;
+import android.media.MediaFormat;
 import android.util.LongSparseArray;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -212,10 +213,12 @@ public class CallManager {
   private static VideoConfig computeFinalFromAppVideoConfig(@Nullable EglBase     eglBase,
                                                             @NonNull  VideoConfig appVideoConfig ) {
     VideoConfig finalConfig = new VideoConfig();
-    finalConfig.enableHardwareVp9Encode = Util.deviceSupportsVp9HardwareEncoder(eglBase) && !isHardwareEncodeBlocked() && appVideoConfig.enableHardwareVp9Encode;
-    finalConfig.enableHardwareVp9Decode = Util.deviceSupportsVp9HardwareDecoder(eglBase) && appVideoConfig.enableHardwareVp9Decode;
+    finalConfig.enableHardwareVp9Encode = Util.deviceSupportsHardwareEncoder(eglBase, MediaFormat.MIMETYPE_VIDEO_VP9) && !isHardwareEncodeBlocked() && appVideoConfig.enableHardwareVp9Encode;
+    finalConfig.enableHardwareVp9Decode = Util.deviceSupportsHardwareDecoder(eglBase, MediaFormat.MIMETYPE_VIDEO_VP9) && appVideoConfig.enableHardwareVp9Decode;
     finalConfig.enableSoftwareVp9Encode = appVideoConfig.enableSoftwareVp9Encode;
     finalConfig.enableSoftwareVp9Decode = appVideoConfig.enableSoftwareVp9Decode;
+    finalConfig.enableHardwareH265Encode = Util.deviceSupportsHardwareEncoder(eglBase, MediaFormat.MIMETYPE_VIDEO_HEVC) && !isHardwareEncodeBlocked() && appVideoConfig.enableHardwareH265Encode;
+    finalConfig.enableHardwareH265Decode = Util.deviceSupportsHardwareDecoder(eglBase, MediaFormat.MIMETYPE_VIDEO_HEVC) && appVideoConfig.enableHardwareH265Decode;
     return finalConfig;
   }
 
@@ -241,8 +244,8 @@ public class CallManager {
           eglBase.getEglBaseContext(),
           true,
           true,
-          // remove VP9 hardware options if not enabled
-          videoConfig.enableHardwareVp9Encode ? null : Util::filterVp9Support);
+          // remove VP9/H265 hardware options if not enabled
+          Util.codecFilter(videoConfig.enableHardwareVp9Encode, videoConfig.enableHardwareH265Encode));
       encoderFactory = new DefaultVideoEncoderFactory(hwFactory);
     }
 
@@ -252,9 +255,12 @@ public class CallManager {
     } else {
       HardwareVideoDecoderFactory hwFactory = new HardwareVideoDecoderFactory(
           eglBase.getEglBaseContext(),
-          // remove VP9 hardware options if not enabled
-          videoConfig.enableHardwareVp9Decode ? null : Util::filterVp9Support);
-      VideoDecoderFactory swFactory = new PlatformSoftwareVideoDecoderFactory(eglBase.getEglBaseContext());
+          // remove VP9/H265 hardware options if not enabled
+          Util.codecFilter(videoConfig.enableHardwareVp9Decode, videoConfig.enableHardwareH265Decode));
+      // Always prevent H265 software decoder
+      VideoDecoderFactory swFactory = new PlatformSoftwareVideoDecoderFactory(
+          eglBase.getEglBaseContext(),
+          Util.codecFilter(videoConfig.enableSoftwareVp9Decode, /* allowH265= */ false));
       decoderFactory = new DefaultVideoDecoderFactory(hwFactory, swFactory);
     }
 
@@ -513,7 +519,9 @@ public class CallManager {
     byte dredDurationByte = dredDuration == null ? 0 : dredDuration.byteValue();
     boolean enableVp9Encode = finalVideoConfig.enableHardwareVp9Encode || finalVideoConfig.enableSoftwareVp9Encode;
     boolean enableVp9Decode = finalVideoConfig.enableHardwareVp9Decode || finalVideoConfig.enableSoftwareVp9Decode;
-    CallConfig callConfig = new CallConfig(dataMode.ordinal(), dredDurationByte, enableVp9Encode, enableVp9Decode, statsIntervalSecs);
+    boolean enableH265Encode = finalVideoConfig.enableHardwareH265Encode;
+    boolean enableH265Decode = finalVideoConfig.enableHardwareH265Decode;
+    CallConfig callConfig = new CallConfig(dataMode.ordinal(), dredDurationByte, enableVp9Encode, enableVp9Decode, enableH265Encode, enableH265Decode, statsIntervalSecs);
     ringrtcProceed(nativeCallManager,
                    callId.longValue(),
                    callContext,
@@ -1319,6 +1327,15 @@ public class CallManager {
 
   /**
    *
+   * Log a unique "marker" message. Can be used to expose a button to users to indicate
+   * when in the call they are experiencing a problem.
+   */
+  public void logBookmarkMessage() {
+    ringrtcLogBookmarkMessage();
+  }
+
+  /**
+   *
    * Creates and returns a GroupCall object. Defaults call to:
    * - videoEnabled == false
    * - audioEnabled == false
@@ -1429,7 +1446,7 @@ public class CallManager {
     return groupCall;
   }
 
-  /****************************************************************************
+  /* ***************************************************************************
    *
    * Below are only called by the native CM
    *
@@ -2809,4 +2826,6 @@ public class CallManager {
                                  byte[] authCredentialPresentation,
                                  byte[] rootKeyBytes)
     throws CallException;
+
+  private native void ringrtcLogBookmarkMessage();
 }

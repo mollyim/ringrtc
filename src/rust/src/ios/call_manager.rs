@@ -728,3 +728,7 @@ pub fn validate_call_message_as_opaque_ring(
     call_manager::validate_call_message_as_opaque_ring(&message, age, validate_group_ring)
         .map_err(|e| anyhow!("{:?}", e))
 }
+
+pub fn log_bookmark_message() {
+    CallManager::<IosPlatform>::log_bookmark_message();
+}

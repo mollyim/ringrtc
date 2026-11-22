@@ -66,9 +66,9 @@ Install Rust target support for iOS, including compiling the stdlib from source,
     rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
     rustup component add rust-src
 
-Install cbindgen via `cargo`:
+Install cbindgen via `cargo`, at the version in `config/cbindgen-version`:
 
-    cargo install cbindgen
+    cargo install --locked --version $(cat config/cbindgen-version) cbindgen
 
 ### Electron
 
@@ -203,11 +203,15 @@ This will produce release builds for all architectures.
 When the build is complete, the libraries will be available here:
 
     out/<debug|release>/WebRTC.xcframework
-    out/<debug|release>/libringrtc/ringrtc.h
-    out/<debug|release>/libringrtc/*/libringrtc.a
+    out/<debug|release>/LibRingRTCFfi.xcframework
 
-The Swift sources in src/ios/SignalRingRTC can then be used to build a framework
-that links the appropriate libringrtc.a for each architecture.
+With `USE_PREBUILD=1`, only LibRingRTCFfi.xcframework is built.
+
+Apps use the Swift package at the root of the repository, plus a `LibRingRTCFfi` binary target from
+the same release's `ringrtc-ios-build-v<version>.xcframework.zip`. To test a local build, use this
+checkout as a local package and point that binary target at a copy of
+`out/release/LibRingRTCFfi.xcframework`. To also use a local WebRTC, quit Xcode and reopen it with
+`RINGRTC_WEBRTC_XCFRAMEWORK=out/release/WebRTC.xcframework` set.
 
 ### Desktop
 
@@ -252,12 +256,18 @@ If the "open files" value is small, such as 256, try increasing it:
 
 ### iOS Testing
 
-To run tests for iOS, you can use the SignalRingRTC project. You might need to install
-the dependencies, at least once:
+To build and run tests on an iOS simulator:
 
-    cd src/ios/SignalRingRTC
-    bundle install
-    bundle exec pod install
+    bin/run-ios-tests
+
+Extra arguments go to `xcodebuild`, for example
+`bin/run-ios-tests -only-testing:SignalRingRTCTests/CallLinkTests`.
+
+To run the tests from Xcode, build `out/release/LibRingRTCFfi.xcframework` for the simulator, quit
+Xcode if it is open, and then open the package with `RINGRTC_FFI_XCFRAMEWORK` set:
+
+    bin/build-ios --ringrtc-only --host-sim-only
+    RINGRTC_FFI_XCFRAMEWORK=out/release/LibRingRTCFfi.xcframework xed .
 
 Some of the tests rely on creating incoming connections, which your system "Firewall Options" may
 prevent. All tests should pass if you do not have "Block all incoming connections" on and `xctest`

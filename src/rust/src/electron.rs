@@ -2469,6 +2469,13 @@ fn setRtcStatsInterval(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(cx.undefined().upcast())
 }
 
+#[allow(non_snake_case)]
+#[allow(clippy::unnecessary_wraps)] // neon expects this type
+fn logBookmarkMessage(mut cx: FunctionContext) -> JsResult<JsValue> {
+    CallManager::<NativePlatform>::log_bookmark_message();
+    Ok(cx.undefined().upcast())
+}
+
 fn audio_device_to_js_object<'a, T>(cx: &mut T, device: &AudioDevice) -> JsResult<'a, JsObject>
 where
     T: Context<'a>,
@@ -3492,5 +3499,6 @@ fn register(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("cm_setVoiceProcessingEnabled", setVoiceProcessingEnabled)?;
     cx.export_function("cm_setRtcStatsInterval", setRtcStatsInterval)?;
     cx.export_function("cm_processEvents", processEvents)?;
+    cx.export_function("cm_logBookmarkMessage", logBookmarkMessage)?;
     Ok(())
 }

@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import SignalRingRTC.RingRTC
+import Foundation
+internal import RingRTCFfi
 
 // Here is the new lite/modularized pattern for FFI for a module called X
 // (so far where X is "sfu" or "http")

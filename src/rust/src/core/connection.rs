@@ -633,8 +633,7 @@ where
             let ice_gatherer = peer_connection.create_shared_ice_gatherer()?;
             peer_connection.use_shared_ice_gatherer(&ice_gatherer)?;
 
-            // Start with asymmetric negotiation, and fall back if needed.
-            let observer = create_csd_observer(Some(true));
+            let observer = create_csd_observer();
             peer_connection.create_offer(observer.as_ref());
             // This must be kept in sync with call.rs where it passes in V2 into create_connection.
             let offer = observer.get_result()?;
@@ -648,20 +647,13 @@ where
             )?;
 
             info!(
-                "Outgoing offer: bidirectional codecs: {:?}, encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}",
-                v4_offer.receive_video_codecs,
+                "Outgoing offer: encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}",
                 v4_offer.encode_only_video_codecs,
                 v4_offer.decode_only_video_codecs,
                 v4_offer.max_bitrate_bps
             );
 
-            // For backwards compatibility, we require that clients send all 3 of these in
-            // outgoing offers.
-            // Note that this will **NOT** limit later removal of the receive_video_codecs field,
-            // because this is outgoing-offer-only.
-            // We need to be less strict about what we receive.
-            if v4_offer.receive_video_codecs.is_empty()
-                || v4_offer.encode_only_video_codecs.is_empty()
+            if v4_offer.encode_only_video_codecs.is_empty()
                 || v4_offer.decode_only_video_codecs.is_empty()
             {
                 warn!(
@@ -728,12 +720,12 @@ where
             // Call create_offer again for the side effects it has with setting up the state of the
             // RtpTransceivers:
             // https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/pc/sdp_offer_answer.cc;l=4307-4312;drc=a6544377bc1dde24394255c0c83b43dcaa8905db
-            let observer = create_csd_observer(Some(true));
+            let observer = create_csd_observer();
             peer_connection.create_offer(observer.as_ref());
             let _ = observer.get_result()?;
 
             let (mut offer, mut answer, remote_public_key) = if let (
-                Some(mut v4_offer),
+                Some(v4_offer),
                 Some(v4_answer),
             ) =
                 (offer.to_v4(), received.answer.to_v4())
@@ -741,10 +733,10 @@ where
                 if v4_answer.encode_only_video_codecs.is_empty()
                     || v4_answer.decode_only_video_codecs.is_empty()
                 {
-                    // This indicates that the remote doesn't support asymmetric, so clear these to force
-                    // us back into the legacy path.
-                    v4_offer.encode_only_video_codecs.clear();
-                    v4_offer.decode_only_video_codecs.clear();
+                    warn!(
+                        "A required video codec field in incoming answer is empty. encode: {:?}, decode: {:?}",
+                        v4_answer.encode_only_video_codecs, v4_answer.decode_only_video_codecs,
+                    );
                 }
                 // Set the remote max based on the bitrate in the answer.
                 bandwidth_controller.remote_max = v4_answer.max_bitrate_bps.map(DataRate::from_bps);
@@ -754,8 +746,7 @@ where
                     SessionDescription::answer_from_v4(&v4_answer, &self.call_config, false)?;
 
                 info!(
-                    "Incoming answer: bidirectional codecs: {:?}, encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}, bandwidth_controller: {:?}",
-                    v4_answer.receive_video_codecs,
+                    "Incoming answer: encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}, bandwidth_controller: {:?}",
                     v4_answer.encode_only_video_codecs,
                     v4_answer.decode_only_video_codecs,
                     v4_answer.max_bitrate_bps,
@@ -849,8 +840,7 @@ where
                 bandwidth_controller.remote_max = v4_offer.max_bitrate_bps.map(DataRate::from_bps);
 
                 info!(
-                    "Incoming offer: bidirectional codecs: {:?}, encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}, bandwidth_controller: {:?}",
-                    v4_offer.receive_video_codecs,
+                    "Incoming offer: encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}, bandwidth_controller: {:?}",
                     v4_offer.encode_only_video_codecs,
                     v4_offer.decode_only_video_codecs,
                     v4_offer.max_bitrate_bps,
@@ -885,13 +875,12 @@ where
             };
 
             let observer = create_ssd_observer();
-            let offer_supports_asymmetric = offer.supports_asymmetric;
             peer_connection.set_remote_description(observer.as_ref(), offer);
             // on_add_stream can happen while SetRemoteDescription is happening.
             // But they won't be processed until start_fsm() is called below.
             observer.get_result()?;
 
-            let observer = create_csd_observer(offer_supports_asymmetric);
+            let observer = create_csd_observer();
             peer_connection.create_answer(observer.as_ref());
             let mut answer = observer.get_result()?;
             if let Some(answer_key) = &answer_key {
@@ -906,8 +895,7 @@ where
                 )?;
 
                 info!(
-                    "Outgoing answer: bidirectional codecs: {:?}, encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}, bandwidth_controller: {:?}",
-                    v4_answer.receive_video_codecs,
+                    "Outgoing answer: encode codecs: {:?}, decode codecs: {:?}, max_bitrate: {:?}, bandwidth_controller: {:?}",
                     v4_answer.encode_only_video_codecs,
                     v4_answer.decode_only_video_codecs,
                     v4_answer.max_bitrate_bps,
@@ -1726,7 +1714,7 @@ where
     ///
     /// `Note:` The current thread is blocked while waiting for the
     /// FSM to signal that termination is complete.
-    pub fn terminate(&mut self) -> Result<()> {
+    pub fn terminate(&mut self) {
         info!("terminate(): ref_count: {}", self.ref_count());
 
         // Set the state before the terminate_requested flag, so the FSM
@@ -1742,21 +1730,24 @@ where
         // Wait for the FSM to quiesce.
         if let Err(err) = util::try_scoped(|| {
             self.inject_event(ConnectionEvent::Terminate)?;
-            self.wait_for_terminate()?;
-            if let Err(err) = self.set_state(ConnectionState::Terminated) {
-                warn!("terminate(): failed to notify Terminated: {}", err);
-            }
-            Ok(())
+            self.wait_for_terminate()
         }) {
             // Log-and-continue so that teardown can continue below.
             error!("terminate(): failed to quiesce the FSM: {}", err);
+        }
+
+        if let Err(err) = self.set_state(ConnectionState::Terminated) {
+            warn!(
+                "terminate(): failed to set and notify Terminated state: {}",
+                err
+            );
         }
 
         // Stop the timer thread, if any.
         self.tick_context.stopper().stop_all_and_join();
 
         // Free up webrtc related resources.
-        let mut webrtc = self.webrtc.lock()?;
+        let mut webrtc = self.webrtc.lock_or_ignore_poison();
 
         if let Ok(peer_connection) = webrtc.peer_connection() {
             peer_connection.close();
@@ -1792,14 +1783,11 @@ where
         // Box and let it go out of scope.
         match webrtc.connection_ptr.take() {
             Some(v) => {
-                let _ = unsafe { ptr_as_box(v.as_ptr() as *mut Connection<T>)? };
-                Ok(())
+                if let Err(err) = unsafe { ptr_as_box(v.as_ptr() as *mut Connection<T>) } {
+                    warn!("terminate(): failed to free the connection_ptr: {}", err);
+                }
             }
-            None => Err(RingRtcError::OptionValueNotSet(
-                String::from("terminate()"),
-                String::from("connection_ptr"),
-            )
-            .into()),
+            None => warn!("terminate(): connection_ptr was not set"),
         }
     }
 
@@ -2261,6 +2249,21 @@ where
     #[cfg(feature = "sim")]
     pub fn fsm_terminated(&self) -> bool {
         *self.terminate_condvar.0.lock().unwrap()
+    }
+
+    /// Poison the webrtc mutex, as a panic holding it would.
+    ///
+    /// `Called By:` Test infrastructure
+    #[cfg(feature = "sim")]
+    pub fn poison_webrtc_lock(&self) {
+        let webrtc = Arc::clone(&self.webrtc);
+        // The guard must still be held when the thread panics, so bind it.
+        let panicked = thread::spawn(move || {
+            let _guard = webrtc.lock();
+            panic!("poisoning the webrtc mutex");
+        })
+        .join();
+        assert!(panicked.is_err(), "the poisoning thread should panic");
     }
 
     /// Block the caller until the FSM signals termination, or the timeout

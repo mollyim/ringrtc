@@ -1,0 +1,35 @@
+#!/bin/bash
+
+#
+# Copyright 2026 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+
+set -euo pipefail
+
+MARKER_FILES=(
+    src/rust/src/ios/api/call_manager_interface.rs
+    src/ios/SignalRingRTC/RingRTCFfi/ringrtc.h
+    src/ios/SignalRingRTC/SignalRingRTC/FFIVersion.swift
+)
+
+cd "$(dirname "$0")"/..
+
+property() {
+    grep "^$1=" config/version.properties | cut -d'=' -f2
+}
+
+MARKER="ringrtcVersion_$(property ringrtc.version.major)_$(property ringrtc.version.minor)_$(property ringrtc.version.revision)"
+
+STALE=
+for file in "${MARKER_FILES[@]}"; do
+    if ! grep -q -w "${MARKER}" "${file}"; then
+        echo "error: ${file} does not use ${MARKER}, the version marker for config/version.properties" >&2
+        STALE=yes
+    fi
+done
+
+if [[ -n "${STALE}" ]]; then
+    echo 'note: rename the marker in the Rust and Swift files, then run bin/generate-ffi-header' >&2
+    exit 1
+fi

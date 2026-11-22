@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import SignalRingRTC.RingRTC
+import Foundation
 
 internal func fail(
     _ message: String,

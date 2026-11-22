@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -17,6 +18,9 @@ import tarfile
 from typing import BinaryIO
 
 UNVERIFIED_DOWNLOAD_NAME = "unverified.tmp"
+
+# iOS prebuilds are zipped xcframeworks (for Swift Package Manager) rather than tarballs.
+IOS_PLATFORM = 'ios-xcframework'
 
 fetch_script_file_path = os.path.realpath(__file__)
 fetch_script_file_dir = os.path.dirname(fetch_script_file_path)
@@ -49,6 +53,8 @@ def resolve_arch(arch_name: str) -> str:
 def resolve_platform(platform_name: str) -> str:
     if platform_name in PREBUILD_CHECKSUMS:
         return platform_name
+    if platform_name == 'ios':
+        return IOS_PLATFORM
     if platform_name == 'desktop':
         return resolve_platform(platform.system().lower())
 
@@ -160,7 +166,10 @@ def main() -> None:
         platform_name = resolve_platform(args.platform)
 
         build_mode = 'debug' if args.debug else 'release'
-        url = "https://build-artifacts.signal.org/libraries/webrtc-{}-{}-{}.tar.bz2".format(args.webrtc_version, platform_name, build_mode)
+        if platform_name == IOS_PLATFORM:
+            url = "https://build-artifacts.signal.org/libraries/webrtc-{}-ios-{}.xcframework.zip".format(args.webrtc_version, build_mode)
+        else:
+            url = "https://build-artifacts.signal.org/libraries/webrtc-{}-{}-{}.tar.bz2".format(args.webrtc_version, platform_name, build_mode)
         if not checksum:
             checksum = PREBUILD_CHECKSUMS[platform_name]
 
@@ -173,6 +182,17 @@ def main() -> None:
     open_archive = download_if_needed(archive_file, url, checksum, archive_dir)
 
     if args.skip_extract:
+        return
+
+    if archive_file.endswith('.xcframework.zip'):
+        # The zip contains a top-level WebRTC.xcframework, which goes in the same place
+        # bin/build-ios puts it. Use ditto (which created the archive) to preserve its metadata.
+        build_mode = 'debug' if args.debug else 'release'
+        extract_dir = os.path.join(args.output_dir, build_mode)
+        print("extracting {} to {}".format(archive_file, extract_dir), file=sys.stderr)
+        open_archive.close()
+        shutil.rmtree(os.path.join(extract_dir, 'WebRTC.xcframework'), ignore_errors=True)
+        subprocess.run(["ditto", "-x", "-k", os.path.join(archive_dir, archive_file), extract_dir], check=True)
         return
 
     print("extracting {} to {}".format(archive_file, args.output_dir), file=sys.stderr)

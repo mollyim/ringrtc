@@ -1,0 +1,65 @@
+#!/bin/bash
+
+#
+# Copyright 2026 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+
+set -euo pipefail
+
+HEADER=src/ios/SignalRingRTC/RingRTCFfi/ringrtc.h
+
+cd "$(dirname "$0")"/..
+
+CBINDGEN_VERSION=$(cat config/cbindgen-version)
+
+usage()
+{
+    echo 'usage: generate-ffi-header [--verify]
+    where:
+        --verify checks that the committed header is up to date instead of writing it'
+}
+
+VERIFY=
+
+while [ "${1:-}" != "" ]; do
+    case $1 in
+        --verify )
+            VERIFY=yes
+            ;;
+        -h | --help )
+            usage
+            exit
+            ;;
+        * )
+            usage
+            exit 1
+    esac
+    shift
+done
+
+INSTALLED_VERSION=$(cbindgen --version 2>/dev/null || true)
+if [ "${INSTALLED_VERSION}" != "cbindgen ${CBINDGEN_VERSION}" ]; then
+    echo "error: ${HEADER} must be generated with cbindgen ${CBINDGEN_VERSION}, but found ${INSTALLED_VERSION:-no cbindgen}" >&2
+    echo "note: install it with: cargo install --locked --version ${CBINDGEN_VERSION} cbindgen" >&2
+    exit 1
+fi
+
+generate() {
+    cbindgen --quiet src/rust/src/lib.rs --config src/rust/cbindgen.toml -o "$1"
+}
+
+if [[ -z "${VERIFY}" ]]; then
+    generate "${HEADER}"
+    exit
+fi
+
+GENERATED=$(mktemp)
+trap 'rm -f "${GENERATED}"' EXIT
+generate "${GENERATED}"
+
+if ! diff -u "${HEADER}" "${GENERATED}"; then
+    echo "error: ${HEADER} is out of date" >&2
+    echo 'note: regenerate it by running bin/generate-ffi-header' >&2
+    exit 1
+fi

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import SignalRingRTC.RingRTC
+internal import RingRTCFfi
 import WebRTC
 
 // Errors that the Call Manager APIs can throw.
@@ -857,6 +857,15 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
         }
 
         ringrtcReceivedCallMessage(ringRtcCallManager, senderUuidSlice, senderDeviceId, localDeviceId, messageSlice, messageAgeSec)
+    }
+
+    // MARK: - Debugging
+
+    // Log a unique "marker" message. Can be used to expose a button to users to indicate
+    // when in the call they are experiencing a problem.
+    @MainActor
+    public func logBookmarkMessage() {
+        ringrtcLogBookmarkMessage()
     }
 
     // MARK: - Group Call

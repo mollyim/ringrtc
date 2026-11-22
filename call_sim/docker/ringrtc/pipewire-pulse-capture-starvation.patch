@@ -1,0 +1,56 @@
+From 2acd45fa33d3d70af40461e6725f37c92aa5b723 Mon Sep 17 00:00:00 2001
+From: Gabor Lukacs <lukacs@topgroups.ca>
+Date: Mon, 20 Jul 2026 07:57:52 -0300
+Subject: [PATCH] protocol-pulse: don't let a pending sibling message starve
+ capture
+
+---
+ src/modules/module-protocol-pulse/client.c      |  3 ++-
+ .../module-protocol-pulse/pulse-server.c        | 17 ++++++++++++++---
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/module-protocol-pulse/client.c b/src/modules/module-protocol-pulse/client.c
+index b189fdbe7..907e395a4 100644
+--- a/src/modules/module-protocol-pulse/client.c
++++ b/src/modules/module-protocol-pulse/client.c
+@@ -223,7 +223,8 @@ static int client_try_flush_messages(struct client *client)
+ {
+ 	pw_log_trace("client %p: flushing", client);
+ 
+-	spa_assert(!client->disconnect);
++	if (client->disconnect)
++		return -ENOTCONN;
+ 
+ 	while (!spa_list_is_empty(&client->out_messages)) {
+ 		struct message *m = spa_list_first(&client->out_messages, struct message, link);
+diff --git a/src/modules/module-protocol-pulse/pulse-server.c b/src/modules/module-protocol-pulse/pulse-server.c
+index b1a757a56..3d3cdda42 100644
+--- a/src/modules/module-protocol-pulse/pulse-server.c
++++ b/src/modules/module-protocol-pulse/pulse-server.c
+@@ -1357,9 +1357,20 @@ do_process_done(struct spa_loop *loop,
+ 		avail = spa_ringbuffer_get_read_index(&stream->ring, &index);
+ 
+ 		if (!spa_list_is_empty(&client->out_messages)) {
+-			pw_log_debug("%p: [%s] pending read:%u avail:%d",
+-					stream, client->name, index, avail);
+-			return 0;
++			/* Try to flush the pending messages first. A control
++			 * message queued for a sibling stream in this same
++			 * cycle (a playback stream's REQUEST) would otherwise
++			 * make us skip this cycle, and when one is queued
++			 * every cycle it starves this capture stream
++			 * persistently while the connection itself keeps
++			 * flowing. Only skip when the messages really cannot
++			 * be flushed (socket backed up). */
++			if (client_flush_messages(client) < 0 ||
++			    !spa_list_is_empty(&client->out_messages)) {
++				pw_log_debug("%p: [%s] pending read:%u avail:%d",
++						stream, client->name, index, avail);
++				return 0;
++			}
+ 		}
+ 
+ 		if (avail <= 0) {
+-- 
+2.39.5
+

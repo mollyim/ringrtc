@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+import Foundation
+internal import RingRTCFfi
+
 /// Overall call quality statistics.
 ///
 /// Contains connection-level metrics and separate audio/video quality stats.

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+#
+# Copyright 2026 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+
+set -euo pipefail
+
+cd "$(dirname "$0")"/..
+
+bin/build-ios --ringrtc-only --host-sim-only
+export RINGRTC_FFI_XCFRAMEWORK=out/release/LibRingRTCFfi.xcframework
+
+# Pick the first available iPhone on the newest installed iOS runtime.
+SIMULATOR=$(xcrun simctl list --json devices available iPhone |
+    jq -r '[.devices | to_entries | sort_by(.key | [scan("[0-9]+") | tonumber]) | reverse | .[].value | select(length > 0) | .[0]][0].udid // empty')
+if [[ -z "${SIMULATOR}" ]]; then
+    echo 'error: no iPhone simulator available' >&2
+    exit 1
+fi
+
+xcodebuild test -scheme SignalRingRTC-Package -destination "platform=iOS Simulator,id=${SIMULATOR}" "$@"

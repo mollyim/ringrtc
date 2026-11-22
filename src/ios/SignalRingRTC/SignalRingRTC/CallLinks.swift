@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import SignalRingRTC.RingRTC
+import Foundation
+internal import RingRTCFfi
 
 public struct CallLinkRootKey: CustomStringConvertible {
     public struct ValidationError: Error {}

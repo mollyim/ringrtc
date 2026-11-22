@@ -3,8 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import SignalRingRTC.RingRTC
+internal import RingRTCFfi
 import WebRTC
+
+// Redeclares the ringrtc.h typedef so apps can use it without importing RingRTCFfi.
+public typealias DemuxId = UInt32
 
 /// Represents the connection state to a media server for a group call.
 @available(iOSApplicationExtension, unavailable)

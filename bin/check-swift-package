@@ -1,0 +1,36 @@
+#!/bin/bash
+
+#
+# Copyright 2026 Signal Messenger, LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+
+# Checks that the WebRTC binary target in Package.swift uses the production URL for the WebRTC
+# version in config/version.properties and the ios-xcframework checksum in
+# config/webrtc_artifact_checksums.json, so a WebRTC update can't leave Package.swift behind.
+
+set -euo pipefail
+
+cd "$(dirname "$0")"/..
+
+property() {
+    grep "^$1=" config/version.properties | cut -d'=' -f2
+}
+
+URL="https://build-artifacts.signal.org/libraries/webrtc-$(property webrtc.version)-ios-release.xcframework.zip"
+CHECKSUM=$(jq -r '."ios-xcframework"' config/webrtc_artifact_checksums.json)
+
+STALE=
+if ! grep -q -F "url: \"${URL}\"" Package.swift; then
+    echo "error: Package.swift does not use ${URL}, the WebRTC archive for config/version.properties" >&2
+    STALE=yes
+fi
+if ! grep -q -F "checksum: \"${CHECKSUM}\"" Package.swift; then
+    echo "error: Package.swift does not use ${CHECKSUM}, the ios-xcframework checksum in config/webrtc_artifact_checksums.json" >&2
+    STALE=yes
+fi
+
+if [[ -n "${STALE}" ]]; then
+    echo 'note: update the WebRTC binary target in Package.swift' >&2
+    exit 1
+fi

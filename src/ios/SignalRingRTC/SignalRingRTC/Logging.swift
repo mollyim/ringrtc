@@ -6,7 +6,7 @@
 // FFI that allows RingRTC to make logging requests through
 // a Delegate implemented by the application.
 
-import SignalRingRTC.RingRTC
+internal import RingRTCFfi
 import WebRTC
 
 public enum RingRTCLogLevel: UInt8, Comparable {
@@ -84,6 +84,10 @@ public protocol RingRTCLogger: Sendable {
 extension RingRTCLogger {
     /// Can only be called once in the lifetime of a program; later calls will result in a warning and will not change the active logger.
     public func setUpRingRTCLogging(maxLogLevel: RingRTCLogLevel = .info) {
+        // Makes a mismatched libringrtc fail to link (see checkFFIVersion()). It's here because apps
+        // set up logging before using anything else in RingRTC.
+        checkFFIVersion()
+
         let logger = Logger(logger: self)
         let opaqueLogger = Unmanaged.passRetained(logger)
         let success = rtc_log_init(

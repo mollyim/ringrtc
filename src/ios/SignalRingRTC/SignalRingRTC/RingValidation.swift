@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import SignalRingRTC.RingRTC
+import Foundation
+internal import RingRTCFfi
 
 /// Type of media for call at time of origination.
 public enum CallMediaType: Int32 {

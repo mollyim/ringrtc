@@ -1,3 +1,5 @@
 # Prevent auto-merging of generated acknowledgment files
 acknowledgments/acknowledgments.* -merge -text
 acknowledgments/acknowledgments.*.hbs merge text=auto
+
+src/ios/SignalRingRTC/RingRTCFfi/ringrtc.h linguist-generated

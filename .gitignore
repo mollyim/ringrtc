@@ -21,3 +21,5 @@ target
 .spr.yml
 src/android/.settings
 call_sim/docker/local_sfu
+/.build
+/.swiftpm
