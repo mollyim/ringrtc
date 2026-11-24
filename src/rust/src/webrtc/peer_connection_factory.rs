@@ -157,8 +157,8 @@ impl ProxyInfo {
     pub fn new(
         proxy_type: RffiProxyType,
         hostname: &str,
-        password: &str,
         username: &str,
+        password: &str,
         port: u16,
     ) -> Self {
         Self {
@@ -188,6 +188,24 @@ impl ProxyInfo {
             password: webrtc::ptr::Borrowed::from_ptr(self.password.as_ptr()),
             port: self.port,
         }
+    }
+}
+
+#[cfg(test)]
+mod proxy_info_tests {
+    use super::{ProxyInfo, RffiProxyType};
+
+    #[test]
+    fn keeps_username_and_password_in_their_correct_fields() {
+        let proxy = ProxyInfo::new(
+            RffiProxyType::Socks5,
+            "proxy.example",
+            "alice",
+            "secret",
+            1080,
+        );
+        assert_eq!(proxy.username.to_str().unwrap(), "alice");
+        assert_eq!(proxy.password.to_str().unwrap(), "secret");
     }
 }
 
