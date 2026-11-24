@@ -100,16 +100,9 @@ FROM toolchain AS source
 WORKDIR /ringrtc
 COPY . .
 
-FROM source AS deps-overlay
+FROM source AS assemble
 
-# Stage 4: deps-overlay
-# Hook for pre-built dependencies, supplied via named build contexts.
-
-# This project has none, so the stage is an empty alias of source.
-
-FROM deps-overlay AS assemble
-
-# Stage 5: assemble
+# Stage 4: assemble
 # Build stage for the project.
 # Can be overridden with a prebuilt image via:
 #  --build-context assemble=docker-image://<image>
@@ -118,14 +111,14 @@ RUN make assemble
 
 FROM scratch AS artifacts
 
-# Stage 6: artifacts
+# Stage 5: artifacts
 # Build outputs only, laid out exactly as consumers expect.
 
 COPY --from=assemble --exclude='**/maven-metadata-local.xml' /root/.m2/repository/ /
 
-FROM deps-overlay AS default
+FROM source AS default
 
-# Stage 7: default
+# Stage 6: default
 # Runnable build environment without prebuilt outputs.
 # Left as the final stage so it becomes the default target.
 
