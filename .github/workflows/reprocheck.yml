@@ -63,6 +63,14 @@ jobs:
       with:
         cache-read-only: true
 
+    - name: Locate Gradle dependency cache
+      id: gradle-cache
+      if: steps.fetch.outcome != 'success'
+      run: |
+        if [ -d "$HOME/.gradle/caches" ]; then
+          echo "ctx=gradle-ro-cache=$HOME/.gradle/caches" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Rebuild artifacts
       if: steps.fetch.outcome != 'success'
       uses: docker/build-push-action@v7
@@ -73,7 +81,7 @@ jobs:
         target: artifacts
         outputs: type=local,dest=artifacts
         provenance: false
-        build-contexts: gradle-ro-cache=/home/runner/.gradle/caches
+        build-contexts: ${{ steps.gradle-cache.outputs.ctx }}
         cache-from: type=gha,scope=ringrtc-builder
 
     - name: Upload the artifacts
