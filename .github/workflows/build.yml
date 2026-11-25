@@ -14,7 +14,7 @@ permissions:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v6
@@ -33,20 +33,48 @@ jobs:
       with:
         cache-read-only: true
 
-    - name: Build Docker image
-      run: docker build -f Dockerfile.android -t ringrtc-builder .
+    - name: Build the toolchain
+      uses: docker/build-push-action@v7
+      with:
+        builder: default
+        context: .
+        file: Dockerfile.android
+        target: toolchain
+        outputs: type=cacheonly
+        cache-from: type=gha,scope=ringrtc-builder
+        cache-to: type=gha,scope=ringrtc-builder,mode=max
 
-    - name: Compile library inside Docker
+    - name: Assemble and test
+      uses: docker/build-push-action@v7
+      with:
+        builder: default
+        context: .
+        file: Dockerfile.android
+        target: test
+        outputs: type=cacheonly
+        build-contexts: gradle-ro-cache=/home/runner/.gradle/caches
+        cache-from: type=gha,scope=ringrtc-builder
+
+    - name: Export assembled artifacts
+      uses: docker/build-push-action@v7
+      with:
+        builder: default
+        context: .
+        file: Dockerfile.android
+        target: artifacts
+        outputs: type=local,dest=artifacts
+        provenance: false
+        build-contexts: gradle-ro-cache=/home/runner/.gradle/caches
+        cache-from: type=gha,scope=ringrtc-builder
+
+    - name: List artifact checksums
+      working-directory: artifacts
       run: |
-        mkdir -p "$RUNNER_TEMP/m2-repository"
-        docker run --rm \
-          -v "$HOME/.gradle/caches:/.gradle-ro-cache:ro" \
-          -v "$RUNNER_TEMP/m2-repository:/root/.m2/repository" \
-          ringrtc-builder assemble
+        find . -type f -printf '%P\0' | sort -z | xargs -0 -r sha256sum -b --
 
-    - name: Export Maven repository
+    - name: Archive release artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ringrtc-maven-local
-        path: "${{ runner.temp }}/m2-repository"
+        name: ringrtc-artifacts
+        path: artifacts
         if-no-files-found: error

@@ -1,7 +1,7 @@
 FROM docker.io/eclipse-temurin:21.0.11_10-jdk-noble@sha256:15ec53e5373fbede42fb2c1ec5b7e3ccbe1b0c9ad232ed67a16ed1b8b47070b6 AS base
 
 # Stage 1: base
-# Minimal environment with only system tools. This stage is stable and reusable across merges.
+# Minimal system environment for the builder.
 
 RUN apt-get install -y --no-install-recommends --update \
       curl \
@@ -76,7 +76,7 @@ COPY gradlew /ringrtc/
 COPY gradle/wrapper /ringrtc/gradle/wrapper
 RUN /ringrtc/gradlew --version
 
-# Set optional read-only Gradle cache (mount at runtime)
+# Set optional read-only Gradle cache
 ENV GRADLE_RO_DEP_CACHE=/.gradle-ro-cache
 
 # Install Rust toolchain and targets
@@ -100,25 +100,38 @@ FROM toolchain AS source
 WORKDIR /ringrtc
 COPY . .
 
+FROM scratch AS gradle-ro-cache
+
+# Auxiliary stage: gradle-ro-cache
+# Empty fallback for the optional read-only Gradle dependency cache.
+# Override with --build-context gradle-ro-cache=<cache-dir>.
+
 FROM source AS assemble
 
 # Stage 4: assemble
 # Build stage for the project.
-# Can be overridden with a prebuilt image via:
-#  --build-context assemble=docker-image://<image>
 
-RUN make assemble
+RUN --mount=type=bind,from=gradle-ro-cache,target=/.gradle-ro-cache,ro \
+    make assemble
+
+FROM assemble AS test
+
+# Stage 5: test
+# Test the assembled project.
+
+RUN --mount=type=bind,from=gradle-ro-cache,target=/.gradle-ro-cache,ro \
+    make test
 
 FROM scratch AS artifacts
 
-# Stage 5: artifacts
-# Build outputs only, laid out exactly as consumers expect.
+# Stage 6: artifacts
+# Build outputs only, preserving the directory structure required by downstream builds.
 
 COPY --from=assemble --exclude='**/maven-metadata-local.xml' /root/.m2/repository/ /
 
 FROM source AS default
 
-# Stage 6: default
+# Stage 7: default
 # Runnable build environment without prebuilt outputs.
 # Left as the final stage so it becomes the default target.
 

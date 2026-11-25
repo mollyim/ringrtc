@@ -1,0 +1,127 @@
+name: Reproducible Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Enter the version to check"
+        required: true
+      rebuild:
+        description: "Rebuild from source instead of reusing the Build workflow archive"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TAG_REF: "${{ github.event.inputs.version || github.ref_name }}"
+
+jobs:
+  build:
+    name: Prepare artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: "${{ env.TAG_REF }}"
+
+    - name: Restore artifacts from cache
+      id: fetch
+      if: github.event.inputs.rebuild != 'true'
+      continue-on-error: true
+      run: |
+        run_id=$(gh run list --workflow build.yml --commit "$(git rev-parse HEAD)" \
+          --status success --json databaseId --limit 1 --jq '.[0].databaseId // empty')
+        if [ -z "$run_id" ]; then
+          echo "No successful Build run found for this commit" >&2
+          exit 1
+        fi
+        gh run download "$run_id" --name ringrtc-artifacts --dir artifacts
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Free up disk space in runner
+      if: steps.fetch.outcome != 'success'
+      uses: ./.github/actions/disk-cleanup
+
+    - name: Set up JDK 21
+      if: steps.fetch.outcome != 'success'
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: 21
+
+    - name: Setup Gradle
+      if: steps.fetch.outcome != 'success'
+      uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-read-only: true
+
+    - name: Rebuild artifacts
+      if: steps.fetch.outcome != 'success'
+      uses: docker/build-push-action@v7
+      with:
+        builder: default
+        context: .
+        file: Dockerfile.android
+        target: artifacts
+        outputs: type=local,dest=artifacts
+        provenance: false
+        build-contexts: gradle-ro-cache=/home/runner/.gradle/caches
+        cache-from: type=gha,scope=ringrtc-builder
+
+    - name: Upload the artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: ringrtc-artifacts
+        path: artifacts
+        if-no-files-found: error
+
+  verify:
+    name: Verify checksums
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: "${{ env.TAG_REF }}"
+
+    - name: Read checksums from release tag
+      run: |
+        git for-each-ref "refs/tags/${TAG_REF}" --format='%(contents:body)' \
+          | awk 'found && NF; /^sha256sums:$/ { found = 1 }' > manifest.sha256sums
+        if [ ! -s manifest.sha256sums ]; then
+          echo "::error::No sha256sums manifest found in tag ${TAG_REF}" >&2
+          exit 1
+        fi
+
+    - name: Download the artifacts
+      uses: actions/download-artifact@v8
+      with:
+        name: ringrtc-artifacts
+        path: artifacts
+
+    - name: List the checksums
+      working-directory: artifacts
+      run: |
+        find . -type f -printf '%P\0' | sort -z | xargs -0 -r sha256sum -b -- > ../rebuilt.sha256sums
+        cat ../rebuilt.sha256sums
+
+    - name: Compare the checksums
+      run: diff manifest.sha256sums rebuilt.sha256sums
+
+    - name: Archive the checksum evidence
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ringrtc-reprocheck-${{ env.TAG_REF }}
+        path: |
+          manifest.sha256sums
+          rebuilt.sha256sums
