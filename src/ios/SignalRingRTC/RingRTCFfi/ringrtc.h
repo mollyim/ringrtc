@@ -65,6 +65,13 @@ typedef enum RffiPeerConnectionKind RffiPeerConnectionKind;
 typedef uint8_t RffiPeerConnectionKind;
 #endif // __STDC_VERSION__ >= 202311L
 
+typedef enum RffiProxyType {
+    None,
+    Https,
+    Socks5,
+    Unknown,
+} RffiProxyType;
+
 typedef enum SrtpCryptoSuite {
     Aes128CmSha1 = 1,
     AeadAes128Gcm = 7,
@@ -1000,6 +1007,16 @@ typedef struct RffiIceServers {
 
 typedef const struct RffiIceServers *Borrowed_RffiIceServers;
 
+typedef struct RffiProxyInfo {
+    enum RffiProxyType proxy_type;
+    Borrowed_c_char hostname;
+    Borrowed_c_char username;
+    Borrowed_c_char password;
+    uint16_t port;
+} RffiProxyInfo;
+
+typedef const struct RffiProxyInfo *Borrowed_RffiProxyInfo;
+
 typedef const struct RffiAudioTrack *OwnedRc_RffiAudioTrack;
 
 typedef const struct RffiVideoSource *OwnedRc_RffiVideoSource;
@@ -1619,6 +1636,7 @@ jlong Java_org_signal_ringrtc_GroupCall_ringrtcCreateGroupCallClient(EnvUnowned 
                                                                      jlong call_manager,
                                                                      JByteArray group_id,
                                                                      JString sfu_url,
+                                                                     JObject jni_proxy_info,
                                                                      JByteArray hkdf_extra_info,
                                                                      jint audio_levels_interval_millis,
                                                                      jbyte dred_duration,
@@ -1633,6 +1651,7 @@ jlong Java_org_signal_ringrtc_GroupCall_ringrtcCreateCallLinkCallClient(EnvUnown
                                                                         JClass _cls,
                                                                         jlong call_manager,
                                                                         JString sfu_url,
+                                                                        JObject jni_proxy_info,
                                                                         JByteArray endorsement_public_key,
                                                                         JByteArray auth_presentation,
                                                                         JByteArray call_link_bytes,
@@ -2340,6 +2359,7 @@ extern OwnedRc_RffiPeerConnection Rust_createPeerConnection(BorrowedRc_RffiPeerC
                                                             Borrowed_RffiAudioJitterBufferConfig audio_jitter_buffer_config,
                                                             int32_t audio_rtcp_report_interval_ms,
                                                             Borrowed_RffiIceServers ice_servers,
+                                                            Borrowed_RffiProxyInfo proxy_info,
                                                             BorrowedRc_RffiAudioTrack outgoing_audio_track,
                                                             BorrowedRc_RffiVideoTrack outgoing_video_track);
 
