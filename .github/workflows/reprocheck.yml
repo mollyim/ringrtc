@@ -82,7 +82,7 @@ jobs:
         outputs: type=local,dest=artifacts
         provenance: false
         build-contexts: ${{ steps.gradle-cache.outputs.ctx }}
-        cache-from: type=gha,scope=ringrtc-builder
+        # cache-from: type=gha,scope=ringrtc-builder
 
     - name: Upload the artifacts
       uses: actions/upload-artifact@v7

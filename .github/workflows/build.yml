@@ -48,8 +48,8 @@ jobs:
         file: Dockerfile.android
         target: toolchain
         outputs: type=cacheonly
-        cache-from: type=gha,scope=ringrtc-builder
-        cache-to: type=gha,scope=ringrtc-builder,mode=max
+        # cache-from: type=gha,scope=ringrtc-builder
+        # cache-to: type=gha,scope=ringrtc-builder,mode=max
 
     - name: Assemble and test
       uses: docker/build-push-action@v7
@@ -60,7 +60,7 @@ jobs:
         target: test
         outputs: type=cacheonly
         build-contexts: ${{ steps.gradle-cache.outputs.ctx }}
-        cache-from: type=gha,scope=ringrtc-builder
+        # cache-from: type=gha,scope=ringrtc-builder
 
     - name: Export assembled artifacts
       uses: docker/build-push-action@v7
@@ -72,7 +72,7 @@ jobs:
         outputs: type=local,dest=artifacts
         provenance: false
         build-contexts: ${{ steps.gradle-cache.outputs.ctx }}
-        cache-from: type=gha,scope=ringrtc-builder
+        # cache-from: type=gha,scope=ringrtc-builder
 
     - name: List artifact checksums
       working-directory: artifacts
